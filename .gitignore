@@ -38,7 +38,9 @@ env/
 .DS_Store
 
 # Project-specific
-logs/
+logs/*
+!logs/README.md
+checkpoints/
 *.log
 .env
 .env.local
@@ -52,7 +54,8 @@ tmp/
 *.stl
 
 # Build artifacts
-bin/
+bin/*
+!bin/orchestrator
 obj/
 *.o
 *.elf

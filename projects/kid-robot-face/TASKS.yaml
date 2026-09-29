@@ -1,490 +1,114 @@
 tasks:
-  - id: TASK-001
-    title: Requirements Capture & Initial Analysis
-    owner: REQUIREMENTS_AGENT
-    status: DONE
-    priority: CRITICAL
-    dependencies: []
-    expected_outputs:
-      - REQUIREMENTS.md (draft)
-    acceptance_criteria:
-      - All 15 requirements captured
-      - Acceptance criteria defined for each
-      - Traceability matrix started
-    execution:
-      attempt_count: 1
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: PASS
-    notes: Completed; requirements approved
-
-  - id: TASK-005
-    title: Finalize Requirements & Acceptance Criteria
-    owner: REQUIREMENTS_AGENT
-    status: IN_PROGRESS
-    priority: CRITICAL
-    dependencies:
-      - TASK-001
-    expected_outputs:
-      - REQUIREMENTS.md (final)
-      - Acceptance criteria signed off
-    acceptance_criteria:
-      - All REQ-001..REQ-015 have measurable acceptance criteria
-      - Traceability matrix complete
-      - Independent review passed
-    execution:
-      attempt_count: 1
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: IN_PROGRESS
-    notes: "Polishing acceptance criteria; ~90% complete"
-
-  - id: TASK-010
-    title: Finalize Architecture & Pin Mapping
-    owner: ARCHITECTURE_AGENT
-    status: IN_PROGRESS
-    priority: CRITICAL
-    dependencies:
-      - TASK-005
-    expected_outputs:
-      - ARCHITECTURE.md (final)
-      - Pin mapping diagram
-      - Schematic notes
-      - Datasheet references
-    acceptance_criteria:
-      - Block diagram complete
-      - All GPIO pins assigned (with notes)
-      - I2S audio routing verified
-      - I2C OLED addressing confirmed
-      - No pin conflicts
-    execution:
-      attempt_count: 1
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: READY
-    notes: "Awaiting finalization of I2S audio pin routing"
-
-  - id: TASK-012
-    title: Research MicroPython OLED Drivers & Evaluate PoC
-    owner: RESEARCH_AGENT
-    status: IN_PROGRESS
-    priority: HIGH
-    dependencies:
-      - TASK-010
-    expected_outputs:
-      - RESEARCH_OLED_DRIVERS.md
-      - Driver comparison matrix
-      - PoC code (hello world on SSD1306)
-    acceptance_criteria:
-      - At least 3 drivers evaluated (Adafruit, micropython-ssd1306, u8g2emu)
-      - Performance benchmarks (update time, memory usage)
-      - PoC runs on ESP32-C3 without freezing
-    execution:
-      attempt_count: 1
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Candidate: micropython-ssd1306; PoC in progress"
-
-  - id: TASK-015
-    title: Build Task Dependency Graph & Create TASKS.yaml
-    owner: PLANNING_AGENT
-    status: READY
-    priority: CRITICAL
-    dependencies:
-      - TASK-005
-      - TASK-010
-    expected_outputs:
-      - TASKS.yaml (complete)
-      - Dependency graph visualization
-      - Parallel work identified
-      - Milestone map
-    acceptance_criteria:
-      - All 40+ tasks identified and prioritized
-      - Dependencies accurate (no cycles)
-      - READY tasks identified and executable
-      - Critical path calculated
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Waiting for TASK-005 and TASK-010 to complete"
-
-  - id: TASK-020
-    title: Hardware BOM & Procurement
-    owner: HARDWARE_AGENT
-    status: TODO
-    priority: CRITICAL
-    dependencies:
-      - TASK-010
-    expected_outputs:
-      - BOM.md (with part numbers + suppliers)
-      - Cost estimate (JPY)
-      - Procurement checklist
-    acceptance_criteria:
-      - All 15+ components listed with exact SKU
-      - Unit costs confirmed from 2+ suppliers
-      - Total cost calculated ± 5%
-      - Availability verified (stock > 10 units)
-      - Risk items flagged (long lead, obsolete)
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Awaiting architecture pin mapping finalization"
-
-  - id: TASK-025
-    title: Firmware Skeleton & Environment Setup
-    owner: SOFTWARE_AGENT
-    status: TODO
-    priority: CRITICAL
-    dependencies:
-      - TASK-010
-      - TASK-020
-    expected_outputs:
-      - GitHub repo initialized
-      - MicroPython build configured
-      - I2C + I2S drivers working (verified)
-      - Config template
-    acceptance_criteria:
-      - ESP32-C3 boots MicroPython
-      - I2C bus scans and finds SSD1306 at correct address
-      - I2S microphone captures audio (raw bytes verified)
-      - Log output via USB serial working
-      - CI/CD skeleton in place
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Awaiting hardware procurement (TASK-020)"
-
-  - id: TASK-030
-    title: FastAPI Bridge Server (Whisper + Piper + Ollama routing)
-    owner: SOFTWARE_AGENT
-    status: TODO
-    priority: CRITICAL
-    dependencies:
-      - TASK-005
-    expected_outputs:
-      - FastAPI server code
-      - /transcribe endpoint (Whisper)
-      - /chat endpoint (Ollama)
-      - /synthesize endpoint (Piper)
-      - Docker compose (optional)
-    acceptance_criteria:
-      - Server runs on localhost:8000
-      - Whisper endpoint accepts WAV + returns text
-      - Ollama endpoint accepts text + returns emotion tag + response
-      - Piper endpoint accepts text + returns MP3 bytes
-      - Error handling + timeouts implemented
-      - All endpoints tested with curl
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Can start in parallel with firmware work"
-
-  - id: TASK-035
-    title: Face Animation Library (8x8 Sprite Generator)
-    owner: SOFTWARE_AGENT
-    status: TODO
-    priority: HIGH
-    dependencies:
-      - TASK-005
-    expected_outputs:
-      - Face animation library (Python + MicroPython)
-      - 32 base expressions × 4 emotion variants (128 sprites total)
-      - Sprite data format (.py or .bin)
-      - Renderer code (SSD1306 compatible)
-    acceptance_criteria:
-      - All 128 sprites designed + pixel-accurate
-      - Renderer displays sprite in < 50ms on ESP32
-      - Memory footprint < 40KB (sprites + renderer)
-      - Emotion mapping documented (happy, sad, confused, excited, etc.)
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Cute/funny character design critical for child engagement"
-
-  - id: TASK-040
-    title: Integration: Firmware + FastAPI Bridge
-    owner: SOFTWARE_AGENT
-    status: TODO
-    priority: CRITICAL
-    dependencies:
-      - TASK-025
-      - TASK-030
-    expected_outputs:
-      - End-to-end audio flow (mic → transcribe → chat → animate → speaker)
-      - Integration test suite
-    acceptance_criteria:
-      - Audio capture → HTTP POST to FastAPI working
-      - Response JSON parsed + face updates in real time
-      - Latency < 1 second (measured)
-      - No crashes after 100 test cycles
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Critical milestone; expect 1–2 iterations"
-
-  - id: TASK-050
-    title: Unit Tests (Firmware + Server)
-    owner: TEST_AGENT
-    status: TODO
-    priority: HIGH
-    dependencies:
-      - TASK-025
-      - TASK-030
-    expected_outputs:
-      - pytest suite (server)
-      - MicroPython unit tests (firmware)
-      - Test report with coverage
-    acceptance_criteria:
-      - Server endpoints 100% test coverage
-      - Firmware modules (I2C, I2S, WiFi) tested
-      - Edge cases (timeouts, malformed input) covered
-      - All tests passing
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Can run in parallel with TASK-035 + TASK-040"
-
-  - id: TASK-060
-    title: System Test & Acceptance Criteria Validation
-    owner: TEST_AGENT
-    status: TODO
-    priority: CRITICAL
-    dependencies:
-      - TASK-040
-      - TASK-050
-    expected_outputs:
-      - TEST_PLAN.md (final)
-      - Acceptance test results (all pass or documented limitation)
-      - Evidence (video, logs)
-    acceptance_criteria:
-      - All REQ-001..REQ-015 tested and verified
-      - Latency < 1 second (measured 10 times)
-      - Audio quality acceptable (subjective + objective)
-      - No memory leaks (heap monitored over 1h runtime)
-      - Safety review passed (child-safe code + outputs)
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Gate to RELEASE; must pass all acceptance criteria"
-
-  - id: TASK-070
-    title: Documentation (User Guide + Implementation Notes)
-    owner: DOCUMENTATION_AGENT
-    status: TODO
-    priority: MEDIUM
-    dependencies:
-      - TASK-040
-    expected_outputs:
-      - USER_GUIDE.md
-      - IMPLEMENTATION.md (firmware + server setup)
-      - TROUBLESHOOTING.md
-      - Design notes (architecture decisions)
-    acceptance_criteria:
-      - User guide readable by non-engineer
-      - Setup instructions reproducible from scratch
-      - All decisions explained
-      - Diagrams included (block diagram, data flow, pinout)
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: true
-      status: NOT_STARTED
-    notes: "Can start in parallel with TASK-050"
-
-  - id: TASK-075
-    title: Independent Review of Implementation
-    owner: REVIEW_AGENT
-    status: TODO
-    priority: HIGH
-    dependencies:
-      - TASK-060
-      - TASK-070
-    expected_outputs:
-      - REVIEW_REPORT.md
-      - Issue list (critical + minor)
-      - Approval or rework tasks
-    acceptance_criteria:
-      - Code reviewed for maintainability + safety
-      - Requirements traceability verified
-      - Test coverage checked
-      - Documentation consistent with code
-      - Review report signed off
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: false
-      status: NOT_STARTED
-    notes: "Independent reviewer assigned; not the implementation team"
-
-  - id: TASK-080
-    title: Final Release & Checkpoint
-    owner: ORCHESTRATOR
-    status: TODO
-    priority: CRITICAL
-    dependencies:
-      - TASK-060
-      - TASK-075
-    expected_outputs:
-      - RELEASE.md
-      - GitHub tag + release notes
-      - Checkpoint saved
-      - User delivery package
-    acceptance_criteria:
-      - All mandatory requirements met or documented limitation
-      - All tests pass
-      - All reviews complete
-      - Code + docs in GitHub
-      - Hardware build notes included
-    execution:
-      attempt_count: 0
-      no_progress_cycles: 0
-      strategy_changes: 0
-      last_error: null
-    review:
-      required: false
-      status: NOT_STARTED
-    notes: "Delivery to user; celebrate 🎉"
-
-# Parallel Work Groups
+- id: TASK-001
+  title: Capture initial project requirements
+  owner: requirements_agent
+  status: DONE
+  priority: CRITICAL
+  dependencies: []
+  expected_outputs:
+  - REQUIREMENTS.md (draft)
+  acceptance_criteria:
+  - All 15 requirements captured with REQ IDs
+  - Acceptance criteria present for every MUST requirement
+  input_files:
+  - PROJECT_MEMORY.md
+  execution:
+    attempt_count: 1
+    no_progress_cycles: 0
+    strategy_changes: 0
+    last_error: null
+  review:
+    required: true
+    status: PASS
+  notes: Draft requirements captured and approved
+- id: TASK-002
+  title: Finalize acceptance criteria and requirement traceability
+  owner: requirements_agent
+  status: READY
+  priority: CRITICAL
+  dependencies:
+  - TASK-001
+  expected_outputs:
+  - REQUIREMENTS.md (final)
+  - Traceability matrix
+  acceptance_criteria:
+  - Every REQ entry has measurable acceptance criteria
+  - Traceability from requirement to task to test is complete
+  - Independent review passed
+  input_files:
+  - PROJECT_MEMORY.md
+  execution:
+    attempt_count: 0
+    no_progress_cycles: 0
+    strategy_changes: 0
+    last_error: null
+  review:
+    required: false
+    status: NOT_STARTED
+  notes: Ready to finalize acceptance criteria and requirement traceability
+- id: TASK-003
+  title: Lock hardware architecture and pin mapping
+  owner: architecture_agent
+  status: BLOCKED
+  priority: CRITICAL
+  dependencies:
+  - TASK-002
+  expected_outputs:
+  - ARCHITECTURE.md (final)
+  - Pin mapping diagram
+  acceptance_criteria:
+  - Block diagram complete
+  - No pin conflicts
+  input_files: []
+  execution:
+    attempt_count: 0
+    no_progress_cycles: 0
+    strategy_changes: 0
+    last_error: null
+  review:
+    required: true
+    status: NOT_STARTED
+  notes: Blocked until requirements are finalized
+- id: TASK-004
+  title: Draft hardware bill of materials
+  owner: hardware_agent
+  status: TODO
+  priority: HIGH
+  dependencies:
+  - TASK-003
+  expected_outputs:
+  - BOM.md
+  acceptance_criteria:
+  - Every component has an exact part number
+  - Total cost calculated within 5 percent
+  input_files: []
+  execution:
+    attempt_count: 0
+    no_progress_cycles: 0
+    strategy_changes: 0
+    last_error: null
+  review:
+    required: true
+    status: NOT_STARTED
+  notes: Awaiting architecture lock
 parallel_groups:
-  - id: GROUP-1
-    name: Requirements + Architecture Lock
-    tasks:
-      - TASK-005
-      - TASK-010
-    exit_criteria: Both DONE + reviewed
-    expected_duration: 3 days
-
-  - id: GROUP-2
-    name: Research (OLED drivers, LLM latency)
-    tasks:
-      - TASK-012
-    exit_criteria: Driver selected + PoC working
-    expected_duration: 2 days
-    parallel_with: GROUP-1
-
-  - id: GROUP-3
-    name: Hardware Procurement
-    tasks:
-      - TASK-020
-    exit_criteria: BOM approved + budget confirmed
-    expected_duration: 1 day
-    depends_on: TASK-010
-
-  - id: GROUP-4
-    name: Software Skeleton + FastAPI Bridge
-    tasks:
-      - TASK-025
-      - TASK-030
-    exit_criteria: Both testable independently
-    expected_duration: 5 days
-    depends_on: TASK-010
-
-  - id: GROUP-5
-    name: Face Animation Library
-    tasks:
-      - TASK-035
-    exit_criteria: Sprites designed + tested
-    expected_duration: 3 days
-    parallel_with: GROUP-4
-
-  - id: GROUP-6
-    name: Integration Testing
-    tasks:
-      - TASK-040
-      - TASK-050
-    exit_criteria: All integration tests pass
-    expected_duration: 4 days
-    depends_on: GROUP-4, GROUP-5
-
-  - id: GROUP-7
-    name: System Validation + Documentation
-    tasks:
-      - TASK-060
-      - TASK-070
-    exit_criteria: Acceptance criteria met + docs complete
-    expected_duration: 3 days
-    depends_on: GROUP-6
-
-  - id: GROUP-8
-    name: Review + Release
-    tasks:
-      - TASK-075
-      - TASK-080
-    exit_criteria: Released to user
-    expected_duration: 2 days
-    depends_on: GROUP-7
-
+- id: GROUP-1
+  name: Requirements and architecture lock
+  tasks:
+  - TASK-002
+  - TASK-003
+  exit_criteria: Both DONE and reviewed
+  expected_duration: 3 days
 critical_path:
-  - TASK-005 → TASK-010 → TASK-020 → TASK-025 → TASK-040 → TASK-060 → TASK-075 → TASK-080
-  estimated_duration: 20 days
-  slack_available: 5 days (from parallel work savings)
-
+  path: TASK-001 -> TASK-002 -> TASK-003 -> TASK-004
+  estimated_duration: 10 days
+  slack_available: 2 days
 summary:
-  total_tasks: 20
+  total_tasks: 4
   status_breakdown:
     DONE: 1
-    IN_PROGRESS: 3
     READY: 1
-    TODO: 15
-  critical_path_duration: 20 days
-  estimated_completion: 2026-10-19
+    BLOCKED: 1
+    TODO: 1
+  critical_path_duration: 10 days
+  estimated_completion: 2026-10-10

@@ -1,0 +1,36 @@
+# Template: copy to projects/<name>/PROJECT.yaml and fill in.
+project:
+  id: PROJECT-MY-PROJECT
+  name: my-project
+  version: 0.1.0
+  status: REQUIREMENTS
+phase:
+  current: REQUIREMENTS
+progress:
+  requirements: 0
+  research: 0
+  architecture: 0
+  implementation: 0
+  testing: 0
+  documentation: 0
+health:
+  status: HEALTHY
+  blocked_tasks: 0
+  failed_tasks: 0
+  loop_detected: false
+  deadlock_detected: false
+context:
+  utilization_percent: 0
+  compaction_threshold: 70
+  critical_threshold: 85
+agents:
+  orchestrator: ACTIVE
+  supervisor: ACTIVE
+next_tasks: []
+blockers: []
+human_decisions: []
+last_checkpoint:
+  id: none
+  date: "1970-01-01"
+  phase: REQUIREMENTS
+updated_at: "1970-01-01T00:00:00Z"

@@ -17,6 +17,10 @@ This framework provides:
 
 ```
 agentic-ai-framework/
+├── bin/orchestrator          # Executable CLI entry point
+├── pyproject.toml            # Package metadata (`orchestrator` script)
+├── orchestrator/             # Python runtime (state, dispatch, agents, LLM)
+├── ORCHESTRATOR_GUIDE.md     # Runtime implementation guide (v2.0)
 ├── framework/              # Core framework documentation and specs
 │   ├── 00_MASTER_ORCHESTRATOR.md
 │   ├── 01_SUPERVISOR_AGENT.md
@@ -37,9 +41,10 @@ agentic-ai-framework/
 │       ├── CHANGELOG.md
 │       ├── docs/           # Requirements, architecture, plans, tests
 │       └── implementation/ # Code, firmware, schematics
-├── project-templates/      # Copy-paste scaffolding for new projects
-│   ├── new-project-starter/
-│   └── checklists/
+├── project-templates/      # Copy-paste state-file templates
+│   ├── PROJECT.yaml  PROJECT_MEMORY.md  CURRENT_STATE.md  TASKS.yaml
+│   ├── DECISIONS.md  RISKS.md  CHANGELOG.md
+│   └── NEW_PROJECT_CHECKLIST.md
 ├── meta/                   # Framework implementation guide
 │   ├── GETTING_STARTED.md
 │   ├── WORKFLOW.md
@@ -52,9 +57,10 @@ agentic-ai-framework/
 
 ### Start a New Project Using This Framework
 
-1. Copy `project-templates/new-project-starter` to your own repo
-2. Update `PROJECT.yaml` with your project details
-3. Run the Master Orchestrator with the `20_DEFAULT_PROJECT_START_PROMPT`
+1. Scaffold all state files: `./bin/orchestrator init my-project`
+   (or copy the 7 files from `project-templates/`)
+2. Update `PROJECT.yaml` / `PROJECT_MEMORY.md` with your project details
+3. Start a session with the Master Orchestrator using `framework/20_DEFAULT_PROJECT_START_PROMPT.md`
 4. Orchestrator creates requirements, architecture, tasks, and starts parallel work
 
 ### Study the Framework With a Real Example

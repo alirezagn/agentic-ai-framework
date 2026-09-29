@@ -1,0 +1,30 @@
+# Template: task graph. IDs stable once created.
+tasks:
+  - id: TASK-001
+    title: Capture requirements
+    owner: requirements_agent
+    status: TODO
+    priority: CRITICAL
+    dependencies: []
+    expected_outputs:
+      - docs/REQUIREMENTS.md
+    acceptance_criteria:
+      - At least 10 REQ entries with measurable acceptance criteria
+    input_files:
+      - PROJECT_MEMORY.md
+    review:
+      required: true
+      status: NOT_STARTED
+    execution:
+      attempt_count: 0
+      no_progress_cycles: 0
+      strategy_changes: 0
+      last_error: null
+    notes: ""
+parallel_groups: []
+critical_path:
+  path: ""
+summary:
+  total_tasks: 1
+  status_breakdown:
+    TODO: 1
