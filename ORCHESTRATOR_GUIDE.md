@@ -329,15 +329,16 @@ health warnings.
 
 ## LLM CONFIGURATION
 
-Stdlib-only client — no third-party SDK. Environment variables:
+Stdlib-only client — no third-party SDK. Environment variables (the CLI
+also auto-loads `./.env`, e.g. the repo's Ollama preset in `.env.example`):
 
 | Variable | Purpose |
 |---|---|
 | `ORCHESTRATOR_LLM_PROVIDER` | `anthropic` \| `ollama` \| `openrouter` (auto-detected from keys) |
-| `ORCHESTRATOR_LLM_MODEL` | Model id (e.g. `ollama/phi4`) |
+| `ORCHESTRATOR_LLM_MODEL` | Model id (project default: `gemma4:12b`) |
 | `ANTHROPIC_API_KEY` | Enables `anthropic` |
 | `OPENROUTER_API_KEY` | Enables `openrouter` |
-| `OLLAMA_BASE_URL` | e.g. `http://192.168.0.200:11434/v1` |
+| `OLLAMA_BASE_URL` | Project default: `http://192.168.0.200:11434` (append `/v1` for OpenAI-compat) |
 | `ORCHESTRATOR_CONTEXT_WINDOW_TOKENS` | Context window for utilization math |
 | `ORCHESTRATOR_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default `INFO`; `-v` / `-q` override) |
 | `CHECKPOINT_SIGNING_KEY` | Optional HMAC-SHA256 key; signed checkpoints fail `verify_checkpoint()` if files *and* metadata are rewritten |

@@ -267,3 +267,79 @@ class TestCLI:
 # ---------------------------------------------------------------------------
 # Phase G — config keys
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# .env configuration (Ollama backend)
+# ---------------------------------------------------------------------------
+
+DOTENV_SAMPLE = """# comment line
+export OLLAMA_BASE_URL="http://192.168.0.200:11434"
+ORCHESTRATOR_LLM_MODEL='gemma4:12b'
+ORCHESTRATOR_LLM_PROVIDER=ollama
+
+no_equals_line
+"""
+
+
+class TestEnvFileLoading:
+    def test_load_env_file_parses_quotes_export_and_comments(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".env").write_text(DOTENV_SAMPLE, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        loaded = config.load_env_file()
+        assert loaded == 3
+        assert os.environ["OLLAMA_BASE_URL"] == "http://192.168.0.200:11434"
+        assert os.environ["ORCHESTRATOR_LLM_MODEL"] == "gemma4:12b"
+        assert os.environ["ORCHESTRATOR_LLM_PROVIDER"] == "ollama"
+        for var in ("OLLAMA_BASE_URL", "ORCHESTRATOR_LLM_MODEL", "ORCHESTRATOR_LLM_PROVIDER"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_existing_environment_always_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".env").write_text(
+            "OLLAMA_BASE_URL=http://from-file\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://from-shell")
+        assert config.load_env_file() == 0
+        assert os.environ["OLLAMA_BASE_URL"] == "http://from-shell"
+
+    def test_missing_file_is_not_an_error(self, tmp_path: Path) -> None:
+        assert config.load_env_file(tmp_path / "nope.env") == 0
+
+    def test_maybe_load_skipped_while_pytest_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".env").write_text("DOTENV_MARKER=1\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        assert config.maybe_load_env_file() == 0
+        assert "DOTENV_MARKER" not in os.environ
+
+    def test_maybe_load_runs_outside_tests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".env").write_text("DOTENV_MARKER=1\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        assert config.maybe_load_env_file() == 1
+        assert os.environ.get("DOTENV_MARKER") == "1"
+        monkeypatch.delenv("DOTENV_MARKER", raising=False)
+
+    def test_cli_main_auto_loads_dotenv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".env").write_text("OLLAMA_BASE_URL=http://192.168.0.200:11434\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        assert main([]) == 1  # no subcommand -> help, exit 1
+        assert os.environ.get("OLLAMA_BASE_URL") == "http://192.168.0.200:11434"
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+
+    def test_env_example_documents_project_backend(self) -> None:
+        example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        assert "OLLAMA_BASE_URL=http://192.168.0.200:11434" in example
+        assert "ORCHESTRATOR_LLM_MODEL=gemma4:12b" in example
+        assert "ORCHESTRATOR_LLM_PROVIDER=ollama" in example

@@ -502,6 +502,7 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    config.maybe_load_env_file()
     parser = build_parser()
     args = parser.parse_args(argv)
     _setup_logging(

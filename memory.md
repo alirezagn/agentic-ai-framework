@@ -5,7 +5,7 @@
 ## Where the project stands
 
 - `GAP_ANALYSIS.md` remediation list **T1–T20 is fully complete** (milestones M1–M7).
-- Test suite: **`python3 -m pytest -q` → 227 passed, 0 failed** (14 test files, ~3.8k lines).
+- Test suite: **`python3 -m pytest -q` → 234 passed, 0 failed** (14 test files, ~3.9k lines; +7 `.env` loading tests).
 - Runtime v2.0: state engine + LLM-backed specialist policy layer (~30% → full coverage of the documented architecture).
 - **Pushed to GitHub**: commit `e9d3e71` "Implement orchestrator v2.0 (GAP_ANALYSIS T1-T20): LLM agents, CLI, loop detection, docs, 227 tests" on `origin/main` (`https://github.com/alirezagn/agentic-ai-framework`). A follow-up commit carries this memory.md update.
 - Docs set: `GAP_ANALYSIS.md`, `ORCHESTRATOR_GUIDE.md` (v2.0 reference), `HOW_TO_USE.md` (practical walkthrough), README quick-start, `framework/` prompts + templates, `meta/` workflow + troubleshooting, `project-templates/`.
@@ -46,3 +46,6 @@
 ## External config done earlier
 
 - opencode: `~/.config/opencode/opencode.jsonc` → `ollama/phi4`, `ollama/qwen2.5-coder:14b`, baseURL `http://192.168.0.200:11434/v1`.
+- **Project LLM backend (2026-09-30):** repo-root `.env` (gitignored) sets `ORCHESTRATOR_LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://192.168.0.200:11434`, `ORCHESTRATOR_LLM_MODEL=gemma4:12b`. The CLI auto-loads it via `config.maybe_load_env_file()` (setdefault; skipped when `PYTEST_CURRENT_TEST` is set so tests stay offline). `.env.example` is committed. Verified: `main([])` outside pytest → provider `ollama`, model `gemma4:12b`.
+- Caveat: as of 2026-09-30 the host `192.168.0.200` pings but **port 11434 is closed** (Ollama not serving) — model `gemma4:12b` could not be verified with `ollama list` yet.
+- These changes (config.py, cli.py, docs, tests, `.env.example`) are **not yet committed**.

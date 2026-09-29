@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
 
@@ -126,6 +127,56 @@ def build_system_keys() -> SystemKeys:
 
 
 SYSTEM_KEYS: SystemKeys = build_system_keys()
+
+
+# ---------------------------------------------------------------------------
+# .env file loading (CLI entry point only)
+# ---------------------------------------------------------------------------
+
+def load_env_file(path: Optional[os.PathLike] = None) -> int:
+    """Load ``KEY=VALUE`` lines from a .env file into ``os.environ``.
+
+    Uses setdefault semantics: variables already present in the environment
+    always win. Blank lines, ``#`` comments and an optional ``export``
+    prefix are supported; surrounding quotes on values are stripped.
+    A missing file is not an error (returns 0).
+
+    Returns the number of variables that were set.
+    """
+    env_path = Path(path) if path is not None else Path.cwd() / ".env"
+    try:
+        raw = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    loaded = 0
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value
+        loaded += 1
+    return loaded
+
+
+def maybe_load_env_file() -> int:
+    """Load ``./.env`` unless the pytest harness is currently running.
+
+    Tests must stay offline-safe, so the CLI entry point skips .env
+    injection whenever ``PYTEST_CURRENT_TEST`` is set (it propagates into
+    subprocesses spawned by the suite as well).
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return 0
+    return load_env_file()
 
 
 # ---------------------------------------------------------------------------

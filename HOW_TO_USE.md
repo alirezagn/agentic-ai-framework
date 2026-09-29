@@ -181,14 +181,27 @@ task fails (deduplicated). Add design risks manually in the same format.
 
 ## 8. Configure the LLM backend
 
+The CLI auto-loads `./.env` at startup (setdefault semantics — real
+environment variables always win; skipped while the test suite runs).
+This repo is pre-configured in `.env` for the local Ollama server:
+
+```dotenv
+ORCHESTRATOR_LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://192.168.0.200:11434
+ORCHESTRATOR_LLM_MODEL=gemma4:12b
+```
+
+Equivalent shell exports (override the file):
+
 ```bash
-export OLLAMA_BASE_URL=http://192.168.0.200:11434/v1
+export OLLAMA_BASE_URL=http://192.168.0.200:11434   # + /v1 for OpenAI-compat mode
 export ORCHESTRATOR_LLM_PROVIDER=ollama        # or anthropic / openrouter
-export ORCHESTRATOR_LLM_MODEL=ollama/phi4
+export ORCHESTRATOR_LLM_MODEL=gemma4:12b
 # export ANTHROPIC_API_KEY=...   /   OPENROUTER_API_KEY=...
 export ORCHESTRATOR_CONTEXT_WINDOW_TOKENS=128000
 ```
 
+Copy `.env.example` to `.env` for another machine (`.env` is gitignored).
 No SDK — the client is stdlib HTTP with an injectable transport for tests.
 
 ---
