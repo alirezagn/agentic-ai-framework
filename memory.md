@@ -1,18 +1,19 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-09-30 (end of remediation session, T1–T20 complete)
+> Last updated: 2026-09-30 (remediation T1–T20 complete + pushed to GitHub)
 
 ## Where the project stands
 
 - `GAP_ANALYSIS.md` remediation list **T1–T20 is fully complete** (milestones M1–M7).
 - Test suite: **`python3 -m pytest -q` → 227 passed, 0 failed** (14 test files, ~3.8k lines).
 - Runtime v2.0: state engine + LLM-backed specialist policy layer (~30% → full coverage of the documented architecture).
-- Nothing has been committed; work tree holds all changes (see `git status`).
+- **Pushed to GitHub**: commit `e9d3e71` "Implement orchestrator v2.0 (GAP_ANALYSIS T1-T20): LLM agents, CLI, loop detection, docs, 227 tests" on `origin/main` (`https://github.com/alirezagn/agentic-ai-framework`). A follow-up commit carries this memory.md update.
+- Docs set: `GAP_ANALYSIS.md`, `ORCHESTRATOR_GUIDE.md` (v2.0 reference), `HOW_TO_USE.md` (practical walkthrough), README quick-start, `framework/` prompts + templates, `meta/` workflow + troubleshooting, `project-templates/`.
 
 ## Guardrails (always keep)
 
 - **Never dispatch the CLI against `projects/kid-robot-face/`** (a smoke run once corrupted it). Tests only *read* it; use `build_test_project(tmp_path)` copies for anything that executes.
-- Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` show as modified vs HEAD — pre-existing working-tree drift the live tests depend on; do not "restore" to HEAD.
+- Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is **committed as-is** (lowercase `name: kid-robot-face`, TASK-002 READY, blockers set) — do not "restore" it to older HEAD content; tests depend on it.
 - Run full pytest after every change: `python3 -m pytest -q`.
 - YOLO mode: no approval prompts, no TODO stubs, relative paths, autonomous execution.
 - LLM backend is stdlib-only; tests inject `FakeLLMClient` / `transport` — suite must stay offline-safe.
@@ -40,7 +41,7 @@
 
 - `GAP_ANALYSIS.md` finding 18: `WAITING` status and `HealthState.RECOVERY` still unused vocabulary (decision-gated tasks intentionally stay `READY`).
 - `git_author_name` SystemKey declared but no git integration exists.
-- Commit/push never done — ask user before committing.
+- Repo is synced with `origin/main` (as of `e9d3e71` + memory follow-up); ask before new commits beyond explicit requests.
 
 ## External config done earlier
 
