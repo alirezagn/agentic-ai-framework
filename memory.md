@@ -8,7 +8,7 @@
 - **`review_gaps.md` (20 gaps A1–A8, B1–B7, C1–C3, D1–D3, E1–E2) is now fully remediated** — every section carries a ✅/🔶 status line; only A3 remains "mostly closed" (unnecessary-blocking heuristic approximated by the stale-block detector), A7 integration/release triggers ride `cp-phase-RELEASE`, B5 diagnosis is on-demand (`health --diagnose`), B3 keeps review/docs structural.
 - New tests: `test_gap_remediation.py` (**41 tests**, one class per gap). Full suite: `python3 -m pytest -q` → **275 passed** (confirmed, 234 + 41). Test isolation: suite passes with `projects/` read-only.
 - Runtime v2.0: state engine + LLM-backed specialist policy layer.
-- **Pushed to GitHub** on `origin/main` (`https://github.com/alirezagn/agentic-ai-framework`): `e9d3e79` (T1–T20), `fec96b5` (memory), `7079012` (Ollama `.env` config), `f29ee79` (review_gaps.md + adoption guide), plus this session's **review_gaps A1–E2 remediation** (see git log for the exact hash).
+- **Pushed to GitHub** on `origin/main` (`https://github.com/alirezagn/agentic-ai-framework`): `e9d3e79` (T1–T20), `fec96b5` (memory), `7079012` (Ollama `.env` config), `f29ee79` (review_gaps.md + adoption guide), **`cb1bab3` (this session: review_gaps A1–E2 remediation, 41 new tests, docs)**.
 - Docs set: `GAP_ANALYSIS.md` (historical), `review_gaps.md` (current — with remediation statuses), `ORCHESTRATOR_GUIDE.md` (v2.0 reference, CLI table incl. `phase`/`waive`/`health --diagnose`), `HOW_TO_USE.md` (walkthrough — updated this session for init scaffold, `requirement_ids`, `phase set`, compaction, 275-test count), README quick-start + Day-1 init (fixed), `framework/`, `meta/`, `project-templates/`.
 
 ## Guardrails (always keep)
@@ -52,7 +52,7 @@
 
 - Status: A1–A8, B1–B7, C1–C3, D1–D3, E1–E2 all remediated (see the per-section ✅/🔶 status lines). Nuances: A3 partial (stale-block detector approximates `blocked_by ⊄ task.dependencies`), A7 integration/release ride `cp-phase-RELEASE`, B5 on-demand, B3 review/docs checks remain structural.
 - Hygiene: `.gitignore` now ignores `projects/*` except `projects/kid-robot-face/` (E2) and all of `checkpoints/` (E1); example scaffolds created by HOW_TO_USE/README quick starts stay untracked. An untracked `projects/my-project/` created earlier by docs examples was removed during the 2026-09-30 review.
-- Repo synced on `origin/main` including this remediation; ask before new commits beyond explicit requests.
+- Repo synced on `origin/main` as of `cb1bab3`; ask before new commits beyond explicit requests.
 
 ## External config done earlier
 
