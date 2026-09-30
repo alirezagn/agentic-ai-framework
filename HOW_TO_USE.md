@@ -51,7 +51,7 @@ documentation) is written so the project is runnable immediately. Options:
 | Flag | Effect |
 |---|---|
 | `--dest DIR` | Parent directory (default `projects/`) |
-| `--goal TEXT` | One-sentence goal written into `PROJECT_MEMORY.md` and used for planning |
+| `--goal TEXT` | One-sentence goal written into `PROJECT_MEMORY.md` and used for planning; `init`/`plan` echo it as `Goal:` and warn if it looks like a placeholder (`…`) |
 | `--force` | Overwrite state files of an existing directory |
 | `--no-plan` | Skip LLM planning; write the starter skeleton tasks instead |
 
@@ -383,6 +383,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 |---|---|
 | `error: --project is required` | pass `--project projects/<name>` before the subcommand |
 | `ERROR: State file not found .../TASKS.yaml` | the workspace was wiped (`rm -rf` + rsync) without re-init — run the `init` line printed in the hint (step 2 of the PoC runbook) |
+| generated tasks look unrelated to my goal | check the `Goal:` line echoed by `init`/`plan` — a copied placeholder (`…`) persists in `PROJECT_MEMORY.md` and steers the planner generic; re-run `init --force --goal "your real goal"` |
 | tasks stay `READY` | `tasks` shows unsatisfied deps; finish predecessors |
 | dependency deadlock (exit 4) | `waive TASK-004 --dep TASK-003 --reason "..."` to drop the edge |
 | task stuck in `WAITING` | a pending `PROPOSED_CHANGE` affects it — approve/reject the decision |

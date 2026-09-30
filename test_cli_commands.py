@@ -102,6 +102,44 @@ class TestInitCommand:
         assert excinfo.value.code == 2
 
 
+    def test_init_echoes_real_goal_without_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = main(
+            ["init", "demo", "--dest", str(tmp_path), "--goal", "Ship the demo"]
+        )
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Goal: Ship the demo" in captured.out
+        assert "placeholder" not in captured.err
+
+    def test_init_warns_on_placeholder_goal(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = main(["init", "demo", "--dest", str(tmp_path), "--goal", "…"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Goal: …" in captured.out
+        assert "placeholder" in captured.err
+
+
+class TestPlanCommand:
+    def test_plan_echoes_effective_goal_and_warns_on_placeholder(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["--project", str(test_project), "plan", "--goal", "…"])
+        captured = capsys.readouterr()
+        assert "Goal: …" in captured.out
+        assert "placeholder" in captured.err
+
+    def test_plan_falls_back_to_stored_goal_echo(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["--project", str(test_project), "plan"])
+        captured = capsys.readouterr()
+        assert "Goal:" in captured.out
+
+
 class TestTasksCommand:
     def test_tasks_prints_dependency_graph(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

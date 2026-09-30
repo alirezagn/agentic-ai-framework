@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -302,6 +303,24 @@ def _resolve_project(args: argparse.Namespace) -> str:
     return project
 
 
+def _echo_goal(goal: str) -> None:
+    """Show the effective goal (init/plan) and flag placeholder text.
+
+    A copied placeholder (``…``) persists as the project goal and steers the
+    planner off-target, so the goal must be visible at the moment of use.
+    """
+    text = " ".join(str(goal or "").split())
+    display = (text[:157] + "...") if len(text) > 160 else text
+    print(f"Goal: {display or '(none)'}")
+    lowered = text.lower()
+    if not text or lowered in {"…", "...", "<your goal>"} or lowered.startswith("tbd"):
+        print(
+            "warning: goal looks like a placeholder — the plan will not match "
+            'your intent; pass --goal "your one-sentence goal"',
+            file=sys.stderr,
+        )
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     name = getattr(args, "name", None)
     if not name:
@@ -318,6 +337,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 2
 
     goal = getattr(args, "goal", None) or "TBD — define the one-sentence project goal."
+    _echo_goal(goal)
     now = utc_now_iso()
     target.mkdir(parents=True, exist_ok=True)
 
@@ -639,6 +659,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
     """G4: generate the task graph (LLM plan, starter skeleton without a backend)."""
     project = _resolve_project(args)
     orchestrator = MasterOrchestrator(project)
+    effective_goal = (getattr(args, "goal", None) or "").strip()
+    if not effective_goal:
+        try:
+            stored = orchestrator.state.load_memory().strip()
+        except (StateError, FileNotFoundError):
+            stored = ""
+        match = re.search(r"^##\s+Goal\s*\n+(.*?)(?=^##\s|\Z)", stored, re.S | re.M)
+        effective_goal = match.group(1).strip() if match else stored
+    _echo_goal(effective_goal)
     if not LLMClient.is_available():
         goal = getattr(args, "goal", None) or ""
         try:

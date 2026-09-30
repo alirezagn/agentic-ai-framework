@@ -241,7 +241,7 @@ class MasterOrchestrator:
             task = self.get_task(task_id)
 
         # --- phase 2: agent execution (unlocked) ------------------------
-        logger.info("dispatching %s -> %s", task_id, agent.AGENT_ID)
+        logger.info("dispatching %s -> %s (owner: %s)", task_id, agent.AGENT_ID, owner)
         output = agent.run(task)
         output.task_id = task_id
 
