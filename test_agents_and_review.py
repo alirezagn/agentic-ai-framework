@@ -286,6 +286,37 @@ class TestArtifactEmission:
         body = (test_project / "docs" / "REQUIREMENTS.md").read_text(encoding="utf-8")
         assert body == "# REQUIREMENTS\n\n- REQ-001 verified"
 
+    def test_flat_data_key_materializes_without_documents_wrapper(
+        self, test_project: Path
+    ) -> None:
+        # Models sometimes put file bodies directly on data instead of under
+        # data.documents — materialization must still pick them up (G16).
+        from orchestrator.agents.requirements_agent import RequirementsAgent
+
+        agent = RequirementsAgent(project_path=test_project)
+        task = dict(agent.state_manager.get_task("TASK-002"))
+        task["expected_outputs"] = ["REQUIREMENTS.md"]
+        answer = {
+            "agent_id": "dummy",
+            "task_id": "TASK-002",
+            "status": "completed",
+            "summary": "flat key deliverable",
+            "data": {"REQUIREMENTS.md": "# REQUIREMENTS\n\n- REQ-042 flat key"},
+            "errors": [],
+            "warnings": [],
+        }
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "dummy_agent"
+
+        dummy = Dummy(
+            project_path=test_project, llm_client=FakeLLMClient([json.dumps(answer)])
+        )
+        out = dummy.run(task)
+        assert out.status == config.AGENT_STATUS_COMPLETED, out.errors
+        body = (test_project / "docs" / "REQUIREMENTS.md").read_text(encoding="utf-8")
+        assert body == "# REQUIREMENTS\n\n- REQ-042 flat key"
+
     def test_failed_run_writes_nothing(self, test_project: Path) -> None:
         from orchestrator.agents.requirements_agent import RequirementsAgent
 
@@ -407,6 +438,46 @@ class TestEditsAuthoring:
         output = self._dummy(test_project, answer).run(task)
         assert output.status == config.AGENT_STATUS_FAILED
         assert any("does not exist" in item for item in output.errors)
+
+    def test_list_of_edits_applies_in_order(self, test_project: Path) -> None:
+        target = test_project / "target.txt"
+        target.write_text("one\ntwo\nthree\n", encoding="utf-8")
+        task = self._dummy_task(test_project)
+        answer = _answer(
+            "TASK-002",
+            "dummy",
+            edits={
+                "target.txt": [
+                    {"search": "one", "replace": "ONE"},
+                    {"search": "three", "replace": "THREE"},
+                ]
+            },
+        )
+        output = self._dummy(test_project, answer).run(task)
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert target.read_text(encoding="utf-8") == "ONE\ntwo\nTHREE\n"
+
+    def test_list_edit_second_step_failure_leaves_file_untouched(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        original = "one\ntwo\nthree\n"
+        target.write_text(original, encoding="utf-8")
+        task = self._dummy_task(test_project)
+        answer = _answer(
+            "TASK-002",
+            "dummy",
+            edits={
+                "target.txt": [
+                    {"search": "one", "replace": "ONE"},
+                    {"search": "absent", "replace": "X"},
+                ]
+            },
+        )
+        output = self._dummy(test_project, answer).run(task)
+        assert output.status == config.AGENT_STATUS_FAILED
+        assert any("[1]" in item and "matched 0" in item for item in output.errors)
+        assert target.read_text(encoding="utf-8") == original
 
     def test_authoring_contract_in_every_agents_rules(self, tmp_path: Path) -> None:
         agent = RequirementsAgent(project_path=tmp_path)

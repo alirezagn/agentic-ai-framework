@@ -179,8 +179,9 @@ class BaseAgent:
         "- To modify an existing large file, return a targeted edit instead: "
         'data.edits["<path>"] = {"search": "<exact text currently in the file>", '
         '"replace": "<replacement text>"} — the search snippet must appear exactly '
-        "once (include a few surrounding lines to make it unique). Use one "
-        "mechanism per file.\n"
+        "once (include a few surrounding lines to make it unique). For several "
+        'disjoint changes in one file, pass a LIST of {search, replace} objects — '
+        "they are applied in order. Use one mechanism per file.\n"
         "- Replying with a JSON summary only (no documents/edits content) does NOT "
         "deliver the file: the orchestrator wraps such output as-is and the task is "
         "not really done.\n"
@@ -435,29 +436,39 @@ class BaseAgent:
                     raise OSError(f"path escapes project: {rel}")
                 if not resolved.is_file():
                     raise FileNotFoundError(f"edits target does not exist: {rel}")
-                if not isinstance(spec, dict):
-                    raise ValueError(
-                        f"edits[{rel!r}] must be an object with 'search' and 'replace'"
-                    )
-                search = spec.get("search")
-                replace = spec.get("replace")
-                if not isinstance(search, str) or not search or not isinstance(replace, str):
-                    raise ValueError(
-                        f"edits[{rel!r}] needs a non-empty string 'search' and a string 'replace'"
-                    )
+                steps = spec if isinstance(spec, list) else [spec]
+                if not steps:
+                    raise ValueError(f"edits[{rel!r}] is an empty list")
+                parsed: List[Dict[str, str]] = []
+                for index, step in enumerate(steps):
+                    if not isinstance(step, dict):
+                        raise ValueError(
+                            f"edits[{rel!r}][{index}] must be an object with 'search' and 'replace'"
+                        )
+                    search = step.get("search")
+                    replace = step.get("replace")
+                    if not isinstance(search, str) or not search or not isinstance(replace, str):
+                        raise ValueError(
+                            f"edits[{rel!r}][{index}] needs a non-empty string "
+                            "'search' and a string 'replace'"
+                        )
+                    parsed.append({"search": search, "replace": replace})
                 content = resolved.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError, ValueError) as exc:
                 output.status = config.AGENT_STATUS_FAILED
                 output.errors.append(str(exc))
                 return
-            matches = content.count(search)
-            if matches != 1:
-                output.status = config.AGENT_STATUS_FAILED
-                output.errors.append(
-                    f"edits[{rel!r}] search matched {matches} time(s) (need exactly 1)"
-                )
-                return
-            updated = content.replace(search, replace, 1)
+            updated = content
+            for index, step in enumerate(parsed):
+                matches = updated.count(step["search"])
+                if matches != 1:
+                    output.status = config.AGENT_STATUS_FAILED
+                    output.errors.append(
+                        f"edits[{rel!r}][{index}] search matched {matches} time(s) "
+                        "(need exactly 1)"
+                    )
+                    return
+                updated = updated.replace(step["search"], step["replace"], 1)
             try:
                 save_text_file(resolved, updated)
             except OSError as exc:
@@ -489,6 +500,12 @@ class BaseAgent:
                 content = documents.get(raw_name)
                 if not isinstance(content, str) or not content.strip():
                     content = documents.get(filename)
+                if not isinstance(content, str) or not content.strip():
+                    # Models sometimes flatten file bodies onto data itself
+                    # instead of nesting them under data.documents.
+                    content = output.data.get(raw_name)
+                if not isinstance(content, str) or not content.strip():
+                    content = output.data.get(filename)
                 if not isinstance(content, str) or not content.strip():
                     content = self.render_artifact(filename, task, output)
                 save_text_file(docs_dir / filename, content)
