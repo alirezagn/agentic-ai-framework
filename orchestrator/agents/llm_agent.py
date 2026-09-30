@@ -31,6 +31,23 @@ class LLMAgent(BaseAgent):
     PROVIDER: Optional[str] = None
     MODEL: Optional[str] = None
 
+    # One-shot recovery when the model overruns the output token limit and
+    # its JSON gets cut mid-string (typically while echoing whole files).
+    REPAIR_NOTE = (
+        "\n\nIMPORTANT: Your previous reply was cut off by the output token "
+        "limit and could not be parsed. Reply again with ONLY one compact "
+        "JSON object, under 500 tokens, containing NO file bodies and NO "
+        "full code listings:\n"
+        '{"status": "completed", "summary": "<one line>", "data": {"edits": '
+        '{"<project-relative path>": {"search": "<shortest unique snippet>", '
+        '"replace": "<replacement>"}}}}\n'
+        "Express any change as data.edits with the smallest unique snippet "
+        "(or data.documents only for a brand-new file under 60 lines). Never "
+        "repeat whole files. If the work cannot be expressed compactly, reply "
+        '{"status": "failed", "summary": "<reason>", "data": {}} instead.\n'
+        "Head of your truncated attempt (for intent only, do not repeat it):\n"
+    )
+
     def __init__(
         self,
         project_path: Optional[str | Path] = None,
@@ -85,10 +102,16 @@ class LLMAgent(BaseAgent):
         try:
             parsed = self.parse_structured_output(result.text)
         except AgentOutputError as exc:
+            recovered = self._repair_truncated_output(system, prompt, result.text, task_id)
+            if recovered is not None:
+                recovered.warnings.append(
+                    "output recovered via truncation-repair (first reply was unparseable)"
+                )
+                return recovered
             return self.failed(
                 task_id,
                 f"Model output for '{self.AGENT_ID}' was not parseable JSON",
-                errors=[str(exc), _snippet(result.text)],
+                errors=[str(exc), _snippet(result.text), "truncation-repair attempt also failed"],
             )
 
         try:
@@ -103,6 +126,29 @@ class LLMAgent(BaseAgent):
                 f"Model output for '{self.AGENT_ID}' failed validation",
                 errors=[str(exc), _snippet(result.text)],
             )
+
+    def _repair_truncated_output(
+        self, system: str, prompt: str, raw: str, task_id: str
+    ) -> Optional[AgentOutput]:
+        """One compact follow-up after an unparseable/truncated reply.
+
+        Resends the original prompt plus a repair note that caps the answer
+        size (models truncate by echoing whole files; the repair forbids
+        that). Returns None when the repair itself is unusable so callers
+        keep the original failure detail.
+        """
+        note = self.REPAIR_NOTE + _snippet(raw or "", limit=400)
+        try:
+            result = self.client().complete(
+                system=system, messages=[{"role": "user", "content": prompt + note}]
+            )
+        except LLMError:
+            return None
+        try:
+            parsed = self.parse_structured_output(result.text)
+            return self.output_from_parsed(parsed, task_id=task_id, result=result)
+        except AgentOutputError:
+            return None
 
     def output_from_parsed(
         self,

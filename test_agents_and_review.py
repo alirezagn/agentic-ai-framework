@@ -352,6 +352,70 @@ class TestArtifactEmission:
         assert (test_project / "docs" / "REVIEW-TASK-002.md").exists()
 
 
+class TestTruncationRepair:
+    """G17: one compact follow-up recovers tasks whose reply got token-capped."""
+
+    TRUNCATED = (
+        '```json\n{"agent_id": "dummy", "task_id": "TASK-002", '
+        '"status": "completed", "summary": "half a reply that never closes'
+    )
+
+    @staticmethod
+    def _task(test_project: Path) -> Dict[str, Any]:
+        agent = RequirementsAgent(project_path=test_project)
+        task = dict(agent.state_manager.get_task("TASK-002"))
+        task["expected_outputs"] = ["target.txt"]
+        return task
+
+    def test_truncated_reply_recovered_by_repair_call(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        repair = _answer(
+            "TASK-002",
+            "dummy",
+            edits={"target.txt": {"search": "BETA", "replace": "BETA13"}},
+        )
+        client = FakeLLMClient([self.TRUNCATED, repair])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "dummy_agent"
+
+        dummy = Dummy(project_path=test_project, llm_client=client)
+        output = dummy.run(self._task(test_project))
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA13\ngamma\n"
+        assert len(client.calls) == 2
+        assert any("truncation-repair" in item for item in output.warnings)
+
+    def test_failed_repair_keeps_original_error_detail(
+        self, test_project: Path
+    ) -> None:
+        client = FakeLLMClient([self.TRUNCATED, self.TRUNCATED + " also cut"])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "dummy_agent"
+
+        dummy = Dummy(project_path=test_project, llm_client=client)
+        output = dummy.run(self._task(test_project))
+        assert output.status == config.AGENT_STATUS_FAILED
+        assert "not parseable JSON" in output.summary
+        assert any("truncation-repair attempt also failed" in item for item in output.errors)
+        assert len(client.calls) == 2
+
+    def test_no_repair_call_on_clean_parse(self, test_project: Path) -> None:
+        client = FakeLLMClient([_answer("TASK-002", "dummy")])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "dummy_agent"
+
+        dummy = Dummy(project_path=test_project, llm_client=client)
+        output = dummy.run(self._task(test_project))
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert len(client.calls) == 1
+
+
 class TestEditsAuthoring:
     """G16: data.edits patches real project files; contract reaches agents."""
 

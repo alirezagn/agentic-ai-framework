@@ -185,6 +185,9 @@ class BaseAgent:
         "- Replying with a JSON summary only (no documents/edits content) does NOT "
         "deliver the file: the orchestrator wraps such output as-is and the task is "
         "not really done.\n"
+        "- Never echo whole input files back — overrunning the output token limit "
+        "truncates the JSON and fails the task; use the smallest unique "
+        "data.edits snippet instead.\n"
         "- Never invent executed results: report test or verification statuses as "
         "NOT RUN unless the payload contains real execution output."
     )
