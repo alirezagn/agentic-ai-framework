@@ -1,14 +1,15 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-09-30 (remediation T1–T20 complete + pushed to GitHub)
+> Last updated: 2026-09-30 (post-remediation architecture review done — see `review_gaps.md`)
 
 ## Where the project stands
 
-- `GAP_ANALYSIS.md` remediation list **T1–T20 is fully complete** (milestones M1–M7).
-- Test suite: **`python3 -m pytest -q` → 234 passed, 0 failed** (14 test files, ~3.9k lines; +7 `.env` loading tests).
-- Runtime v2.0: state engine + LLM-backed specialist policy layer (~30% → full coverage of the documented architecture).
-- **Pushed to GitHub**: commit `e9d3e71` "Implement orchestrator v2.0 (GAP_ANALYSIS T1-T20): LLM agents, CLI, loop detection, docs, 227 tests" on `origin/main` (`https://github.com/alirezagn/agentic-ai-framework`). A follow-up commit carries this memory.md update.
-- Docs set: `GAP_ANALYSIS.md`, `ORCHESTRATOR_GUIDE.md` (v2.0 reference), `HOW_TO_USE.md` (practical walkthrough), README quick-start, `framework/` prompts + templates, `meta/` workflow + troubleshooting, `project-templates/`.
+- `GAP_ANALYSIS.md` remediation list **T1–T20 is fully complete** (milestones M1–M7); the file is now annotated as the historical baseline.
+- **New: `review_gaps.md`** — fresh implementation-vs-architecture comparison (framework/00+01+05, README): **5 high / 9 medium / 6 low gaps**. Top remaining: no lifecycle state machine (A1), no goal→task-graph automation (A2), compaction doesn't compact (B1), per-call context model makes 70/85% thresholds dormant (B2), DoD structural not semantic (B3).
+- Test suite: **`python3 -m pytest -q` → 234 passed, 0 failed** (14 test files; +7 `.env` loading tests). Test isolation verified: full suite passes with `projects/` chmod read-only — no test writes there.
+- Runtime v2.0: state engine + LLM-backed specialist policy layer.
+- **Pushed to GitHub**: `e9d3e71` (T1–T20), `fec96b5` (memory), `7079012` (Ollama `.env` config) on `origin/main` (`https://github.com/alirezagn/agentic-ai-framework`).
+- Docs set: `GAP_ANALYSIS.md` (historical), `review_gaps.md` (current gaps), `ORCHESTRATOR_GUIDE.md` (v2.0 reference), `HOW_TO_USE.md` (walkthrough incl. *Adopt an existing project* subsection added 2026-09-30), README quick-start + Day-1 init (fixed), `framework/`, `meta/`, `project-templates/`.
 
 ## Guardrails (always keep)
 
@@ -37,15 +38,14 @@
 - LLM env: `ORCHESTRATOR_LLM_PROVIDER/MODEL`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_BASE_URL`, `ORCHESTRATOR_CONTEXT_WINDOW_TOKENS` (128000), `ORCHESTRATOR_LOG_LEVEL`, `CHECKPOINT_SIGNING_KEY`.
 - Shared fixtures in `conftest.py`: `build_test_project`, `test_project`, `checkpoints_root`, `FakeLLMClient`, `_task` (optional `milestone`).
 
-## Known leftovers (not in T1–T20 scope)
+## Known leftovers (tracked in `review_gaps.md`)
 
-- `GAP_ANALYSIS.md` finding 18: `WAITING` status and `HealthState.RECOVERY` still unused vocabulary (decision-gated tasks intentionally stay `READY`).
-- `git_author_name` SystemKey declared but no git integration exists.
-- Repo is synced with `origin/main` (as of `e9d3e71` + memory follow-up); ask before new commits beyond explicit requests.
+- Architecture gaps: A1 lifecycle state machine, A2 goal→task-graph automation, A3-A8 supervisor/checkpoint/init gaps, B1 compaction, B2 context model, B3 semantic DoD, B4-B7 partial semantics, C1-C3 dead vocabulary (`WAITING`, `RECOVERY`, `git_author_name`), E1 checkpoint fixture leak, E2 example-scaffold cleanup.
+- Hygiene note: an untracked `projects/my-project/` (created ~08:36 by running HOW_TO_USE examples — **not** by tests) was removed during the 2026-09-30 review; recreate with `./bin/orchestrator init my-project` if wanted.
+- Repo synced as of `7079012` + this commit; ask before new commits beyond explicit requests.
 
 ## External config done earlier
 
 - opencode: `~/.config/opencode/opencode.jsonc` → `ollama/phi4`, `ollama/qwen2.5-coder:14b`, baseURL `http://192.168.0.200:11434/v1`.
 - **Project LLM backend (2026-09-30):** repo-root `.env` (gitignored) sets `ORCHESTRATOR_LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://192.168.0.200:11434`, `ORCHESTRATOR_LLM_MODEL=gemma4:12b`. The CLI auto-loads it via `config.maybe_load_env_file()` (setdefault; skipped when `PYTEST_CURRENT_TEST` is set so tests stay offline). `.env.example` is committed. Verified: `main([])` outside pytest → provider `ollama`, model `gemma4:12b`.
 - Caveat: as of 2026-09-30 the host `192.168.0.200` pings but **port 11434 is closed** (Ollama not serving) — model `gemma4:12b` could not be verified with `ollama list` yet.
-- These changes (config.py, cli.py, docs, tests, `.env.example`) are **not yet committed**.

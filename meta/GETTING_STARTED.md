@@ -21,7 +21,7 @@ This framework orchestrates complex projects using autonomous specialist agents.
 - No clear path through complexity
 
 ### After (With Framework)
-- STATE.yaml tells you the project status *right now*
+- PROJECT.yaml + CURRENT_STATE.md tell you the project status *right now*
 - DECISIONS.md documents *why* you chose X over Y
 - TASKS.yaml shows *exactly* what's left and dependencies
 - CHECKPOINT saves recovery point; resume in 30 seconds

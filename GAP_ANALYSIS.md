@@ -1,5 +1,10 @@
 # Gap Analysis — Implementation vs. Architecture Documents
 
+> **STATUS (2026-09-30): historical.** Remediation **T1–T20** addressed findings
+> 1–20 (see the remediation order below; commit `e9d3e71` and later). The
+> *current* architecture gaps live in **`review_gaps.md`**. This document is kept
+> as the original pre-remediation baseline.
+
 **Date:** 2026-09-30
 **Scope:** `orchestrator/` runtime + `test_orchestrator_pipeline.py` compared against
 `framework/00–10`, `README.md`, `ORCHESTRATOR_GUIDE.md`, `QUICK_REFERENCE.md`,

@@ -85,7 +85,7 @@ Then read the specialist agents:
 
 ## Core Principles
 
-1. **Project Files Are Source of Truth** — STATE.yaml, requirements, architecture, tasks drive the work. Chat is temporary context.
+1. **Project Files Are Source of Truth** — PROJECT.yaml, TASKS.yaml, requirements, architecture drive the work. Chat is temporary context.
 
 2. **Parallel Execution** — Independent tasks run together. Blocked tasks don't stop unrelated work.
 
@@ -154,16 +154,16 @@ Research, testing, documentation, and risk management run continuously where use
 ### Initialization (Day 1)
 
 ```bash
-# Create project folder
-mkdir projects/my-project
+# Scaffold all 7 state files + docs/ (validated)
+./bin/orchestrator init my-project \
+  --goal "Build a voice-reactive robot face"
 
-# Copy state file templates
-cp project-templates/PROJECT.yaml projects/my-project/
-cp project-templates/PROJECT_MEMORY.md projects/my-project/
-
-# Update with your project details
-# Run Master Orchestrator with default start prompt
+# Fill in PROJECT_MEMORY.md details (constraints, budget, resources)
+# Define initial tasks in TASKS.yaml
+# Start a session with framework/20_DEFAULT_PROJECT_START_PROMPT.md
 ```
+
+(Manual alternative: copy the templates from `project-templates/`.)
 
 ### Execution (Ongoing)
 

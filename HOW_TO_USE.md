@@ -50,6 +50,50 @@ The scaffold passes `validate()` immediately. Options:
 Alternative: copy the 7 templates from `project-templates/` by hand
 (see `project-templates/NEW_PROJECT_CHECKLIST.md`).
 
+### Adopt an existing project (started without this tool)
+
+State files *are* the memory — a project begun manually or with another
+tool can be onboarded without any chat history:
+
+```bash
+# The directory already exists → --force is required. It only ADDS the
+# 7 state files + docs/README.md, but OVERWRITES those exact files if
+# present — back up DECISIONS.md / RISKS.md / docs/README.md first.
+./bin/orchestrator init my-app --dest /path/to --force \
+  --goal "One-sentence project goal"
+```
+
+Then capture reality:
+
+1. **`PROJECT_MEMORY.md`** — goal, current status, key decisions, next
+   steps (import/summarize the old tool's notes). This is what a new
+   session resumes from.
+2. **`CURRENT_STATE.md`** — phase, health, last updated.
+3. **Copy existing artifacts into `docs/`** — the Definition of Done
+   resolves `expected_outputs` under `docs/` only.
+4. **Backlog in `TASKS.yaml`** — finished work → `DONE`, current work →
+   `READY`/`IN_PROGRESS`, dependencies wired. Verify read-only first:
+
+```bash
+./bin/orchestrator --project /path/to/my-app tasks    # graph + critical path
+./bin/orchestrator --project /path/to/my-app status   # progress/health
+./bin/orchestrator --project /path/to/my-app health   # exit 0/3/4
+```
+
+5. **Test on a copy before dispatching** — copy the directory to `/tmp`
+   (or use the pytest fixture `build_test_project(tmp_path)`) and run
+   there first; `run` mutates state.
+6. **Continue:**
+
+```bash
+./bin/orchestrator --project /path/to/my-app run --max-tasks 5
+./bin/orchestrator --project /path/to/my-app checkpoint save cp-adapted
+```
+
+Alternative: leave the old project untouched and keep a **sidecar** state
+dir under `projects/` (`init my-app --dest projects`), with
+`PROJECT_MEMORY.md` pointing to where the real code lives.
+
 ---
 
 ## 3. Define work
