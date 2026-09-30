@@ -242,13 +242,13 @@ class TestProposedChangeGate:
         assert any("DEC-002 pending approval" in str(item)
                    for item in project_data.get("human_decisions", []))
 
-        # TASK-003 becomes READY but the gate refuses dispatch.
+        # TASK-003 parks in WAITING but the gate still refuses dispatch.
         second = orchestrator.run_cycle()
         assert second and not second[0].succeeded
         assert "PROPOSED_CHANGE" in "; ".join(second[0].output.errors)
         assert "DEC-002" in "; ".join(second[0].output.errors)
         task_003 = orchestrator.get_task("TASK-003")
-        assert task_003["status"] == "READY"  # gated, never marked FAILED
+        assert task_003["status"] == "WAITING"  # gated, never marked FAILED
         project_data = orchestrator.state.load_project()
         assert any("must be approved" in str(item)
                    for item in project_data.get("human_decisions", []))

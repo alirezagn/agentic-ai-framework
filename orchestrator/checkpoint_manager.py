@@ -163,7 +163,7 @@ class CheckpointManager:
             raise CheckpointError(f"Project path does not exist: {project_path}")
         project_name = self.project_path.name
         if checkpoints_root is None:
-            root = Path(config.DEFAULT_CHECKPOINTS_DIR).resolve() / project_name
+            root = Path(config.default_checkpoints_dir()).resolve() / project_name
         else:
             root = Path(checkpoints_root).expanduser().resolve()
         self.checkpoints_root = root

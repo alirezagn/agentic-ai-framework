@@ -22,7 +22,7 @@ control back to a human.
 - Parallel execution (`--max-concurrent N`) serialized through a state lock
 - LLM-backed specialist agents with DoD checks and mandatory review flow
 - Loop detection: `same_strategy`, `no_progress`, `alternatives_exhausted`,
-  `state_oscillation`, `repeated_output`
+  `state_oscillation`, `repeated_output`, `no_new_evidence`
 - Decision control (`PROPOSED_CHANGE` gate) and risk maintenance (`RISKS.md`)
 - Milestone + automatic checkpoints, resume without chat history
 - Supervisor health states: `HEALTHY`, `WARNING`, `STALLED`, `BLOCKED`,
@@ -89,16 +89,27 @@ orchestrator [--project PATH] [--version] <command>
 
 | Command | Description |
 |---|---|
-| `init NAME [--dest DIR] [--goal TEXT] [--force]` | Scaffold a valid project under `projects/` (default) |
+| `init NAME [--dest DIR] [--goal TEXT] [--force]` | Scaffold a valid project under `projects/` (default); writes the `cp-000-init` baseline checkpoint and empty `constraints`/`budget`/`resources` blocks |
 | `status` | Print project/task summary + health recommendations |
 | `tasks` | Dependency-graph table (id, status, owner, deps, readiness) + critical path |
 | `run [--task ID] [--max-tasks N] [--max-concurrent N]` | Dispatch READY tasks (or one task) |
-| `health` | Supervisor health check (writes `PROJECT.yaml` health block) |
+| `health [--diagnose]` | Supervisor health check (writes `PROJECT.yaml` health block); `--diagnose` adds an LLM diagnosis when a provider is configured, rules-only otherwise |
+| `phase show\|set [PHASE]` | Show the current/derived lifecycle phase, or set it explicitly (validated against the phase vocabulary; forward moves checkpoint as `cp-phase-<name>`) |
+| `waive TASK --dep ID [--reason TEXT]` | Human unblock: drop one dependency edge (deadlock relief) and record it in `CHANGELOG.md` |
 | `agents` | List registered specialist agents |
 | `checkpoint save\|list\|restore` | Checkpoint management (`--checkpoint ID`, `--notes TEXT`) |
 
 **Exit codes:** `0` success · `1` no command · `2` usage / state error ·
 `3` loop limit or STALLED/BLOCKED health · `4` `HUMAN_DECISION_REQUIRED`
+
+### Lifecycle phases
+
+`PROJECT.yaml.phase.current` is derived forward-only from the task graph
+(`StateManager.derive_phase`): the first phase in `REQUIREMENTS → RESEARCH →
+ARCHITECTURE → PLANNING → IMPLEMENTATION → INTEGRATION → TESTING → VALIDATION →
+RELEASE` that owns a non-terminal task wins; phases with no matching tasks are
+auto-skipped (`MAINTENANCE` is manual only). Derived advances checkpoint as
+`cp-phase-<name>`; explicit `phase set` validates against `config.PHASES`.
 
 ---
 
@@ -256,11 +267,12 @@ Supervisor thresholds (`config.LoopThresholds`, overridable via
 
 | Kind | Trigger | Default |
 |---|---|---|
-| `same_strategy` | `attempt_count` without `strategy_changed` | 3 |
+| `same_strategy` | `attempts_since_change` (attempts since the last `strategy_changed`) | 3 |
 | `no_progress` | `no_progress_cycles` (state fingerprint unchanged) | 5 cycles |
 | `alternatives_exhausted` | `strategy_changes` without success | 2 |
 | `state_oscillation` | project state flips A↔B (status-only fingerprints) | 4 changes, 2 states |
 | `repeated_output` | substantially identical outputs (`last_output_hash`) | 3 repeats |
+| `no_new_evidence` | dispatches that produced no new artifacts, decisions or requirement updates (`evidence_stall_count`) | 3 dispatches |
 
 When a loop is exceeded:
 
@@ -285,17 +297,26 @@ print(report.render())
 | State | Meaning |
 |---|---|
 | `HEALTHY` | all systems normal |
-| `WARNING` | recoverable issue (e.g. context pressure) |
+| `WARNING` | recoverable issue (advisory escalation, context pressure, stale state) |
 | `STALLED` | no progress across cycles |
 | `BLOCKED` | blocked tasks and no independent ready work |
-| `RECOVERY` | recovering from failure |
-| `HUMAN_DECISION_REQUIRED` | pending `PROPOSED_CHANGE` / escalations |
+| `RECOVERY` | a strategy change is in flight while loop signals are still present |
+| `HUMAN_DECISION_REQUIRED` | a **blocking** escalation (loop/deadlock/starvation/decision conflict) |
 
 Checks: context utilization (compaction 70% / critical 85%), failed tasks,
 no-progress tasks, circular dependencies, blocked-task analysis
-(`analyze_blocked` counts `TODO`/`READY` tasks with unsatisfied deps), pending
-human decisions. Failed tasks get a `RISK-NNN` entry in `RISKS.md` so risks
-never silently disappear.
+(`analyze_blocked` counts `TODO`/`READY` tasks with unsatisfied deps), stale
+blocks (`detect_stale_blocks` — BLOCKED but every dependency satisfied),
+pending human decisions, and `detect_decision_conflicts` (two pending
+`PROPOSED_CHANGE`s affecting the same task). Escalations carry a `category`
+(`loop`/`deadlock`/`context`/`starvation`/`decision_conflict`/`stale_block`)
+and a `blocking` flag; only blocking ones force `HUMAN_DECISION_REQUIRED`
+(others classify as `WARNING`). Failed tasks get a `RISK-NNN` entry in
+`RISKS.md` (checkpointed as `cp-risk-NNN`) so risks never silently disappear.
+
+`SupervisorAgent.diagnose()` explains the state and the next action — LLM when
+a provider is available, deterministic rules-only fallback otherwise (also
+available via `orchestrator health --diagnose`).
 
 ---
 
@@ -312,18 +333,28 @@ orch.approve_decision("DEC-001", approved=True)   # gate lifted
 orch.approve_decision("DEC-002", approved=False)  # gate stays closed
 ```
 
-While a `PROPOSED_CHANGE` affects a task, dispatch refuses that task before it
-can reach `IN_PROGRESS` (adds a `human_decision` entry, task stays `READY`).
+While a `PROPOSED_CHANGE` affects a task, its non-terminal tasks move to
+`WAITING` (visible in `tasks` output); dispatch still attempts them so the
+gate refusal surfaces in results — the task is never marked FAILED. On
+approval/rejection the gate opens and `WAITING` tasks return to `READY`
+(or `BLOCKED` if a dependency is unsatisfied). `REVIEW` tasks keep their
+status (the review queue keys off it).
 
 ---
 
 ## CONTEXT ACCOUNTING
 
-`context_monitor.py` updates `PROJECT.yaml.context.utilization_percent` after
-every dispatch from measured prompt+completion tokens against
-`ORCHESTRATOR_CONTEXT_WINDOW_TOKENS` (default 128000). Thresholds come from
-`COMPACTION_THRESHOLDS` (compaction 70%, critical 85%) and feed supervisor
-health warnings.
+`context_monitor.py` converts each dispatch into tokens (provider `usage`
+when reported, else `payload_chars / 4`) and **accumulates** them into
+`PROJECT.yaml.context.cumulative_tokens` against
+`ORCHESTRATOR_CONTEXT_WINDOW_TOKENS` (default 128000); the utilisation percent
+is derived from that session total — it never resets except at a compaction
+event, which zeroes the budget. Thresholds come from `COMPACTION_THRESHOLDS`
+(compaction 70%, critical 85%) and feed supervisor health warnings. When the
+budget is exhausted, `compact_context()` checkpoints, appends a memory note,
+folds an oversized `PROJECT_MEMORY.md` (head + tail kept, middle replaced by a
+drop marker — `MEMORY_COMPACT_MAX_CHARS`, default 60000 chars) and resets the
+token budget.
 
 ---
 

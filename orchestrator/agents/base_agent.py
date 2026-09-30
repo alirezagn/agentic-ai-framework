@@ -105,7 +105,10 @@ class BaseAgent:
         "2. Do not silently change approved architecture or decisions.\n"
         "3. Stop repeating the same failing strategy after the configured retry limit.\n"
         "4. Report measurable results only; vague claims are rejected.\n"
-        "5. Never mark your own significant work DONE without independent review."
+        "5. Never mark your own significant work DONE without independent review.\n"
+        "6. Report acceptance evidence: for every acceptance criterion you verified "
+        "return data.acceptance_results = [{name, status: PASS|FAIL, detail}]; "
+        "failed checks block completion."
     )
 
     def __init__(
@@ -148,7 +151,62 @@ class BaseAgent:
         notes = task.get("notes")
         if notes:
             context["task_notes"] = str(notes)
+        # B4: always surface decisions gating this task and its REQ traceability.
+        decisions = self._decisions_affecting(str(task.get("id") or ""))
+        if decisions:
+            context["decisions_affecting_task"] = decisions
+        requirements = self._requirements_for(task)
+        if requirements:
+            context["requirements"] = requirements
         return context
+
+    def _decisions_affecting(self, task_id: str) -> str:
+        """DECISIONS.md entries whose Affected Tasks include ``task_id``."""
+        if not task_id:
+            return ""
+        try:
+            content = self.state_manager.load_decisions()
+            entries = self.state_manager.list_decisions()
+        except Exception:  # noqa: BLE001 — context injection must never fail a run
+            return ""
+        lines = content.splitlines()
+        chunks: List[str] = []
+        for entry in entries:
+            if task_id not in (entry.get("affected_tasks") or []):
+                continue
+            start = int(entry.get("line", 0))
+            end = int(entry.get("end", start))
+            if entry.get("format") == "section" and end > start:
+                chunk = "\n".join(lines[start:end]).strip()
+            elif 0 <= start < len(lines):
+                chunk = lines[start].strip()
+            else:
+                continue
+            if chunk:
+                chunks.append(chunk)
+        return "\n\n".join(chunks)
+
+    def _requirements_for(self, task: Dict[str, Any]) -> str:
+        """Lines from docs/REQUIREMENTS.md covering the task's declared REQ ids."""
+        declared = task.get("requirement_ids")
+        if not isinstance(declared, list) or not declared:
+            return ""
+        req_file = Path(self.project_path) / "docs" / "REQUIREMENTS.md"
+        if not req_file.exists():
+            return ""
+        try:
+            body = load_text_file(req_file)
+        except OSError:
+            return ""
+        picked: List[str] = []
+        for raw_id in declared:
+            req_id = str(raw_id).strip()
+            if not req_id:
+                continue
+            for line in body.splitlines():
+                if req_id in line and line.strip() not in picked:
+                    picked.append(line.strip())
+        return "\n".join(picked)
 
     def build_payload(self, task: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(task, dict):

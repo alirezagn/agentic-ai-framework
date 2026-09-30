@@ -161,7 +161,51 @@ def build_parser() -> argparse.ArgumentParser:
     health_parser = subparsers.add_parser(
         "health", parents=[shared], help="Run the supervisor health check"
     )
+    health_parser.add_argument(
+        "--diagnose",
+        dest="diagnose",
+        action="store_true",
+        help="Also print a supervisor diagnosis (LLM when configured, rules-only otherwise)",
+    )
     health_parser.set_defaults(handler=cmd_health)
+
+    phase_parser = subparsers.add_parser(
+        "phase",
+        parents=[shared],
+        help="Show or set the lifecycle phase (REQUIREMENTS..MAINTENANCE)",
+    )
+    phase_parser.add_argument(
+        "action",
+        choices=["show", "set"],
+        help="show the current phase, or set it explicitly",
+    )
+    phase_parser.add_argument(
+        "value",
+        nargs="?",
+        default=None,
+        help="Phase name for 'set' (e.g. IMPLEMENTATION)",
+    )
+    phase_parser.set_defaults(handler=cmd_phase)
+
+    waive_parser = subparsers.add_parser(
+        "waive",
+        parents=[shared],
+        help="Drop a blocking dependency edge (human unblock for deadlocks)",
+    )
+    waive_parser.add_argument("task", help="Task to unblock (e.g. TASK-004)")
+    waive_parser.add_argument(
+        "--dep",
+        dest="dep",
+        required=True,
+        help="Dependency id to remove (e.g. TASK-003)",
+    )
+    waive_parser.add_argument(
+        "--reason",
+        dest="reason",
+        default="",
+        help="Reason recorded in CHANGELOG.md",
+    )
+    waive_parser.set_defaults(handler=cmd_waive)
 
     agents_parser = subparsers.add_parser(
         "agents", parents=[shared], help="List registered specialist agents"
@@ -256,6 +300,9 @@ def cmd_init(args: argparse.Namespace) -> int:
             "next_tasks": [],
             "blockers": [],
             "human_decisions": [],
+            "constraints": {"schedule": "TBD", "team": "TBD", "standards": "TBD"},
+            "budget": {"hours": None, "tokens": None},
+            "resources": {"hardware": [], "services": [], "people": []},
             "last_checkpoint": {
                 "id": "none",
                 "date": now[:10],
@@ -322,11 +369,20 @@ def cmd_init(args: argparse.Namespace) -> int:
             print(f"ERROR: {problem}", file=sys.stderr)
         return 1
 
+    # A7: baseline checkpoint so a fresh project can always be restored.
+    try:
+        orchestrator = MasterOrchestrator(target)
+        orchestrator.create_checkpoint(
+            "cp-000-init", notes="Project initialized (orchestrator init)"
+        )
+    except (CheckpointError, StateError, OrchestratorError) as exc:
+        print(f"warning: init checkpoint not created: {exc}", file=sys.stderr)
+
     print(f"Initialized project '{name}' at {target}/")
     print("Next steps:")
     print(f"  1. Write the one-sentence goal: {target}/{config.MEMORY_FILE}")
-    print("  2. Create REQUIREMENTS.md and initial TASKS.yaml tasks")
-    print("  3. Full checklist: project-templates/NEW_PROJECT_CHECKLIST.md")
+    print(f"  2. Create REQUIREMENTS.md and initial TASKS.yaml tasks")
+    print(f"  3. Full checklist: project-templates/NEW_PROJECT_CHECKLIST.md")
     print(f"  4. orchestrator --project {target} tasks")
     return 0
 
@@ -448,10 +504,70 @@ def cmd_health(args: argparse.Namespace) -> int:
     orchestrator = MasterOrchestrator(_resolve_project(args))
     report = orchestrator.sync_health()
     print(report.render())
+    if bool(getattr(args, "diagnose", False)):
+        print()
+        print("DIAGNOSIS")
+        print("-" * 40)
+        print(orchestrator.supervisor.diagnose())
     if report.state == config.HEALTH_HUMAN_DECISION_REQUIRED:
         return 4
     if report.state in (config.HEALTH_STALLED, config.HEALTH_BLOCKED):
         return 3
+    return 0
+
+
+def cmd_phase(args: argparse.Namespace) -> int:
+    project = _resolve_project(args)
+    state = StateManager(project)
+    action = getattr(args, "action", "show")
+    value = getattr(args, "value", None)
+
+    if action == "show" or not value:
+        current = str(
+            (state.load_project().get("phase") or {}).get("current")
+            or config.PHASE_REQUIREMENTS
+        )
+        derived = state.derive_phase()
+        print(f"Current phase: {current}")
+        print(f"Derived phase: {derived}  (from task graph)")
+        print(f"Known phases:  {', '.join(config.PHASES)}")
+        return 0
+
+    phase = str(value).strip().upper()
+    previous = str(
+        (state.load_project().get("phase") or {}).get("current")
+        or config.PHASE_REQUIREMENTS
+    )
+    state.set_phase(phase)  # validates against config.PHASES
+    state.append_changelog(f"Phase set to {phase} (was {previous})")
+    print(f"Phase: {previous} -> {phase}")
+
+    if config.phase_index(phase) > config.phase_index(previous):
+        orchestrator = MasterOrchestrator(project)
+        checkpoint_id = f"cp-phase-{phase.lower()}"
+        existing = {
+            str(entry.get("id")) for entry in orchestrator.checkpoints.list_checkpoints()
+        }
+        if checkpoint_id not in existing:
+            orchestrator.create_checkpoint(
+                checkpoint_id, notes=f"Phase set to {phase}"
+            )
+            print(f"Checkpoint: {checkpoint_id}")
+    return 0
+
+
+def cmd_waive(args: argparse.Namespace) -> int:
+    project = _resolve_project(args)
+    state = StateManager(project)
+    task_id = str(getattr(args, "task", "") or "")
+    dep_id = str(getattr(args, "dep", "") or "")
+    reason = str(getattr(args, "reason", "") or "")
+    task = state.relax_dependency(task_id, dep_id)
+    entry = f"Dependency {dep_id} waived on {task_id}"
+    if reason:
+        entry += f": {reason}"
+    state.append_changelog(entry)
+    print(f"{entry} (task is now {task.get('status')})")
     return 0
 
 

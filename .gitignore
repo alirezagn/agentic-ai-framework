@@ -41,6 +41,8 @@ env/
 logs/*
 !logs/README.md
 checkpoints/
+projects/*
+!projects/kid-robot-face/
 *.log
 .env
 .env.local

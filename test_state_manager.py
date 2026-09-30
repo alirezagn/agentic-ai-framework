@@ -94,10 +94,11 @@ class TestUtilizationMeasuredPerDispatch:
 
 class TestEscalationPersistence:
     def _trip_loop(self, state: StateManager) -> None:
-        state.update_task_execution(
-            "TASK-002", attempt_delta=3, no_progress_delta=5, strategy_changed=True
-        )
+        # Strategy changed twice first, then the new strategy was hammered
+        # three times without progress — trips every loop detector at once.
         state.update_task_execution("TASK-002", strategy_changed=True)
+        state.update_task_execution("TASK-002", strategy_changed=True)
+        state.update_task_execution("TASK-002", attempt_delta=3, no_progress_delta=5)
 
     def test_sync_persists_escalations_as_human_decisions(
         self, test_project: Path

@@ -212,3 +212,16 @@ def test_project(tmp_path: Path) -> Path:
 @pytest.fixture()
 def checkpoints_root(tmp_path: Path) -> Path:
     return tmp_path / "checkpoints"
+
+
+@pytest.fixture(autouse=True)
+def _redirect_default_checkpoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep default-root checkpoints inside the test's tmp dir (gap E1).
+
+    Any code that builds a CheckpointManager/checkpoints_root=None (CLI
+    commands, MasterOrchestrator defaults) would otherwise write into the
+    working tree's ``checkpoints/`` folder.
+    """
+    root = tmp_path / "default-checkpoints"
+    monkeypatch.setenv("ORCHESTRATOR_CHECKPOINTS_DIR", str(root))
+    return root

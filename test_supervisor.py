@@ -89,10 +89,11 @@ class TestLoopFaultThresholds:
 
     def test_escalation_created_when_strategy_exhausted(self, test_project: Path) -> None:
         state = StateManager(test_project)
-        state.update_task_execution(
-            "TASK-002", attempt_delta=3, no_progress_delta=5, strategy_changed=True
-        )
-        state.update_task_execution("TASK-002", attempt_delta=0, strategy_changed=True)
+        # Two alternative strategies were tried first; the third strategy then
+        # hammered the same failing approach three times with no progress.
+        state.update_task_execution("TASK-002", strategy_changed=True)
+        state.update_task_execution("TASK-002", strategy_changed=True)
+        state.update_task_execution("TASK-002", attempt_delta=3, no_progress_delta=5)
         supervisor = SupervisorAgent(state_manager=state)
         report = supervisor.check_health()
         kinds = {loop.kind for loop in report.loops}

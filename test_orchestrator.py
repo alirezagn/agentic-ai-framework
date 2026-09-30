@@ -177,11 +177,16 @@ class TestMasterOrchestrator:
         assert results and results[0].succeeded
 
         project = orchestrator.state.load_project()
-        assert project["context"]["utilization_percent"] >= 70, (
-            "context utilisation must be measured after each dispatch"
+        # Crossing 70% must fire the auto checkpoint (proves dispatch measured
+        # utilisation) and, under cumulative accounting (B2), compaction then
+        # resets the token budget for the next session segment.
+        checkpoint_id = str(results[0].checkpoint_id or "")
+        assert checkpoint_id.startswith("cp-auto-"), checkpoint_id
+        assert project["context"]["utilization_percent"] < 70, (
+            "compaction must reset the measured utilisation"
         )
-        assert results[0].checkpoint_id is not None
-        assert results[0].checkpoint_id.startswith("cp-auto-")
+        assert int(project["context"].get("cumulative_tokens", 0)) < 700
+        assert orchestrator.state.load_changelog().count("Auto checkpoint") >= 1
 
         ids = [entry["id"] for entry in orchestrator.checkpoints.list_checkpoints()]
         assert any(cid.startswith("cp-auto-") for cid in ids)
@@ -199,8 +204,13 @@ class TestMasterOrchestrator:
             test_project, checkpoints_root=checkpoints_root, auto_checkpoint=True
         )
         results = orchestrator.run_cycle()
-        assert results[0].checkpoint_id is None
-        assert orchestrator.checkpoints.list_checkpoints() == []
+        ids = [str(entry.get("id")) for entry in orchestrator.checkpoints.list_checkpoints()]
+        # No compaction checkpoint below the threshold; the only allowed
+        # checkpoint is the A7 phase-advance one.
+        assert not any(item.startswith("cp-auto") for item in ids)
+        assert not any(item.startswith("cp-milestone") for item in ids)
+        checkpoint_id = str(results[0].checkpoint_id or "")
+        assert checkpoint_id == "" or checkpoint_id.startswith("cp-phase-")
 
     def test_checkpoint_and_resume_round_trip(
         self, test_project: Path, checkpoints_root: Path

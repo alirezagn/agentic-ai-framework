@@ -87,11 +87,17 @@ class LoopDetection:
 
 @dataclass
 class Escalation:
-    """An event that requires a human decision."""
+    """An event that requires attention.
+
+    ``blocking`` escalations move the project to HUMAN_DECISION_REQUIRED;
+    non-blocking ones are advisories that classify as WARNING (B6).
+    """
 
     task_id: str
     reason: str
     options: List[str] = field(default_factory=list)
+    category: str = "general"
+    blocking: bool = True
     created_at: str = field(default_factory=utc_now_iso)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -99,6 +105,8 @@ class Escalation:
             "task_id": self.task_id,
             "reason": self.reason,
             "options": list(self.options),
+            "category": self.category,
+            "blocking": self.blocking,
             "created_at": self.created_at,
         }
 
@@ -117,6 +125,8 @@ class HealthReport:
     escalations: List[Escalation]
     recommendations: List[str]
     checked_at: str = field(default_factory=utc_now_iso)
+    stale_blocks: List[str] = field(default_factory=list)
+    decision_conflicts: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def loop_detected(self) -> bool:
@@ -137,6 +147,8 @@ class HealthReport:
             "ready_tasks": self.ready_task_ids,
             "escalations": [escalation.to_dict() for escalation in self.escalations],
             "recommendations": self.recommendations,
+            "stale_blocks": list(self.stale_blocks),
+            "decision_conflicts": list(self.decision_conflicts),
             "checked_at": self.checked_at,
             "loop_detected": self.loop_detected,
             "deadlock_detected": self.deadlock_detected,
@@ -179,10 +191,34 @@ class HealthReport:
         else:
             lines.append("  [None]")
         lines.append("")
+        lines.append(f"STALE BLOCKS ({len(self.stale_blocks)}):")
+        if self.stale_blocks:
+            for task_id in self.stale_blocks:
+                lines.append(
+                    f"  - {task_id}: BLOCKED but every dependency is satisfied "
+                    "(run refresh_ready_states)"
+                )
+        else:
+            lines.append("  [None]")
+        lines.append("")
+        lines.append(f"DECISION CONFLICTS ({len(self.decision_conflicts)}):")
+        if self.decision_conflicts:
+            for conflict in self.decision_conflicts:
+                lines.append(
+                    f"  - {conflict.get('task_id')}: pending "
+                    f"{', '.join(conflict.get('decision_ids') or [])}"
+                )
+        else:
+            lines.append("  [None]")
+        lines.append("")
         lines.append(f"ESCALATIONS ({len(self.escalations)}):")
         if self.escalations:
             for escalation in self.escalations:
-                lines.append(f"  - {escalation.task_id}: {escalation.reason}")
+                marker = "blocking" if escalation.blocking else "advisory"
+                lines.append(
+                    f"  - [{escalation.category}/{marker}] {escalation.task_id}: "
+                    f"{escalation.reason}"
+                )
                 for option in escalation.options:
                     lines.append(f"      * {option}")
         else:
@@ -262,16 +298,26 @@ class SupervisorAgent:
                 strategy_changes = int(execution.get("strategy_changes", 0) or 0)
             except (TypeError, ValueError):
                 attempts, no_progress, strategy_changes = 0, 0, 0
+            # A5: "same strategy" means attempts since the last strategy
+            # change. Legacy projects without the field use attempt_count.
+            since_raw = execution.get("attempts_since_change")
+            if since_raw is None:
+                since_change = attempts
+            else:
+                try:
+                    since_change = int(since_raw or 0)
+                except (TypeError, ValueError):
+                    since_change = attempts
 
-            if attempts >= self.thresholds.same_strategy_max_attempts:
+            if since_change >= self.thresholds.same_strategy_max_attempts:
                 detections.append(
                     LoopDetection(
                         task_id=task_id,
                         kind=config.LOOP_KIND_SAME_STRATEGY,
-                        count=attempts,
+                        count=since_change,
                         threshold=self.thresholds.same_strategy_max_attempts,
                         detail=(
-                            f"same failing strategy attempted {attempts} times "
+                            f"same failing strategy attempted {since_change} times "
                             f"(limit {self.thresholds.same_strategy_max_attempts})"
                         ),
                     )
@@ -316,6 +362,23 @@ class SupervisorAgent:
                         detail=(
                             f"{repeats} substantially identical outputs in a row "
                             f"(limit {self.thresholds.identical_output_max_repeats})"
+                        ),
+                    )
+                )
+            try:
+                stall = int(execution.get("evidence_stall_count", 0) or 0)
+            except (TypeError, ValueError):
+                stall = 0
+            if stall >= self.thresholds.evidence_stall_max:
+                detections.append(
+                    LoopDetection(
+                        task_id=task_id,
+                        kind=config.LOOP_KIND_NO_NEW_EVIDENCE,
+                        count=stall,
+                        threshold=self.thresholds.evidence_stall_max,
+                        detail=(
+                            f"{stall} dispatches produced no new artifacts or "
+                            f"decisions (limit {self.thresholds.evidence_stall_max})"
                         ),
                     )
                 )
@@ -396,12 +459,50 @@ class SupervisorAgent:
             "independent_work_available": bool(ready_ids),
         }
 
+    def detect_stale_blocks(
+        self, tasks: Optional[Sequence[Dict[str, Any]]] = None
+    ) -> List[str]:
+        """BLOCKED tasks whose dependencies are all satisfied (A3).
+
+        A stale block means refresh_ready_states did not run (or a status was
+        set manually); the graph says the task could move to READY.
+        """
+        task_list = list(tasks) if tasks is not None else self.state_manager.load_tasks()
+        stale: List[str] = []
+        for task in task_list:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status", "")) != config.TASK_BLOCKED:
+                continue
+            if self.state_manager.dependencies_satisfied(task, task_list):
+                stale.append(str(task.get("id")))
+        return sorted(stale)
+
+    def detect_decision_conflicts(self) -> List[Dict[str, Any]]:
+        """Tasks targeted by more than one pending PROPOSED_CHANGE (A3)."""
+        pending = self.state_manager.pending_proposed_changes()
+        by_task: Dict[str, List[str]] = {}
+        for decision in pending:
+            dec_id = str(decision.get("id") or "DEC-UNKNOWN")
+            affected = decision.get("affected_tasks") or []
+            if not affected:
+                by_task.setdefault("UNSPECIFIED", []).append(dec_id)
+            for task_id in affected:
+                by_task.setdefault(str(task_id), []).append(dec_id)
+        return [
+            {"task_id": task_id, "decision_ids": sorted(ids)}
+            for task_id, ids in sorted(by_task.items())
+            if len(ids) > 1
+        ]
+
     def build_escalations(
         self,
         loops: Sequence[LoopDetection],
         deadlocks: Sequence[List[str]],
         blocked_info: Dict[str, Any],
         context: Dict[str, Any],
+        stale_blocks: Optional[Sequence[str]] = None,
+        decision_conflicts: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> List[Escalation]:
         escalations: List[Escalation] = []
         for loop in loops:
@@ -427,6 +528,17 @@ class SupervisorAgent:
                     "Cancel the task and replan",
                     "Escalate to a human for a decision",
                 ]
+            elif loop.kind == config.LOOP_KIND_NO_NEW_EVIDENCE:
+                reason = (
+                    f"Task {loop.task_id} produced no new artifacts, decisions or "
+                    f"requirement updates for {loop.count} dispatches "
+                    f"(limit {loop.threshold})."
+                )
+                options = [
+                    "Verify the agent is writing the expected evidence files",
+                    "Change the strategy or split the task",
+                    "Escalate to a human for a decision",
+                ]
             else:
                 reason = (
                     f"Task {loop.task_id} exhausted all alternative strategies "
@@ -437,7 +549,15 @@ class SupervisorAgent:
                     "Accept a documented limitation",
                     "Redistribute the work to another agent",
                 ]
-            escalations.append(Escalation(task_id=loop.task_id, reason=reason, options=options))
+            escalations.append(
+                Escalation(
+                    task_id=loop.task_id,
+                    reason=reason,
+                    options=options,
+                    category="loop",
+                    blocking=True,
+                )
+            )
 
         for cycle in deadlocks:
             escalations.append(
@@ -449,6 +569,8 @@ class SupervisorAgent:
                         "Split one of the tasks",
                         "Relax a nonessential dependency",
                     ],
+                    category="deadlock",
+                    blocking=True,
                 )
             )
 
@@ -464,6 +586,8 @@ class SupervisorAgent:
                         "Compact context immediately",
                         "Save a checkpoint and discard working history",
                     ],
+                    category="context",
+                    blocking=False,
                 )
             )
 
@@ -482,6 +606,46 @@ class SupervisorAgent:
                         "Waive a nonessential dependency",
                         "Ask a human for the missing input",
                     ],
+                    category="starvation",
+                    blocking=True,
+                )
+            )
+
+        for conflict in decision_conflicts or []:
+            task_id = str(conflict.get("task_id") or "UNKNOWN")
+            ids = ", ".join(conflict.get("decision_ids") or [])
+            escalations.append(
+                Escalation(
+                    task_id=task_id,
+                    reason=(
+                        f"Task {task_id} is targeted by multiple pending "
+                        f"PROPOSED_CHANGE decisions ({ids}) — approving one may "
+                        "invalidate another."
+                    ),
+                    options=[
+                        "Reject the superseded change",
+                        "Merge the changes into a single decision",
+                        "Decide the order of application explicitly",
+                    ],
+                    category="decision_conflict",
+                    blocking=True,
+                )
+            )
+
+        for task_id in stale_blocks or []:
+            escalations.append(
+                Escalation(
+                    task_id=str(task_id),
+                    reason=(
+                        f"Task {task_id} is BLOCKED but every dependency is "
+                        "satisfied — the state is stale."
+                    ),
+                    options=[
+                        "Run refresh_ready_states to promote the task",
+                        "Re-check the dependency edge manually",
+                    ],
+                    category="stale_block",
+                    blocking=False,
                 )
             )
         return escalations
@@ -493,9 +657,18 @@ class SupervisorAgent:
         blocked_info: Dict[str, Any],
         context: Dict[str, Any],
         escalations: Sequence[Escalation],
+        recovering: bool = False,
     ) -> HealthState:
-        if escalations:
+        # C2: an active recovery (fresh strategy change) with loop signals is
+        # RECOVERY, not a human decision — checked before escalations so the
+        # pre-recovery signals do not bounce the state straight back.
+        if recovering and loops:
+            return HealthState.RECOVERY
+        blocking = [escalation for escalation in escalations if escalation.blocking]
+        if blocking:
             return HealthState.HUMAN_DECISION_REQUIRED
+        if escalations:
+            return HealthState.WARNING
         if loops:
             return HealthState.STALLED
         if deadlocks:
@@ -520,8 +693,25 @@ class SupervisorAgent:
         loops = self.detect_loops(tasks)
         deadlocks = self.detect_circular_dependencies(tasks)
         blocked_info = self.analyze_blocked(tasks)
-        escalations = self.build_escalations(loops, deadlocks, blocked_info, context)
-        state = self.classify_state(loops, deadlocks, blocked_info, context, escalations)
+        stale_blocks = self.detect_stale_blocks(tasks)
+        decision_conflicts = self.detect_decision_conflicts()
+        escalations = self.build_escalations(
+            loops,
+            deadlocks,
+            blocked_info,
+            context,
+            stale_blocks=stale_blocks,
+            decision_conflicts=decision_conflicts,
+        )
+        recovering = any(
+            str(task.get("status", "")) not in config.TERMINAL_TASK_STATUSES
+            and bool((task.get("execution") or {}).get("recovering"))
+            for task in tasks
+            if isinstance(task, dict)
+        )
+        state = self.classify_state(
+            loops, deadlocks, blocked_info, context, escalations, recovering=recovering
+        )
 
         recommendations: List[str] = []
         if context.get("compaction_required"):
@@ -547,6 +737,16 @@ class SupervisorAgent:
                 f"{len(blocked_info['failed_task_ids'])} failed task(s) — failure risks "
                 "are tracked in RISKS.md; re-plan before re-dispatching."
             )
+        if stale_blocks:
+            recommendations.append(
+                f"{len(stale_blocks)} stale block(s): BLOCKED tasks whose dependencies "
+                "are satisfied — run refresh_ready_states."
+            )
+        if decision_conflicts:
+            recommendations.append(
+                "Pending PROPOSED_CHANGE decisions overlap — resolve the conflict "
+                "before approving either change."
+            )
         if not recommendations:
             recommendations.append("All systems healthy — continue execution.")
 
@@ -560,10 +760,88 @@ class SupervisorAgent:
             ready_task_ids=blocked_info["ready_task_ids"],
             escalations=escalations,
             recommendations=recommendations,
+            stale_blocks=stale_blocks,
+            decision_conflicts=decision_conflicts,
         )
 
     def print_health_report(self) -> str:
         return self.check_health().render()
+
+    # ------------------------------------------------------------------
+    # Diagnosis (B5)
+    # ------------------------------------------------------------------
+
+    def diagnose(self, use_llm: bool = True) -> str:
+        """Explain the current health state and what to do about it.
+
+        Uses the configured LLM when a provider is available and reachable;
+        any failure (no provider, network down, bad response) falls back to
+        the deterministic rules-only diagnosis so this never raises.
+        """
+        report = self.check_health()
+        lines = [
+            f"State: {report.state}",
+            f"Context: {report.context.get('utilization_percent', 0)}% "
+            f"({report.context.get('band')})",
+        ]
+        if report.loops:
+            lines.append("Loops:")
+            lines.extend(
+                f"  - {loop.task_id}: {loop.kind} {loop.count}/{loop.threshold} "
+                f"({'exceeded' if loop.exceeded else 'watch'})"
+                for loop in report.loops
+            )
+        if report.deadlocks:
+            lines.append("Deadlocks:")
+            lines.extend("  - " + " -> ".join(cycle) for cycle in report.deadlocks)
+        if report.stale_blocks:
+            lines.append(
+                "Stale blocks: " + ", ".join(report.stale_blocks)
+                + " (dependencies satisfied — refresh state)"
+            )
+        if report.decision_conflicts:
+            lines.append(
+                "Decision conflicts: "
+                + "; ".join(
+                    f"{c.get('task_id')} <- {', '.join(c.get('decision_ids') or [])}"
+                    for c in report.decision_conflicts
+                )
+            )
+        if report.escalations:
+            lines.append("Escalations:")
+            lines.extend(
+                f"  - [{esc.category}] {esc.task_id}: {esc.reason}"
+                for esc in report.escalations
+            )
+        if report.blocked_task_ids:
+            lines.append("Blocked: " + ", ".join(report.blocked_task_ids))
+        if report.failed_task_ids:
+            lines.append("Failed: " + ", ".join(report.failed_task_ids))
+        lines.extend(f"Recommendation: {item}" for item in report.recommendations)
+        rules_diagnosis = "\n".join(lines)
+
+        if not use_llm:
+            return rules_diagnosis
+        try:
+            from .llm_client import LLMClient
+
+            if not LLMClient.is_available():
+                return rules_diagnosis
+            client = LLMClient()
+            result = client.complete(
+                system=(
+                    "You are the supervisor of an autonomous agent framework. "
+                    "Give a short, concrete diagnosis (max 6 lines) of the project "
+                    "health below and the single best next action. No preamble."
+                ),
+                messages=[{"role": "user", "content": rules_diagnosis}],
+                max_tokens=400,
+            )
+            text = (result.text or "").strip()
+            return text or rules_diagnosis
+        except Exception:  # noqa: BLE001 — diagnosis must never raise
+            logger.debug("LLM diagnosis failed; using rules-only output", exc_info=True)
+            return rules_diagnosis
 
     # ------------------------------------------------------------------
     # State synchronisation helpers
@@ -619,7 +897,7 @@ class SupervisorAgent:
             )
             for escalation in report.escalations:
                 self.state_manager.add_human_decision(
-                    f"{escalation.task_id}: {escalation.reason}"
+                    f"[{escalation.category}] {escalation.task_id}: {escalation.reason}"
                 )
             # Keep RISKS.md current: every failed task gets a (deduped) entry.
             for task_id in report.failed_task_ids:

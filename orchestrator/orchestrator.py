@@ -20,7 +20,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import config
 from .agents.base_agent import (
@@ -32,7 +32,7 @@ from .agents.base_agent import (
     normalize_agent_name,
 )
 from .checkpoint_manager import CheckpointManager
-from .context_monitor import utilization_for_output
+from .context_monitor import tokens_for_output, utilization_for_output
 from .state_manager import (
     StateError,
     StateManager,
@@ -176,6 +176,18 @@ class MasterOrchestrator:
             raise TaskNotFoundError(f"No task with id '{task_id}' in {self.state.tasks_yaml}")
         return task
 
+    def _persist_last_loop(self, task_id: str, loop: LoopDetection) -> None:
+        """Record why a dispatch was refused (A5: visible after resume)."""
+        if loop.task_id != task_id:
+            # PROJECT-level detections (oscillation) are not task state.
+            return
+        try:
+            self.state.update_task_execution(
+                task_id, set_values={"last_loop": loop.to_dict()}
+            )
+        except StateError:
+            logger.debug("could not persist last_loop for %s", task_id, exc_info=True)
+
     def dispatch(
         self, task_id: str, strategy_changed: bool = False, fresh_agent: bool = False
     ) -> TaskRunResult:
@@ -192,6 +204,7 @@ class MasterOrchestrator:
 
             oscillation = self._detect_oscillation()
             if oscillation is not None:
+                self._persist_last_loop(task_id, oscillation)
                 raise LoopLimitExceededError(
                     f"Task '{task_id}' refused: project state is oscillating "
                     f"({oscillation.detail})",
@@ -200,6 +213,7 @@ class MasterOrchestrator:
 
             loop = self.supervisor.should_block_dispatch(task_id)
             if loop is not None:
+                self._persist_last_loop(task_id, loop)
                 raise LoopLimitExceededError(
                     f"Task '{task_id}' exceeded the {loop.kind} limit "
                     f"({loop.count}/{loop.threshold}): {loop.detail}",
@@ -262,10 +276,19 @@ class MasterOrchestrator:
                     )
                     self.state.update_task_execution(task_id, reset_error=True)
                 if new_status != config.TASK_FAILED:
-                    self.state.update_task_execution(task_id, no_progress_delta=-1)
                     self.state.append_current_state(
                         f"{task_id} ({agent.AGENT_ID}) -> {new_status}: {output.summary}"
                     )
+                # B7: evidence of progress cancels the pre-execution no-progress
+                # bump recorded in phase 1 (failed attempts that still produced
+                # artifacts count as progress too).
+                progressed = new_status in (
+                    config.TASK_REVIEW,
+                    config.TASK_DONE,
+                    config.TASK_DONE_WITH_LIMITATION,
+                ) or bool(output.artifacts)
+                if progressed:
+                    self.state.update_task_execution(task_id, no_progress_delta=-1)
             elif output.status == config.AGENT_STATUS_BLOCKED:
                 new_status = config.TASK_BLOCKED
                 error_text = "; ".join(output.errors) or output.summary
@@ -292,11 +315,30 @@ class MasterOrchestrator:
                     output.warnings = list(output.warnings) + [
                         f"{risk_id} recorded in RISKS.md for {task_id}"
                     ]
+                    if self.auto_checkpoint:
+                        self.create_checkpoint(
+                            f"cp-risk-{risk_id}",
+                            notes=f"Failure risk {risk_id} recorded for {task_id}",
+                        )
 
             self._record_loop_signals(task_id, task, output)
+            self._ingest_output_tasks(output)
+            if new_status in (
+                config.TASK_REVIEW,
+                config.TASK_DONE,
+                config.TASK_DONE_WITH_LIMITATION,
+            ):
+                self.state.update_task_execution(task_id, set_values={"last_loop": None})
 
             after = self.get_task(task_id)
+            previous_phase = str(
+                (self.state.load_project().get("phase") or {}).get("current")
+                or config.PHASE_REQUIREMENTS
+            )
             self.state.recompute_derived_state()
+            # Side effect first, then pick the *reported* id: compaction >
+            # milestone > phase (every check must run — no short-circuit).
+            phase_checkpoint = self._checkpoint_phase_advance(previous_phase)
             self._record_fingerprint()
             loop_now = None
             for detection in self.supervisor.detect_loops([after]):
@@ -304,7 +346,11 @@ class MasterOrchestrator:
                     loop_now = detection
                     break
 
-            checkpoint_id = self._maybe_auto_checkpoint(after) or self.check_milestones()
+            checkpoint_id = (
+                self._maybe_auto_checkpoint(after)
+                or self.check_milestones()
+                or phase_checkpoint
+            )
             return TaskRunResult(
                 task_id=task_id,
                 agent_id=agent.AGENT_ID,
@@ -324,14 +370,62 @@ class MasterOrchestrator:
         normalized = " ".join(" ".join(parts).lower().split())
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
+    def _ingest_output_tasks(self, output: AgentOutput) -> List[str]:
+        """Append goal-derived tasks carried in ``data.tasks`` (A2)."""
+        if output.status != config.AGENT_STATUS_COMPLETED:
+            return []
+        data = output.data if isinstance(output.data, dict) else {}
+        raw = data.get("tasks")
+        if not isinstance(raw, list) or not raw:
+            return []
+        created: List[str] = []
+        for spec in raw:
+            if not isinstance(spec, dict):
+                continue
+            try:
+                task = self.state.append_task(dict(spec))
+            except StateError as exc:
+                output.warnings = list(output.warnings) + [
+                    f"task ingest skipped: {exc}"
+                ]
+                continue
+            created.append(str(task.get("id")))
+        if created:
+            self.state.append_current_state(
+                f"Tasks added from agent output: {', '.join(created)}"
+            )
+        return created
+
+    def _checkpoint_phase_advance(self, previous_phase: str) -> Optional[str]:
+        """Checkpoint when the derived lifecycle phase moves forward (A7)."""
+        if not self.auto_checkpoint:
+            return None
+        current = str(
+            (self.state.load_project().get("phase") or {}).get("current")
+            or config.PHASE_REQUIREMENTS
+        )
+        if config.phase_index(current) <= config.phase_index(previous_phase):
+            return None
+        checkpoint_id = f"cp-phase-{current.lower()}"
+        existing = {
+            str(entry.get("id")) for entry in self.checkpoints.list_checkpoints()
+        }
+        if checkpoint_id in existing:
+            return None
+        return self.create_checkpoint(
+            checkpoint_id, notes=f"Phase advanced to {current}"
+        )
+
     def _record_loop_signals(
         self, task_id: str, task: Dict[str, Any], output: AgentOutput
     ) -> None:
-        """Persist strategy-change and repeated-output signals.
+        """Persist strategy-change, repeated-output and evidence signals.
 
         ``data.strategy_changed`` from an agent advances the alternative
         strategy counter; consecutive identical outputs increment
-        ``repeated_output_count``. Both counters feed
+        ``repeated_output_count``; dispatches that add no new artifacts,
+        documents or decisions increment ``evidence_stall_count`` (A4 —
+        ``no_new_evidence``). All counters feed
         :meth:`SupervisorAgent.detect_loops`.
         """
         execution = task.get("execution") or {}
@@ -349,13 +443,36 @@ class MasterOrchestrator:
         strategy_changed = bool(
             isinstance(output.data, dict) and output.data.get("strategy_changed")
         )
+
+        # A4: did this dispatch leave new evidence behind?
+        data = output.data if isinstance(output.data, dict) else {}
+        known_artifacts = {
+            str(item) for item in (execution.get("known_artifacts") or [])
+        }
+        fresh_artifacts = {
+            str(item) for item in (output.artifacts or []) if str(item) not in known_artifacts
+        }
+        documents = data.get("documents") if isinstance(data.get("documents"), dict) else {}
+        proposed = isinstance(data.get("proposed_change"), dict)
+        has_new_evidence = bool(fresh_artifacts) or bool(documents) or proposed
+        try:
+            previous_stall = int(execution.get("evidence_stall_count", 0) or 0)
+        except (TypeError, ValueError):
+            previous_stall = 0
+        stall = 0 if has_new_evidence else previous_stall + 1
+
+        set_values: Dict[str, Any] = {
+            "last_output_hash": fingerprint,
+            "repeated_output_count": repeats,
+            "evidence_stall_count": stall,
+            "known_artifacts": sorted(
+                known_artifacts | {str(item) for item in (output.artifacts or [])}
+            ),
+        }
         self.state.update_task_execution(
             task_id,
             strategy_changed=strategy_changed,
-            set_values={
-                "last_output_hash": fingerprint,
-                "repeated_output_count": repeats,
-            },
+            set_values=set_values,
         )
 
     def _record_fingerprint(self) -> None:
@@ -396,18 +513,21 @@ class MasterOrchestrator:
         )
 
     def _update_context_utilization(self, agent: BaseAgent, output: AgentOutput) -> float:
-        """Persist the measured context utilisation of one agent execution.
+        """Persist the measured context cost of one agent execution (B2).
 
-        Re-arms the 70% compaction / 85% critical path: the value written here
-        is what :meth:`SupervisorAgent.check_context_usage` acts on.
+        Tokens are accumulated into ``context.cumulative_tokens`` so the
+        utilisation reflects the whole session; it only resets when a
+        compaction event fires. The value written here is what
+        :meth:`SupervisorAgent.check_context_usage` acts on (70%/85%).
         """
         data = output.data if isinstance(output.data, dict) else {}
-        percent = utilization_for_output(data, getattr(agent, "last_payload_chars", 0))
+        chars = getattr(agent, "last_payload_chars", 0)
+        tokens = tokens_for_output(data, chars)
         try:
-            self.state.set_context_utilization(percent)
+            self.state.add_context_tokens(tokens)
         except StateError:
             pass
-        return percent
+        return utilization_for_output(data, chars)
 
     # ------------------------------------------------------------------
     # Decision control (PROPOSED_CHANGE gate) — framework/00:132-157
@@ -466,6 +586,7 @@ class MasterOrchestrator:
             recommendation=str(change.get("recommendation") or ""),
             proposed_by=agent_id,
         )
+        self._set_affected_waiting(affected)
         self.state.add_human_decision(
             f"{record['id']} pending approval: {title} (affects {', '.join(affected)})"
         )
@@ -479,9 +600,49 @@ class MasterOrchestrator:
         ]
         return record
 
+    def _set_affected_waiting(self, affected: Sequence[str]) -> None:
+        """Park non-terminal tasks affected by a pending change in WAITING (C1).
+
+        REVIEW tasks keep their status (the review queue keys off it); the
+        decision gate still refuses them at dispatch time.
+        """
+        for task_id in affected:
+            task = self.state.find_task(str(task_id))
+            if task is None:
+                continue
+            status = str(task.get("status"))
+            if status in config.TERMINAL_TASK_STATUSES or status in (
+                config.TASK_REVIEW,
+                config.TASK_WAITING,
+            ):
+                continue
+            try:
+                self.state.update_task_status(str(task_id), config.TASK_WAITING)
+            except StateError:
+                continue
+
+    def _clear_waiting_after_decision(self, affected: Sequence[str]) -> None:
+        """Return WAITING tasks to READY/BLOCKED once the decision resolved (C1)."""
+        tasks = self.state.load_tasks()
+        by_id = {str(task.get("id")): task for task in tasks}
+        for task_id in affected:
+            task = by_id.get(str(task_id))
+            if task is None or str(task.get("status")) != config.TASK_WAITING:
+                continue
+            target = (
+                config.TASK_READY
+                if self.state.dependencies_satisfied(task, tasks)
+                else config.TASK_BLOCKED
+            )
+            try:
+                self.state.update_task_status(str(task_id), target)
+            except StateError:
+                continue
+
     def approve_decision(self, dec_id: str, approved: bool = True) -> Dict[str, Any]:
         """Human approval/rejection of a recorded decision (opens the gate)."""
         record = self.state.resolve_decision(dec_id, approved=approved)
+        self._clear_waiting_after_decision(record.get("affected_tasks") or [])
         verb = "approved" if approved else "rejected"
         self.state.append_current_state(f"{dec_id} {verb} by human; affected tasks un-gated.")
         return record
@@ -514,6 +675,39 @@ class MasterOrchestrator:
                 filename = Path(raw_name.strip()).name
                 if not (docs_dir / filename).exists():
                     problems.append(f"expected output not materialized: {filename}")
+
+        # B3: requirement traceability — every declared REQ id must exist.
+        declared = task.get("requirement_ids")
+        if isinstance(declared, list) and declared:
+            req_doc = docs_dir / "REQUIREMENTS.md"
+            body = ""
+            if req_doc.exists():
+                try:
+                    body = req_doc.read_text(encoding="utf-8")
+                except OSError:
+                    body = ""
+            if not body.strip():
+                problems.append(
+                    "requirement_ids declared but docs/REQUIREMENTS.md is missing"
+                )
+            else:
+                for raw_req in declared:
+                    req_id = str(raw_req).strip()
+                    if req_id and req_id not in body:
+                        problems.append(f"requirement not found in REQUIREMENTS.md: {req_id}")
+
+        # B3: acceptance evidence — a reported failing check blocks DONE.
+        results = task.get("acceptance_results")
+        if results is None and output is not None:
+            data = output.data if isinstance(output.data, dict) else {}
+            results = data.get("acceptance_results")
+        if isinstance(results, list):
+            for entry in results:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("status", "")).upper() in ("FAIL", "FAILED"):
+                    name = str(entry.get("name") or entry.get("criterion") or "criterion")
+                    problems.append(f"acceptance check failed: {name}")
 
         review = task.get("review") or {}
         if review.get("required") and review.get("status") not in ("PASS", "PASS WITH ACTIONS"):
@@ -600,9 +794,11 @@ class MasterOrchestrator:
 
         loop = self.supervisor.should_block_dispatch(task_id)
         if loop is not None:
+            self._persist_last_loop(task_id, loop)
             raise LoopLimitExceededError(
                 f"Task '{task_id}' exceeded the {loop.kind} limit "
-                f"({loop.count}/{loop.threshold}): {loop.detail}"
+                f"({loop.count}/{loop.threshold}): {loop.detail}",
+                loop=loop,
             )
 
         self._enforce_decision_gate(task_id)
@@ -665,11 +861,18 @@ class MasterOrchestrator:
                 f"follow-up tasks created: {', '.join(created)}"
             ]
         self._record_proposed_change_if_any(task, output, agent.AGENT_ID)
+        previous_phase = str(
+            (self.state.load_project().get("phase") or {}).get("current")
+            or config.PHASE_REQUIREMENTS
+        )
         self.state.recompute_derived_state()
+        phase_checkpoint = self._checkpoint_phase_advance(previous_phase)
         self._record_fingerprint()
-        checkpoint_id = self._maybe_auto_checkpoint(
-            self.get_task(task_id)
-        ) or self.check_milestones()
+        checkpoint_id = (
+            self._maybe_auto_checkpoint(self.get_task(task_id))
+            or self.check_milestones()
+            or phase_checkpoint
+        )
         return TaskRunResult(
             task_id=task_id,
             agent_id=agent.AGENT_ID,
@@ -1031,7 +1234,7 @@ class MasterOrchestrator:
         return created
 
     def compact_context(self, reason: str = "context compaction") -> str:
-        """Checkpoint + memory note at the compaction threshold."""
+        """Checkpoint + memory note + memory fold at the compaction threshold."""
         self._checkpoint_counter += 1
         checkpoint_id = f"cp-auto-{self._checkpoint_counter:03d}"
         existing = {entry.get("id") for entry in self.checkpoints.list_checkpoints()}
@@ -1049,6 +1252,13 @@ class MasterOrchestrator:
                 "Working context was discarded; resume from PROJECT_MEMORY.md and TASKS.yaml."
             ),
         )
+        # B1: fold an oversized PROJECT_MEMORY.md; B2: fresh token budget.
+        folded = self.state.compact_memory()
+        self.state.reset_context_tokens()
+        if folded:
+            self.state.append_current_state(
+                "PROJECT_MEMORY.md folded by compaction (head + tail kept)."
+            )
         self.state.append_current_state(f"Context compacted; checkpoint {checkpoint_id} saved.")
         self.state.append_changelog(f"Auto checkpoint {checkpoint_id} ({reason})")
         return checkpoint_id

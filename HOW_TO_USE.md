@@ -39,7 +39,10 @@ PROJECT.yaml  TASKS.yaml  PROJECT_MEMORY.md  CURRENT_STATE.md
 DECISIONS.md  RISKS.md  CHANGELOG.md  docs/
 ```
 
-The scaffold passes `validate()` immediately. Options:
+The scaffold passes `validate()` immediately, includes empty
+`constraints` / `budget` / `resources` blocks in `PROJECT.yaml` (fill them
+in — spec step "capture goal, constraints, budget, resources"), and writes
+the `cp-000-init` baseline checkpoint. Options:
 
 | Flag | Effect |
 |---|---|
@@ -100,7 +103,9 @@ dir under `projects/` (`init my-app --dest projects`), with
 
 Edit `TASKS.yaml` — every task needs id, owner, status, priority,
 dependencies, `expected_outputs`, `acceptance_criteria`, and optionally
-`review: {required: true}` and `milestone`:
+`review: {required: true}`, `milestone`, and `requirement_ids` (REQ ids
+from `docs/REQUIREMENTS.md`; the Definition of Done checks traceability
+whenever the field is present):
 
 ```yaml
 tasks:
@@ -108,8 +113,9 @@ tasks:
     title: Capture requirements
     owner: requirements_agent      # one of the 10 registered agents
     status: TODO                   # TODO -> READY -> IN_PROGRESS -> DONE
-    priority: CRITICAL
+    priority: CRITICAL             # (WAITING = parked on a PROPOSED_CHANGE)
     dependencies: []
+    requirement_ids: [REQ-001]
     expected_outputs: [docs/REQUIREMENTS.md]
     acceptance_criteria:
       - At least 10 REQ entries with measurable criteria
@@ -117,6 +123,10 @@ tasks:
       required: true
       status: NOT_STARTED
 ```
+
+Tasks can also be created programmatically — `orch.state.append_task(...)`
+allocates `TASK-NNN` and validates owner/dependencies — and planner/reviewer
+`proposed_tasks` output is ingested automatically after dispatch.
 
 Inspect the graph at any time:
 
@@ -167,10 +177,17 @@ ACCEPTED LIMITATION` + follow-up tasks · **FAIL** → `FAILED` + follow-ups.
 ```bash
 ./bin/orchestrator --project projects/my-project status    # summary + health
 ./bin/orchestrator --project projects/my-project health    # exit: 0 ok, 3 stalled/blocked, 4 human decision
+./bin/orchestrator --project projects/my-project health --diagnose   # + LLM/rules diagnosis
+./bin/orchestrator --project projects/my-project phase show          # current vs derived phase
+./bin/orchestrator --project projects/my-project phase set ARCHITECTURE   # manual override (forward-only derive still guards regressions)
 ```
 
-Health states: `HEALTHY`, `WARNING`, `STALLED`, `BLOCKED`, `RECOVERY`,
-`HUMAN_DECISION_REQUIRED`.
+Health states: `HEALTHY`, `WARNING`, `STALLED`, `BLOCKED`, `RECOVERY`
+(a new strategy is in flight), `HUMAN_DECISION_REQUIRED` (blocking
+escalation — loops, deadlocks, decision conflicts). Advisory problems
+(context pressure, stale blocks) stay `WARNING`. Lifecycle phase advances
+automatically as work completes (requirements → architecture → … → release);
+`phase show` compares the stored phase with the derived one.
 
 Loop guards that can refuse dispatch (CLI exit code 3):
 
@@ -181,6 +198,7 @@ Loop guards that can refuse dispatch (CLI exit code 3):
 | `alternatives_exhausted` | 2 alternative strategies used up |
 | `state_oscillation` | project state flips READY↔BLOCKED (4 changes) |
 | `repeated_output` | 3 substantially identical outputs |
+| `no_new_evidence` | 3 dispatches with no new artifacts or decisions |
 
 Recovery = change strategy materially (`data.strategy_changed`), replan, or
 escalate to a human — never retry identically.
@@ -190,7 +208,8 @@ escalate to a human — never retry identically.
 ## 6. Handle decisions and risks
 
 An agent proposing a design change writes a `PROPOSED_CHANGE` entry into
-`DECISIONS.md` and **blocks the affected tasks** until a human responds:
+`DECISIONS.md`; the affected non-terminal tasks park in `WAITING` until a
+human responds:
 
 ```python
 from orchestrator.orchestrator import MasterOrchestrator
@@ -198,11 +217,12 @@ orch = MasterOrchestrator("projects/my-project")
 
 for dec in orch.state.pending_proposed_changes():
     orch.approve_decision(dec["id"], approved=True)    # lift the gate
-    # or approved=False to keep it closed
+    # or approved=False to keep it closed (both return WAITING tasks to READY/BLOCKED)
 ```
 
 Risks: the supervisor appends `RISK-NNN` sections to `RISKS.md` whenever a
-task fails (deduplicated). Add design risks manually in the same format.
+task fails (deduplicated) and snapshots the state as `cp-risk-NNN`. Add
+design risks manually in the same format.
 
 ---
 
@@ -216,6 +236,10 @@ task fails (deduplicated). Add design risks manually in the same format.
 
 - Checkpoints are automatic after dispatch/review (disable with
   `auto_checkpoint=False`), and milestone tasks create `cp-milestone-<slug>`.
+- Automatic checkpoints also fire on lifecycle phase advances
+  (`cp-phase-<name>`), on recorded failure risks (`cp-risk-NNN`), and at
+  context compaction (`cp-auto-NNN`); `orchestrator init` writes the
+  `cp-000-init` baseline.
 - Restore verifies SHA-256 checksums first; with `CHECKPOINT_SIGNING_KEY` set
   it also verifies the HMAC signature.
 - Resume needs **no chat history** — the files are the memory; loop history is
@@ -321,7 +345,11 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 |---|---|
 | `error: --project is required` | pass `--project projects/<name>` before the subcommand |
 | tasks stay `READY` | `tasks` shows unsatisfied deps; finish predecessors |
+| dependency deadlock (exit 4) | `waive TASK-004 --dep TASK-003 --reason "..."` to drop the edge |
+| task stuck in `WAITING` | a pending `PROPOSED_CHANGE` affects it — approve/reject the decision |
+| phase looks wrong | `phase show` (stored vs derived); `phase set <NAME>` to override |
 | `LOOP LIMIT` (exit 3) | change strategy on the task or replan — see §5 |
+| memory/context grows forever | compaction folds MEMORY.md and resets utilization at the 70% threshold |
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
 | `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings |
 | `LLM backend unavailable` | set provider env vars (§8) |
@@ -330,5 +358,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 227 passed
+python3 -m pytest -q      # 275 passed
 ```

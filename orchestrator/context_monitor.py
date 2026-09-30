@@ -71,6 +71,26 @@ def utilization_for_output(
     return utilization_from_chars(payload_char_count)
 
 
+def tokens_for_output(
+    output_data: Optional[Dict[str, Any]], payload_char_count: int
+) -> int:
+    """Tokens consumed by one agent output (B2 cumulative accounting).
+
+    Exact provider usage when reported, otherwise ``chars / 4``.
+    """
+    if isinstance(output_data, dict):
+        usage = output_data.get("usage")
+        if isinstance(usage, dict):
+            try:
+                used = int(usage.get("input_tokens", 0) or 0) + int(
+                    usage.get("output_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                used = 0
+            if used > 0:
+                return used
+    return max(0, int(payload_char_count)) // CHARS_PER_TOKEN
+
+
 __all__ = [
     "DEFAULT_CONTEXT_WINDOW_TOKENS",
     "CHARS_PER_TOKEN",
@@ -79,4 +99,5 @@ __all__ = [
     "utilization_from_chars",
     "payload_chars",
     "utilization_for_output",
+    "tokens_for_output",
 ]

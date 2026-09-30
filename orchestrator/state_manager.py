@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import yaml
 
 from . import config
+from .context_monitor import context_window_tokens, utilization_from_tokens
 from .config import (
     CHANGELOG_FILE,
     CURRENT_STATE_FILE,
@@ -199,7 +200,37 @@ class StateManager:
     def set_context_utilization(self, utilization_percent: float) -> Dict[str, Any]:
         project = self.load_project()
         context = dict(project.get("context") or {})
-        context["utilization_percent"] = int(round(utilization_percent))
+        pct = int(round(utilization_percent))
+        context["utilization_percent"] = pct
+        context["cumulative_tokens"] = int(round(context_window_tokens() * pct / 100.0))
+        project["context"] = context
+        self.save_project(project)
+        return project
+
+    def add_context_tokens(self, tokens: int) -> Dict[str, Any]:
+        """Accumulate real token usage for the session (B2: never resets except on compaction)."""
+        project = self.load_project()
+        context = dict(project.get("context") or {})
+        try:
+            cumulative = int(context.get("cumulative_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            cumulative = 0
+        cumulative = max(0, cumulative + max(0, int(tokens)))
+        context["cumulative_tokens"] = cumulative
+        context["utilization_percent"] = int(
+            round(utilization_from_tokens(cumulative))
+        )
+        project["context"] = context
+        self.save_project(project)
+        return project
+
+    def reset_context_tokens(self) -> Dict[str, Any]:
+        """Reset cumulative usage after a context compaction event."""
+        project = self.load_project()
+        context = dict(project.get("context") or {})
+        context["cumulative_tokens"] = 0
+        context["utilization_percent"] = 0
+        context["compaction_required"] = False
         project["context"] = context
         self.save_project(project)
         return project
@@ -233,10 +264,17 @@ class StateManager:
         return dict(project.get("health") or {})
 
     def set_phase(self, phase: str) -> Dict[str, Any]:
+        if phase not in config.PHASES:
+            raise StateError(
+                f"Invalid phase '{phase}'. Allowed: {', '.join(config.PHASES)}"
+            )
         project = self.load_project()
         phase_block = dict(project.get("phase") or {})
         phase_block["current"] = phase
         project["phase"] = phase_block
+        nested = dict(project.get("project") or {})
+        nested["status"] = phase
+        project["project"] = nested
         self.save_project(project)
         return project
 
@@ -316,11 +354,18 @@ class StateManager:
         return True
 
     def get_ready_tasks(self) -> List[Dict[str, Any]]:
+        """READY tasks plus WAITING tasks still eligible for dispatch.
+
+        WAITING (parked by a pending PROPOSED_CHANGE) is dispatched too so
+        the decision gate can refuse it explicitly; the gate — not the
+        status — is what blocks the work.
+        """
         tasks = self.load_tasks()
         ready = [
             task
             for task in tasks
-            if task.get("status") == config.TASK_READY and self.dependencies_satisfied(task, tasks)
+            if task.get("status") in (config.TASK_READY, config.TASK_WAITING)
+            and self.dependencies_satisfied(task, tasks)
         ]
         ready.sort(key=lambda task: (priority_rank(task.get("priority")), str(task.get("id"))))
         return ready
@@ -365,6 +410,48 @@ class StateManager:
     # ------------------------------------------------------------------
     # Derived state
     # ------------------------------------------------------------------
+
+    def derive_phase(self, tasks: Optional[Sequence[Dict[str, Any]]] = None) -> str:
+        """Derive the project phase from the task graph (A1).
+
+        Forward-only: the first phase (in lifecycle order) owning a
+        non-terminal task wins; phases with no matching tasks are skipped.
+        Phases with no owner (INTEGRATION, RELEASE, ...) are crossed only
+        once every owned group is terminal. Returns RELEASE when every task
+        is terminal, REQUIREMENTS when there are no tasks. Never returns
+        MAINTENANCE (entered manually only).
+        """
+        task_list = list(tasks) if tasks is not None else self.load_tasks()
+        if not task_list:
+            return config.PHASE_REQUIREMENTS
+        terminal = set(config.TERMINAL_TASK_STATUSES)
+        if all(str(task.get("status")) in terminal for task in task_list):
+            return config.PHASE_RELEASE
+        mapped_owners = {
+            owner
+            for owners in config.PHASE_OWNERS.values()
+            for owner in owners
+        }
+        unknown_owners = {
+            str(task.get("owner", ""))
+            for task in task_list
+            if str(task.get("owner", "")) and str(task.get("owner", "")) not in mapped_owners
+        }
+        for phase in config.PHASES:
+            if phase in (config.PHASE_RELEASE, config.PHASE_MAINTENANCE):
+                continue
+            owners = set(config.PHASE_OWNERS.get(phase, ()))
+            if phase == config.PHASE_IMPLEMENTATION:
+                owners |= unknown_owners
+            if not owners:
+                continue
+            owned = [task for task in task_list if str(task.get("owner", "")) in owners]
+            if not owned:
+                continue
+            if any(str(task.get("status")) not in terminal for task in owned):
+                return phase
+        # Every mapped group finished but unknown-owner tasks remain.
+        return config.PHASE_REQUIREMENTS if unknown_owners else config.PHASE_RELEASE
 
     def recompute_derived_state(self) -> Dict[str, Any]:
         """Recompute derived state so status files reflect actual task state.
@@ -473,6 +560,18 @@ class StateManager:
             project["next_tasks"] = next_tasks
             project_changed = True
 
+        # A1: forward-only lifecycle advance derived from the task graph.
+        phase_block = dict(project.get("phase") or {})
+        current_phase = str(phase_block.get("current") or config.PHASE_REQUIREMENTS)
+        derived_phase = self.derive_phase(tasks)
+        if config.phase_index(derived_phase) > config.phase_index(current_phase):
+            phase_block["current"] = derived_phase
+            project["phase"] = phase_block
+            nested = dict(project.get("project") or {})
+            nested["status"] = derived_phase
+            project["project"] = nested
+            project_changed = True
+
         if project_changed:
             self.save_project(project)
 
@@ -481,6 +580,7 @@ class StateManager:
             "progress": new_progress,
             "agents": new_agents,
             "next_tasks": next_tasks,
+            "phase": str((project.get("phase") or {}).get("current") or config.PHASE_REQUIREMENTS),
         }
 
     @staticmethod
@@ -538,6 +638,10 @@ class StateManager:
         if target is None:
             raise TaskNotFoundError(f"No task with id '{task_id}' in {self.tasks_yaml}")
         target["status"] = status
+        if status in config.TERMINAL_TASK_STATUSES:
+            execution = dict(target.get("execution") or {})
+            execution["recovering"] = False
+            target["execution"] = execution
         if note is not None:
             target["notes"] = note
         if error is not None:
@@ -572,11 +676,23 @@ class StateManager:
         attempt_count = int(execution.get("attempt_count", 0) or 0)
         no_progress_cycles = int(execution.get("no_progress_cycles", 0) or 0)
         strategy_changes = int(execution.get("strategy_changes", 0) or 0)
+        since_change = int(execution.get("attempts_since_change", 0) or 0)
 
         execution["attempt_count"] = max(0, attempt_count + int(attempt_delta))
         execution["no_progress_cycles"] = max(0, no_progress_cycles + int(no_progress_delta))
         if strategy_changed:
             execution["strategy_changes"] = strategy_changes + 1
+            execution["attempts_since_change"] = 0
+            execution["recovering"] = True
+        else:
+            execution["attempts_since_change"] = max(0, since_change + int(attempt_delta))
+            # Recovery ends when the new strategy also burns the retry budget.
+            if (
+                execution.get("recovering")
+                and execution["attempts_since_change"]
+                >= config.loop_thresholds().same_strategy_max_attempts
+            ):
+                execution["recovering"] = False
         if reset_error:
             execution["last_error"] = None
         elif error is not None:
@@ -588,6 +704,114 @@ class StateManager:
         document["tasks"] = tasks
         self.save_tasks_document(document)
         return dict(target)
+
+    @staticmethod
+    def _next_task_id(tasks: Sequence[Dict[str, Any]]) -> str:
+        highest = 0
+        for task in tasks:
+            match = re.match(r"TASK-(\d+)$", str(task.get("id", "")))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return f"TASK-{highest + 1:03d}"
+
+    def append_task(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+        """Append a goal-derived task to TASKS.yaml (A2: goal -> task graph).
+
+        ``spec`` is the normalized payload (title/owner/dependencies/...);
+        missing ``id`` is auto-assigned as ``TASK-NNN``. Unknown owners or
+        dependencies, duplicate ids and invalid statuses raise StateError.
+        """
+        if not isinstance(spec, dict):
+            raise StateError("Task spec must be a mapping")
+        document = self.load_tasks_document()
+        tasks = list(document.get("tasks") or [])
+        existing_ids = {str(task.get("id")) for task in tasks}
+
+        task = dict(spec)
+        task_id = str(task.get("id") or "").strip()
+        if not task_id:
+            task_id = self._next_task_id(tasks)
+        if task_id in existing_ids:
+            raise StateError(f"Task id '{task_id}' already exists")
+        task["id"] = task_id
+
+        title = str(task.get("title") or "").strip()
+        if not title:
+            raise StateError(f"Task '{task_id}' needs a title")
+        owner = str(task.get("owner") or "").strip()
+        if not owner:
+            raise StateError(f"Task '{task_id}' needs an owner")
+
+        from .agents.base_agent import agent_names  # local import: avoid cycle
+
+        if owner not in agent_names():
+            raise StateError(
+                f"Task '{task_id}' has unknown owner '{owner}'. "
+                f"Registered: {', '.join(sorted(agent_names()))}"
+            )
+
+        status = str(task.get("status") or config.TASK_TODO)
+        if status not in config.TASK_STATUSES:
+            raise StateError(
+                f"Task '{task_id}' has invalid status '{status}'. "
+                f"Allowed: {', '.join(config.TASK_STATUSES)}"
+            )
+        task["status"] = status
+
+        deps = [str(item) for item in (task.get("dependencies") or [])]
+        known = existing_ids | {task_id}
+        unknown = [dep for dep in deps if dep not in known]
+        if unknown:
+            raise StateError(
+                f"Task '{task_id}' references unknown dependencies: {', '.join(unknown)}"
+            )
+        task["dependencies"] = deps
+        task["priority"] = str(task.get("priority") or "MEDIUM")
+        task["expected_outputs"] = list(task.get("expected_outputs") or [])
+        task["acceptance_criteria"] = list(task.get("acceptance_criteria") or [])
+        task.setdefault("notes", "")
+        execution = dict(task.get("execution") or {})
+        execution.setdefault("attempt_count", 0)
+        execution.setdefault("no_progress_cycles", 0)
+        execution.setdefault("strategy_changes", 0)
+        execution.setdefault("attempts_since_change", 0)
+        execution.setdefault("recovering", False)
+        execution.setdefault("last_error", None)
+        task["execution"] = execution
+        review = dict(task.get("review") or {})
+        review.setdefault("required", False)
+        review.setdefault("status", "NOT_STARTED")
+        task["review"] = review
+
+        tasks.append(task)
+        document["tasks"] = tasks
+        self.save_tasks_document(document)
+        self.recompute_derived_state()
+        return dict(task)
+
+    def relax_dependency(self, task_id: str, dependency_id: str) -> Dict[str, Any]:
+        """Drop one blocking dependency edge (A6: human unblocks a deadlock)."""
+        document = self.load_tasks_document()
+        tasks = document.get("tasks") or []
+        target: Optional[Dict[str, Any]] = None
+        for task in tasks:
+            if task.get("id") == task_id:
+                target = task
+                break
+        if target is None:
+            raise TaskNotFoundError(f"No task with id '{task_id}' in {self.tasks_yaml}")
+        deps = [str(item) for item in (target.get("dependencies") or [])]
+        if dependency_id not in deps:
+            raise StateError(
+                f"Task '{task_id}' does not depend on '{dependency_id}'"
+            )
+        target["dependencies"] = [dep for dep in deps if dep != dependency_id]
+        document["tasks"] = tasks
+        self.save_tasks_document(document)
+        self.recompute_derived_state()
+        self.refresh_ready_states()
+        refreshed = self.find_task(task_id)
+        return dict(refreshed or target)
 
     def set_review_status(self, task_id: str, review_status: str) -> Dict[str, Any]:
         document = self.load_tasks_document()
@@ -627,6 +851,33 @@ class StateManager:
 
     def save_memory(self, content: str) -> None:
         save_text_file(self.memory_md, content)
+
+    def compact_memory(self, max_chars: int = config.MEMORY_COMPACT_MAX_CHARS) -> bool:
+        """Fold the middle of PROJECT_MEMORY.md when it outgrows the budget (B1).
+
+        Keeps the head (context/goals/recent decisions) and the tail (open
+        issues/next steps), replaces the middle with a marker listing the
+        dropped section headings. Returns True when a rewrite happened.
+        """
+        text = self.load_memory()
+        if len(text) <= max_chars:
+            return False
+        head_len = int(max_chars * 0.6)
+        tail_len = int(max_chars * 0.25)
+        head = text[:head_len]
+        tail = text[-tail_len:]
+        dropped = text[head_len : len(text) - tail_len]
+        headings = [
+            match.lstrip("# ").strip()
+            for match in re.findall(r"^#{1,3} .+$", dropped, re.M)
+        ]
+        marker = (
+            f"\n\n<!-- compacted {utc_now_iso()}: {len(dropped)} chars folded"
+            + (f"; sections: {', '.join(headings[:12])}" if headings else "")
+            + " -->\n\n"
+        )
+        self.save_memory(head + marker + tail)
+        return True
 
     def load_current_state(self) -> str:
         return load_text_file(self.current_state_md)

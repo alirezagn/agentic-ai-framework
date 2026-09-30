@@ -115,14 +115,6 @@ def build_system_keys() -> SystemKeys:
             required=False,
         )
     )
-    registry.register(
-        SystemKey(
-            key="git_author_name",
-            env_var="GIT_AUTHOR_NAME",
-            description="Author name written into automatic state commits.",
-            required=False,
-        )
-    )
     return registry
 
 
@@ -192,6 +184,7 @@ class LoopThresholds:
     max_alternative_strategies: int = 2
     max_retries: int = 3
     identical_output_max_repeats: int = 3
+    evidence_stall_max: int = 3
 
     def as_dict(self) -> Dict[str, int]:
         return {
@@ -200,6 +193,7 @@ class LoopThresholds:
             "max_alternative_strategies": self.max_alternative_strategies,
             "max_retries": self.max_retries,
             "identical_output_max_repeats": self.identical_output_max_repeats,
+            "evidence_stall_max": self.evidence_stall_max,
         }
 
     @classmethod
@@ -219,6 +213,9 @@ class LoopThresholds:
             max_retries=int(data.get("max_retries", cls.max_retries)),
             identical_output_max_repeats=int(
                 data.get("identical_output_max_repeats", cls.identical_output_max_repeats)
+            ),
+            evidence_stall_max=int(
+                data.get("evidence_stall_max", cls.evidence_stall_max)
             ),
         )
 
@@ -286,6 +283,11 @@ class CompactionThresholds:
 
 COMPACTION_THRESHOLDS: CompactionThresholds = CompactionThresholds()
 
+# When PROJECT_MEMORY.md exceeds this size, context compaction collapses the
+# middle into a summary marker (framework/00:80-90 "discard irrelevant
+# working context"). ~15k tokens.
+MEMORY_COMPACT_MAX_CHARS: int = 60000
+
 
 # ---------------------------------------------------------------------------
 # State file layout
@@ -319,6 +321,18 @@ MARKDOWN_STATE_FILES: Tuple[str, ...] = (
 )
 
 DEFAULT_CHECKPOINTS_DIR = "checkpoints"
+
+
+def default_checkpoints_dir() -> str:
+    """Root directory holding per-project checkpoint folders.
+
+    Overridable via ``ORCHESTRATOR_CHECKPOINTS_DIR`` so tests (and sandboxes)
+    never write checkpoints into the working tree.
+    """
+    raw = os.environ.get("ORCHESTRATOR_CHECKPOINTS_DIR")
+    if raw and str(raw).strip():
+        return str(raw).strip()
+    return DEFAULT_CHECKPOINTS_DIR
 CHECKPOINT_INDEX_FILE = "index.json"
 CHECKPOINT_METADATA_FILE = "metadata.json"
 CHECKPOINT_BACKUP_DIR = "backups"
@@ -365,6 +379,57 @@ TERMINAL_TASK_STATUSES: Tuple[str, ...] = (TASK_DONE, TASK_DONE_WITH_LIMITATION,
 # Statuses whose dependencies are satisfied from the graph point of view.
 SATISFIED_DEPENDENCY_STATUSES: Tuple[str, ...] = (TASK_DONE, TASK_DONE_WITH_LIMITATION, TASK_CANCELLED)
 
+# ---------------------------------------------------------------------------
+# Project lifecycle phases (framework/00_MASTER_ORCHESTRATOR.md:203-229)
+# ---------------------------------------------------------------------------
+
+PHASE_REQUIREMENTS = "REQUIREMENTS"
+PHASE_RESEARCH = "RESEARCH"
+PHASE_ARCHITECTURE = "ARCHITECTURE"
+PHASE_PLANNING = "PLANNING"
+PHASE_IMPLEMENTATION = "IMPLEMENTATION"
+PHASE_INTEGRATION = "INTEGRATION"
+PHASE_TESTING = "TESTING"
+PHASE_VALIDATION = "VALIDATION"
+PHASE_RELEASE = "RELEASE"
+PHASE_MAINTENANCE = "MAINTENANCE"
+
+PHASES: Tuple[str, ...] = (
+    PHASE_REQUIREMENTS,
+    PHASE_RESEARCH,
+    PHASE_ARCHITECTURE,
+    PHASE_PLANNING,
+    PHASE_IMPLEMENTATION,
+    PHASE_INTEGRATION,
+    PHASE_TESTING,
+    PHASE_VALIDATION,
+    PHASE_RELEASE,
+    PHASE_MAINTENANCE,
+)
+
+# Which agent owners gate each phase. Phases with no owner-matched tasks are
+# auto-skipped; MAINTENANCE is only ever entered manually.
+PHASE_OWNERS: Dict[str, Tuple[str, ...]] = {
+    PHASE_REQUIREMENTS: ("requirements_agent",),
+    PHASE_RESEARCH: ("research_agent",),
+    PHASE_ARCHITECTURE: ("architecture_agent",),
+    PHASE_PLANNING: ("planning_agent",),
+    PHASE_IMPLEMENTATION: ("hardware_agent", "software_agent", "firmware_agent"),
+    PHASE_INTEGRATION: (),
+    PHASE_TESTING: ("test_agent",),
+    PHASE_VALIDATION: (),
+    PHASE_RELEASE: (),
+    PHASE_MAINTENANCE: (),
+}
+
+
+def phase_index(phase: str) -> int:
+    """Index of ``phase`` in :data:`PHASES` (0 for unknown values)."""
+    try:
+        return PHASES.index(str(phase))
+    except ValueError:
+        return 0
+
 PRIORITY_ORDER: Dict[str, int] = {
     "CRITICAL": 0,
     "HIGH": 1,
@@ -401,12 +466,14 @@ LOOP_KIND_NO_PROGRESS = "no_progress"
 LOOP_KIND_ALTERNATIVES_EXHAUSTED = "alternatives_exhausted"
 LOOP_KIND_STATE_OSCILLATION = "state_oscillation"
 LOOP_KIND_REPEATED_OUTPUT = "repeated_output"
+LOOP_KIND_NO_NEW_EVIDENCE = "no_new_evidence"
 LOOP_KINDS: Tuple[str, ...] = (
     LOOP_KIND_SAME_STRATEGY,
     LOOP_KIND_NO_PROGRESS,
     LOOP_KIND_ALTERNATIVES_EXHAUSTED,
     LOOP_KIND_STATE_OSCILLATION,
     LOOP_KIND_REPEATED_OUTPUT,
+    LOOP_KIND_NO_NEW_EVIDENCE,
 )
 
 # Allowed result statuses an agent may return.
@@ -513,6 +580,7 @@ __all__ = [
     "YAML_STATE_FILES",
     "MARKDOWN_STATE_FILES",
     "DEFAULT_CHECKPOINTS_DIR",
+    "default_checkpoints_dir",
     "CHECKPOINT_INDEX_FILE",
     "CHECKPOINT_METADATA_FILE",
     "CHECKPOINT_BACKUP_DIR",
@@ -531,6 +599,20 @@ __all__ = [
     "TASK_CANCELLED",
     "TERMINAL_TASK_STATUSES",
     "SATISFIED_DEPENDENCY_STATUSES",
+    "PHASES",
+    "PHASE_OWNERS",
+    "phase_index",
+    "PHASE_REQUIREMENTS",
+    "PHASE_RESEARCH",
+    "PHASE_ARCHITECTURE",
+    "PHASE_PLANNING",
+    "PHASE_IMPLEMENTATION",
+    "PHASE_INTEGRATION",
+    "PHASE_TESTING",
+    "PHASE_VALIDATION",
+    "PHASE_RELEASE",
+    "PHASE_MAINTENANCE",
+    "MEMORY_COMPACT_MAX_CHARS",
     "PRIORITY_ORDER",
     "HEALTH_STATES",
     "HEALTH_HEALTHY",
@@ -545,6 +627,7 @@ __all__ = [
     "LOOP_KIND_ALTERNATIVES_EXHAUSTED",
     "LOOP_KIND_STATE_OSCILLATION",
     "LOOP_KIND_REPEATED_OUTPUT",
+    "LOOP_KIND_NO_NEW_EVIDENCE",
     "AGENT_STATUSES",
     "AGENT_STATUS_COMPLETED",
     "AGENT_STATUS_FAILED",
