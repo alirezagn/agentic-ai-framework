@@ -449,7 +449,11 @@ class MasterOrchestrator:
             "below (or known project paths) that the task must read — "
             "nonexistent paths are dropped and, when nothing valid remains, "
             "core docs are attached automatically. notes (optional): short "
-            "execution guidance for the task owner."
+            "execution guidance for the task owner. If a task reads a file "
+            "that another task in this plan will produce (its "
+            "expected_outputs), declare that task in dependencies — the "
+            "review/synthesis task must always run after the tasks whose "
+            "outputs it reads."
         )
         plan_task: Dict[str, Any] = {
             "id": "PLAN-001",
@@ -486,6 +490,11 @@ class MasterOrchestrator:
         if not specs:
             raise StateError("planning output contained no usable task specs")
         prepared: List[Dict[str, Any]] = []
+        # G11: remember the model's REQUESTED inputs per task — existence
+        # filtering below drops exactly the not-yet-created artifacts (the
+        # report) that a producer task will generate, and wiring runs on
+        # these requested paths, not the filtered ones.
+        requested_inputs: Dict[str, List[str]] = {}
         seen: set = set()
         for spec in specs:
             owner = str(spec.get("owner") or "").strip()
@@ -505,6 +514,9 @@ class MasterOrchestrator:
             # G9: agents receive project files through input_files; a plan
             # that omits them starves the executor of context (research/
             # review agents then refuse with "missing input data").
+            requested_inputs[str(spec.get("id"))] = [
+                str(item) for item in (spec.get("input_files") or [])
+            ]
             validated = self._validated_input_files(spec.get("input_files"))
             if validated:
                 spec["input_files"] = validated
@@ -519,6 +531,9 @@ class MasterOrchestrator:
             seen.add(str(spec.get("id")))
         if not prepared:
             raise StateError("planning output contained no valid task specs")
+        # G11: order review/synthesis tasks after the tasks whose outputs
+        # they requested (models routinely leave those dependencies empty).
+        prepared = self._wire_plan_producer_deps(prepared, requested_inputs)
         with self._state_lock:
             if existing:
                 document = self.state.load_tasks_document()
@@ -668,6 +683,102 @@ class MasterOrchestrator:
                 entry["notes"] = str(entry["notes"]).strip()[:600]
             specs.append(entry)
         return specs
+
+    def _wire_plan_producer_deps(
+        self,
+        specs: List[Dict[str, Any]],
+        requested: Dict[str, List[str]],
+    ) -> List[Dict[str, Any]]:
+        """G11: an input another planned task will produce implies ordering.
+
+        Models routinely give the final review/synthesis task
+        ``dependencies: []`` while listing the report it must review as an
+        ``input_file`` — the reviewer then dispatches before the report
+        exists (or silently reads a stale copy from a previous run).
+        ``requested`` carries the model's *unfiltered* input paths (the
+        existence filter in ``build_plan`` drops artifacts that no task has
+        produced yet — precisely the ones wiring is about).
+
+        For each requested artifact with a producer: the artifact is restored
+        to the consumer's ``input_files`` (it will exist at execution time),
+        and the producer edge is added unless it would create a cycle. The
+        list is then topologically re-sorted because ``append_task`` rejects
+        forward references. Raw model forward-deps are NOT honored here —
+        they are still dropped by the caller's backward-only filter.
+        """
+        if len(specs) < 2:
+            return specs
+        producers: Dict[str, List[str]] = {}
+        for spec in specs:
+            for artifact in spec.get("expected_outputs") or []:
+                producers.setdefault(str(artifact), []).append(str(spec.get("id")))
+
+        deps_map: Dict[str, List[str]] = {
+            str(spec.get("id")): [str(dep) for dep in (spec.get("dependencies") or [])]
+            for spec in specs
+        }
+
+        def depends_on(start: str, target: str) -> bool:
+            stack = [start]
+            seen: set = set()
+            while stack:
+                current = stack.pop()
+                if current == target:
+                    return True
+                if current in seen:
+                    continue
+                seen.add(current)
+                stack.extend(deps_map.get(current, []))
+            return False
+
+        for spec in specs:
+            consumer = str(spec.get("id"))
+            deps = deps_map[consumer]
+            for artifact in requested.get(consumer, []):
+                owners = [p for p in producers.get(str(artifact), []) if p != consumer]
+                if not owners:
+                    continue  # no planned producer: leave G9 filtering alone
+                inputs = list(spec.get("input_files") or [])
+                if artifact not in inputs and len(inputs) < 12:
+                    inputs.append(str(artifact))
+                    spec["input_files"] = inputs
+                for producer in owners:
+                    if producer in deps:
+                        continue
+                    if depends_on(producer, consumer):
+                        continue  # edge would create a cycle
+                    deps.append(producer)
+            spec["dependencies"] = list(deps)
+        return self._topo_sorted_plan(specs)
+
+    @staticmethod
+    def _topo_sorted_plan(specs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Stable topological order; drops duplicate/unknown/self deps."""
+        by_id = {str(spec.get("id")): spec for spec in specs}
+        valid = set(by_id)
+        deps: Dict[str, List[str]] = {}
+        for spec in specs:
+            sid = str(spec.get("id"))
+            cleaned: List[str] = []
+            for dep in spec.get("dependencies") or []:
+                dep_id = str(dep)
+                if dep_id in valid and dep_id != sid and dep_id not in cleaned:
+                    cleaned.append(dep_id)
+            spec["dependencies"] = cleaned
+            deps[sid] = cleaned
+        ordered: List[str] = []
+        placed: set = set()
+        remaining = [str(spec.get("id")) for spec in specs]
+        while remaining:
+            batch = [sid for sid in remaining if all(d in placed for d in deps[sid])]
+            if not batch:  # cycle (should not happen): keep original order
+                ordered.extend(remaining)
+                break
+            for sid in batch:
+                ordered.append(sid)
+                placed.add(sid)
+                remaining.remove(sid)
+        return [by_id[sid] for sid in ordered]
 
     def _plan_context_files(self, limit: int = 6) -> List[str]:
         """Existing docs fed to the planning agent as task context (G2)."""

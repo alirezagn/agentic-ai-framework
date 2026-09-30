@@ -60,6 +60,33 @@ class TestInitCommand:
         assert main(["init", "demo", "--dest", str(tmp_path)]) == 2
         assert "already exists" in capsys.readouterr().err
 
+    def test_init_force_refreshes_baseline_checkpoint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert main(["init", "demo", "--dest", str(tmp_path), "--goal", "Goal A"]) == 0
+        capsys.readouterr()
+        code = main(
+            ["init", "demo", "--dest", str(tmp_path), "--force", "--goal", "Goal B"]
+        )
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "init checkpoint not created" not in captured.err
+        baseline = (
+            tmp_path
+            / config.default_checkpoints_dir()
+            / "demo"
+            / "cp-000-init"
+            / config.MEMORY_FILE
+        )
+        assert baseline.is_file()
+        # The baseline must describe THIS init, not the previous workspace.
+        assert "Goal B" in baseline.read_text(encoding="utf-8")
+        assert "Goal A" not in baseline.read_text(encoding="utf-8")
+
     def test_init_force_overwrites(self, tmp_path: Path) -> None:
         assert main(["init", "demo", "--dest", str(tmp_path)]) == 0
         assert (

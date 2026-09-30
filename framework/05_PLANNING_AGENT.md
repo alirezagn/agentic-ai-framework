@@ -97,6 +97,12 @@ When asked to plan a task graph (e.g. `orchestrator plan`,
   nonexistent/absolute/traversal paths are dropped, and when nothing valid
   remains the core docs are attached automatically so executors are never
   context-starved (agents otherwise refuse with "missing input data")
+- **Producer wiring**: when a task's `input_files` names a file another
+  task lists in `expected_outputs`, the runtime adds that dependency and
+  topologically re-sorts the graph — a review task reading
+  `docs/GAP_ANALYSIS.md` can never dispatch before the task that writes
+  it (declare the edge yourself anyway; the model's requested inputs are
+  used for wiring *before* existence filtering)
 - `notes` (optional): execution guidance persisted with the task
 - Do **not** include `id`, `status` or `execution` fields — ids are
   assigned `TASK-NNN` by the runtime and statuses are derived

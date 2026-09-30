@@ -440,6 +440,115 @@ class TestPlanInputFiles:
 
 
 # ---------------------------------------------------------------------------
+# G11 — producer wiring (input_files another task will produce)
+# ---------------------------------------------------------------------------
+
+
+class TestPlanProducerWiring:
+    def test_review_without_deps_waits_for_report_producer(
+        self, tmp_path: Path
+    ) -> None:
+        project = make_project(tmp_path)
+        (project / "docs").mkdir(exist_ok=True)
+        (project / "docs" / "PRD.md").write_text("# prd\n", encoding="utf-8")
+        tasks = [
+            {
+                "title": "Write the gap report",
+                "owner": "planning_agent",
+                "priority": "CRITICAL",
+                "dependencies": [],
+                "expected_outputs": ["docs/GAP_ANALYSIS.md"],
+                "input_files": ["docs/PRD.md"],
+            },
+            {
+                "title": "Review the gap report",
+                "owner": "review_agent",
+                "priority": "LOW",
+                "dependencies": [],  # model forgot the edge
+                "input_files": ["docs/GAP_ANALYSIS.md"],
+            },
+        ]
+        orch = MasterOrchestrator(
+            project, agent_resolver=fake_resolver([plan_response(tasks)])
+        )
+        orch.build_plan(goal="g")
+        loaded = orch.state.load_tasks()
+        producer = next(t for t in loaded if t["owner"] == "planning_agent")
+        review = next(t for t in loaded if t["owner"] == "review_agent")
+        assert producer["id"] in review["dependencies"]
+        # the report is dropped by plan-time existence filtering — wiring
+        # restores it so the reviewer actually reads it at execution time
+        assert "docs/GAP_ANALYSIS.md" in review["input_files"]
+
+    def test_forward_producer_edge_reorders_append_order(
+        self, tmp_path: Path
+    ) -> None:
+        project = make_project(tmp_path)
+        (project / "docs").mkdir(exist_ok=True)
+        (project / "docs" / "PRD.md").write_text("# prd\n", encoding="utf-8")
+        tasks = [
+            {  # review appears BEFORE its producer in the model array
+                "title": "Review the report",
+                "owner": "review_agent",
+                "priority": "LOW",
+                "dependencies": [],
+                "input_files": ["docs/GAP_ANALYSIS.md"],
+            },
+            {
+                "title": "Write the report",
+                "owner": "planning_agent",
+                "priority": "CRITICAL",
+                "dependencies": [],
+                "expected_outputs": ["docs/GAP_ANALYSIS.md"],
+                "input_files": ["docs/PRD.md"],
+            },
+        ]
+        orch = MasterOrchestrator(
+            project, agent_resolver=fake_resolver([plan_response(tasks)])
+        )
+        orch.build_plan(goal="g")
+        loaded = orch.state.load_tasks()
+        producer = next(t for t in loaded if t["owner"] == "planning_agent")
+        review = next(t for t in loaded if t["owner"] == "review_agent")
+        assert producer["id"] in review["dependencies"]
+        ids = [t["id"] for t in loaded]
+        # append_task rejects forward references: producer must be first
+        assert ids.index(producer["id"]) < ids.index(review["id"])
+
+    def test_mutual_artifacts_do_not_create_a_cycle(self, tmp_path: Path) -> None:
+        project = make_project(tmp_path)
+        (project / "docs").mkdir(exist_ok=True)
+        (project / "docs" / "PRD.md").write_text("# prd\n", encoding="utf-8")
+        tasks = [
+            {
+                "title": "Task A",
+                "owner": "software_agent",
+                "priority": "HIGH",
+                "dependencies": [],
+                "expected_outputs": ["docs/A.md"],
+                "input_files": ["docs/B.md"],
+            },
+            {
+                "title": "Task B",
+                "owner": "software_agent",
+                "priority": "HIGH",
+                "dependencies": [],
+                "expected_outputs": ["docs/B.md"],
+                "input_files": ["docs/A.md"],
+            },
+        ]
+        orch = MasterOrchestrator(
+            project, agent_resolver=fake_resolver([plan_response(tasks)])
+        )
+        orch.build_plan(goal="g")
+        loaded = orch.state.load_tasks()
+        a = next(t for t in loaded if t["title"] == "Task A")
+        b = next(t for t in loaded if t["title"] == "Task B")
+        # one direction only — no A↔B 2-cycle
+        assert not (b["id"] in a["dependencies"] and a["id"] in b["dependencies"])
+
+
+# ---------------------------------------------------------------------------
 # G3 — init wiring
 # ---------------------------------------------------------------------------
 

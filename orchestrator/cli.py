@@ -459,6 +459,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     # A7: baseline checkpoint so a fresh project can always be restored.
     try:
         orchestrator = MasterOrchestrator(target)
+        # G11a: a leftover baseline from an earlier init of the same name
+        # (e.g. `init --force` over a reused workspace) would freeze stale
+        # state — refresh it so cp-000-init always matches this init.
+        orchestrator.checkpoints.delete_checkpoint("cp-000-init")
         orchestrator.create_checkpoint(
             "cp-000-init", notes="Project initialized (orchestrator init)"
         )

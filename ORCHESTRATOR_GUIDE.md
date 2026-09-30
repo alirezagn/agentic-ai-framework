@@ -89,7 +89,7 @@ orchestrator [--project PATH] [--version] <command>
 
 | Command | Description |
 |---|---|
-| `init NAME [--dest DIR] [--goal TEXT] [--force] [--no-plan]` | Scaffold a valid project under `projects/` (default); writes the `cp-000-init` baseline checkpoint, empty `constraints`/`budget`/`resources` blocks, and generates the task graph (LLM planning agent when a backend is configured, deterministic starter skeleton otherwise; `--no-plan` forces the skeleton) |
+| `init NAME [--dest DIR] [--goal TEXT] [--force] [--no-plan]` | Scaffold a valid project under `projects/` (default); writes (or refreshes, on re-init/`--force`) the `cp-000-init` baseline checkpoint, empty `constraints`/`budget`/`resources` blocks, and generates the task graph (LLM planning agent when a backend is configured, deterministic starter skeleton otherwise; `--no-plan` forces the skeleton) |
 | `status` | Print project/task summary + health recommendations |
 | `tasks` | Dependency-graph table (id, status, owner, deps, readiness) + critical path |
 | `run [--task ID] [--max-tasks N] [--max-concurrent N]` | Dispatch READY tasks (or one task); an empty graph is generated on the fly when an LLM backend is configured |
