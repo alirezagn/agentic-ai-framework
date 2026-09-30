@@ -303,6 +303,19 @@ class TestCLI:
         assert exit_code in (0, 3, 4)
         assert "SUPERVISOR HEALTH REPORT" in captured.out
 
+    def test_uninitialized_workspace_prints_init_hint(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # rm -rf + rsync without re-init: source files but no state.
+        workspace = tmp_path / "demo-ws"
+        workspace.mkdir()
+        (workspace / "README.md").write_text("source only\n", encoding="utf-8")
+        exit_code = cli.main(["--project", str(workspace), "run"])
+        captured = capsys.readouterr()
+        assert exit_code == 2
+        assert "State file not found" in captured.out
+        assert f"orchestrator init demo-ws --dest {tmp_path} --force" in captured.out
+
 
 class TestRetryCommand:
     """Human recovery: `retry` clears loop counters so a refused task runs again."""

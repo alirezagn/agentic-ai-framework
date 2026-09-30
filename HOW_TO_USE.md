@@ -93,7 +93,11 @@ Then capture reality:
 
 5. **Test on a copy before dispatching** — copy the directory to `/tmp`
    (or use the pytest fixture `build_test_project(tmp_path)`) and run
-   there first; `run` mutates state.
+   there first; `run` mutates state. When re-creating a copy with
+   `rsync`, exclude previous deliverables (e.g. `--exclude
+   gap_analysis.md`): a stale report left in the copy can silently
+   satisfy a task's `expected_outputs` DoD check and get loaded as
+   agent input.
 6. **Continue:**
 
 ```bash
@@ -378,6 +382,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | Symptom | Fix |
 |---|---|
 | `error: --project is required` | pass `--project projects/<name>` before the subcommand |
+| `ERROR: State file not found .../TASKS.yaml` | the workspace was wiped (`rm -rf` + rsync) without re-init — run the `init` line printed in the hint (step 2 of the PoC runbook) |
 | tasks stay `READY` | `tasks` shows unsatisfied deps; finish predecessors |
 | dependency deadlock (exit 4) | `waive TASK-004 --dep TASK-003 --reason "..."` to drop the edge |
 | task stuck in `WAITING` | a pending `PROPOSED_CHANGE` affects it — approve/reject the decision |

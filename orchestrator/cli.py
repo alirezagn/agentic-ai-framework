@@ -33,6 +33,7 @@ from .orchestrator import (
 )
 from .state_manager import (
     StateError,
+    StateFileMissingError,
     StateManager,
     TaskNotFoundError,
     atomic_write_text,
@@ -849,6 +850,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     try:
         return int(handler(args))
+    except StateFileMissingError as exc:
+        print(f"ERROR: {exc}")
+        # Common cause: the workspace was wiped (rm -rf + rsync) without
+        # re-running init — print the exact recovery command.
+        marker = "State file not found: "
+        message = str(exc)
+        if marker in message:
+            project_dir = Path(message.split(marker, 1)[1].strip()).parent
+            print(
+                f"hint: '{project_dir}' has no orchestrator state; re-initialize with:\n"
+                f"      orchestrator init {project_dir.name} "
+                f"--dest {project_dir.parent} --force --goal \"<your goal>\""
+            )
+        return 2
     except (StateError, OrchestratorError, MissingAgentError, CheckpointError) as exc:
         print(f"ERROR: {exc}")
         return 2
