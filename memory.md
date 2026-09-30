@@ -56,6 +56,9 @@
 
 ## External config done earlier
 
-- opencode: `~/.config/opencode/opencode.jsonc` → `ollama/phi4`, `ollama/qwen2.5-coder:14b`, baseURL `http://192.168.0.200:11434/v1`.
+- opencode: `~/.config/opencode/opencode.jsonc` → `ollama/phi4` (default), `ollama/qwen2.5-coder:14b` (small), baseURL `http://192.168.0.200:11434/v1`.
+- **Added 2026-09-30: model `ollama/maternion/mimo-v2.6:9b-instruct`** ("MiMo v2.6 9B Instruct", `tool_call: true`) with per-model `"options": {"temperature": 0.3, "num_ctx": 16384}`. Verified: `opencode models ollama` lists it, exit 0; model confirmed present on the Ollama host via `/api/tags`. **Restart opencode after config edits** (config loads once at startup).
+  - opencode has **no `yolo` / `auto_approve_all` config keys** (0 occurrences in the published schema `https://opencode.ai/config.json`). Equivalents: CLI flag `opencode --auto`, TUI command palette "Enable auto-approve permissions", or top-level `"permission": "allow"` in opencode.jsonc (allow-everything shorthand — not set, ask first).
+  - Model-level `temperature` in the schema is a **boolean capability flag**, not a value — numeric temperature belongs in free-form model `options` (where it was placed). `num_ctx` is an Ollama-side setting (docs: set it in Ollama); it rides in `options` as the request passthrough slot. `limit` requires both `context` and `output`, so it was left unset.
 - **Project LLM backend (2026-09-30):** repo-root `.env` (gitignored) sets `ORCHESTRATOR_LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://192.168.0.200:11434`, `ORCHESTRATOR_LLM_MODEL=gemma4:12b`. The CLI auto-loads it via `config.maybe_load_env_file()` (setdefault; skipped when `PYTEST_CURRENT_TEST` is set so tests stay offline). `.env.example` is committed. Verified: `main([])` outside pytest → provider `ollama`, model `gemma4:12b`.
-- Caveat: as of 2026-09-30 the host `192.168.0.200` pings but **port 11434 is closed** (Ollama not serving) — model `gemma4:12b` could not be verified with `ollama list` yet.
+- Caveat: as of 2026-09-30 the host `192.168.0.200` answers `/api/tags` (phi4, qwen2.5-coder:14b, gemma4:26b, deepseek-coder, mimo-v2.6 present) — earlier note that port 11434 was closed is stale; it is serving now.
