@@ -619,11 +619,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             for error in result.output.errors[:3]:
                 print(f"       error: {error}")
 
-    looped = [r.task_id for r in results if r.loop is not None and not r.succeeded]
-    if looped:
+    retryable = [r.task_id for r in results if not r.succeeded]
+    if retryable:
         print(
             "hint: fix the task inputs/strategy, then run "
-            f"`orchestrator retry {looped[0]}` to reset its loop counters"
+            f"`orchestrator retry {retryable[0]}` to reset counters and re-dispatch"
         )
 
     report = orchestrator.sync_health()

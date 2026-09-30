@@ -402,6 +402,26 @@ class TestRetryCommand:
         assert code != 0
         assert "orchestrator retry TASK-002" in out
 
+    def test_failed_task_run_prints_retry_hint(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Route TASK-002 to the review agent: with no LLM backend in tests
+        # its execution fails, and the run must point at the recovery command.
+        state = StateManager(test_project)
+        document = state.load_tasks_document()
+        for task in document["tasks"]:
+            if task.get("id") == "TASK-002":
+                task["owner"] = "review_agent"
+        state.save_tasks_document(document)
+        cli.main(["--project", str(test_project), "run", "--task", "TASK-002"])
+        out = capsys.readouterr().out
+        assert "[FAIL] TASK-002" in out
+        assert "orchestrator retry TASK-002" in out
+        assert (
+            StateManager(test_project).get_task("TASK-002")["status"]
+            == config.TASK_FAILED
+        )
+
 
 # ---------------------------------------------------------------------------
 # Phase G — config keys

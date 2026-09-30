@@ -11,7 +11,7 @@ ANTHROPIC_API_KEY / OPENROUTER_API_KEY / OLLAMA_BASE_URL from the environment.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .base_agent import AgentOutput, AgentOutputError, register_agent
 from .llm_agent import LLMAgent
@@ -173,7 +173,10 @@ class ReviewAgent(LLMAgent):
         "- Check requirement coverage, architecture conformance, test evidence,\n"
         "  open risks/blockers and documentation consistency.\n"
         "- Detect unsupported completion claims; report measurable findings only.\n"
-        "- A failed review creates specific correction tasks, never a total rewrite."
+        "- A failed review creates specific correction tasks, never a total rewrite.\n"
+        "- Output contract: data.review_status MUST be exactly 'PASS', "
+        "'PASS WITH ACTIONS' or 'FAIL' (never omit it, never invent another "
+        "value); put supporting detail in data.findings and data.corrections."
     )
 
     def output_from_parsed(
@@ -184,13 +187,30 @@ class ReviewAgent(LLMAgent):
     ) -> AgentOutput:
         output = super().output_from_parsed(parsed, task_id=task_id, result=result)
         data = output.data
-        outcome = _normalize_review_outcome(
-            data.get("review_status") or data.get("outcome") or output.status
-        )
+        # Models place the verdict in slightly different keys/phrasings:
+        # try each candidate until one normalizes to a known outcome.
+        candidates: List[Any] = [
+            data.get("review_status"),
+            data.get("outcome"),
+            data.get("verdict"),
+            data.get("decision"),
+        ]
+        nested = data.get("review")
+        if isinstance(nested, dict):
+            candidates.append(nested.get("status"))
+            candidates.append(nested.get("outcome"))
+        candidates.append(output.status)
+        outcome: Optional[str] = None
+        received: List[str] = []
+        for candidate in candidates:
+            received.append(repr(candidate))
+            outcome = _normalize_review_outcome(candidate)
+            if outcome is not None:
+                break
         if outcome is None:
             raise AgentOutputError(
                 "review_agent must return data.review_status of "
-                f"{' / '.join(REVIEW_OUTCOMES)}"
+                f"{' / '.join(REVIEW_OUTCOMES)} (received: {', '.join(received)})"
             )
         data["review_status"] = outcome
         findings = data.get("findings")
@@ -205,14 +225,43 @@ def _normalize_review_outcome(value: Any) -> Optional[str]:
         return None
     cleaned = " ".join(str(value).strip().upper().split("_")).replace("-", " ")
     cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return None
     for outcome in REVIEW_OUTCOMES:
         if cleaned == outcome:
             return outcome
-    if cleaned in ("PASS WITH ACTION", "PASS WITH FOLLOW UP", "CONDITIONAL PASS"):
+    if cleaned in (
+        "PASS WITH ACTION",
+        "PASS WITH FOLLOW UP",
+        "PASS WITH FOLLOWUP",
+        "CONDITIONAL PASS",
+        "PASS WITH COMMENT",
+        "PASS WITH COMMENTS",
+        "PASS WITH FINDINGS",
+        "PASS WITH ACTION ITEMS",
+        "PASS WITH NOTES",
+        "PASS WITH MINOR ISSUES",
+        "APPROVED WITH ACTIONS",
+        "APPROVED WITH CHANGES",
+        "APPROVED WITH COMMENTS",
+    ):
         return REVIEW_PASS_WITH_ACTIONS
-    if cleaned in ("PASS", "OK", "APPROVED"):
+    if cleaned in ("PASS", "PASSED", "OK", "APPROVED", "LGTM", "ACCEPTED", "SUCCESS"):
         return REVIEW_PASS
-    if cleaned in ("FAIL", "FAILED", "REJECT", "REJECTED"):
+    if cleaned in (
+        "FAIL",
+        "FAILED",
+        "REJECT",
+        "REJECTED",
+        "CHANGES REQUESTED",
+        "REQUEST CHANGES",
+        "NEEDS WORK",
+        "NEEDS CHANGES",
+        "NEEDS FIXING",
+        "NOT APPROVED",
+        "UNSATISFACTORY",
+        "DENIED",
+    ):
         return REVIEW_FAIL
     return None
 

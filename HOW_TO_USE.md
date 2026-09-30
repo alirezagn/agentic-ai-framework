@@ -383,6 +383,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | task stuck in `WAITING` | a pending `PROPOSED_CHANGE` affects it — approve/reject the decision |
 | phase looks wrong | `phase show` (stored vs derived); `phase set <NAME>` to override |
 | `LOOP LIMIT` (exit 3) | fix the task's inputs, then `retry TASK-003 --reason "..."` to reset its loop counters; `run` prints the exact command in its hint |
+| task `FAILED` (agent/validation error) | read the printed error, fix the inputs or model output, then `retry TASK-005 --reason "..."` — the same hint appears in `run` output |
 | memory/context grows forever | compaction folds MEMORY.md and resets utilization at the 70% threshold |
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
 | `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings |

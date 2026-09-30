@@ -542,6 +542,69 @@ class TestReviewFlow:
 
 
 # ---------------------------------------------------------------------------
+# G12 — review outcome repair (model omitted/misplaced data.review_status)
+# ---------------------------------------------------------------------------
+
+
+class TestReviewOutcomeRepair:
+    @pytest.fixture()
+    def agent(self, test_project: Path) -> ReviewAgent:
+        return ReviewAgent(project_path=test_project)
+
+    @staticmethod
+    def _parsed(**data_fields: Any) -> Dict[str, Any]:
+        return {"status": "completed", "summary": "reviewed", "data": dict(data_fields)}
+
+    def test_rules_state_the_output_contract(self, agent: ReviewAgent) -> None:
+        rules = agent.system_rules()
+        assert "data.review_status" in rules
+        assert "PASS WITH ACTIONS" in rules
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("PASS", "PASS"),
+            ("pass", "PASS"),
+            ("LGTM", "PASS"),
+            ("approved", "PASS"),
+            ("PASS WITH ACTIONS", "PASS WITH ACTIONS"),
+            ("pass_with_actions", "PASS WITH ACTIONS"),
+            ("conditional pass", "PASS WITH ACTIONS"),
+            ("approved_with_comments", "PASS WITH ACTIONS"),
+            ("FAIL", "FAIL"),
+            ("changes requested", "FAIL"),
+            ("needs_work", "FAIL"),
+        ],
+    )
+    def test_variant_spellings_normalize(
+        self, agent: ReviewAgent, raw: str, expected: str
+    ) -> None:
+        out = agent.output_from_parsed(self._parsed(review_status=raw))
+        assert out.data["review_status"] == expected
+
+    def test_alternate_keys_are_consulted(self, agent: ReviewAgent) -> None:
+        out = agent.output_from_parsed(self._parsed(outcome="CONDITIONAL PASS"))
+        assert out.data["review_status"] == "PASS WITH ACTIONS"
+        out = agent.output_from_parsed(self._parsed(verdict="fail"))
+        assert out.data["review_status"] == "FAIL"
+        out = agent.output_from_parsed(self._parsed(review={"status": "APPROVED"}))
+        assert out.data["review_status"] == "PASS"
+
+    def test_missing_everything_raises_with_received_values(
+        self, agent: ReviewAgent
+    ) -> None:
+        from orchestrator.agents.base_agent import AgentOutputError
+
+        with pytest.raises(AgentOutputError) as excinfo:
+            agent.output_from_parsed(
+                {"status": "completed", "summary": "ok", "data": {}}
+            )
+        message = str(excinfo.value)
+        assert "data.review_status" in message
+        assert "received" in message
+
+
+# ---------------------------------------------------------------------------
 # Requirements agent (moved from test_orchestrator_pipeline.py)
 # ---------------------------------------------------------------------------
 

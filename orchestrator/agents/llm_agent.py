@@ -91,7 +91,18 @@ class LLMAgent(BaseAgent):
                 errors=[str(exc), _snippet(result.text)],
             )
 
-        return self.output_from_parsed(parsed, task_id=task_id, result=result)
+        try:
+            return self.output_from_parsed(parsed, task_id=task_id, result=result)
+        except AgentOutputError as exc:
+            # Validation failures (e.g. a review missing data.review_status)
+            # are model-output problems, not crashes: fail the task with the
+            # offending snippet instead of raising a traceback through
+            # dispatch.
+            return self.failed(
+                task_id,
+                f"Model output for '{self.AGENT_ID}' failed validation",
+                errors=[str(exc), _snippet(result.text)],
+            )
 
     def output_from_parsed(
         self,
