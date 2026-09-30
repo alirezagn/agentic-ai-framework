@@ -40,6 +40,9 @@ Implement software, firmware, scripts, APIs and configuration.
 ## Output Contract
 
 - Code/firmware in Git repository
+- Implementation delivered via `data.edits["<path>"]` (exact search/replace
+  into the real file) for existing sources, or `data.documents["<path>"]`
+  (full file body) for new/short files — a summary alone does not deliver code
 - Build instructions that work from scratch
 - Configuration template
 - Logging/error output examples

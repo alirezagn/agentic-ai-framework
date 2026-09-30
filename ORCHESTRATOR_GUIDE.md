@@ -194,6 +194,15 @@ print(orch.checkpoints.print_checkpoint_list())
 | `CHANGELOG.md` | State-file history | every state write |
 | `docs/` | Materialized agent artifacts (`REQUIREMENTS-*.md`, `REVIEW-*.md`, …) | agents (`_materialize_artifacts`) |
 
+**Authoring (G16):** agents deliver real file changes through their payload —
+`data.documents["<path>"]` carries the full content of a new/short file, and
+`data.edits["<path>"] = {"search", "replace"}` patches an existing file in
+place (the post-edit body is mirrored into `docs/<name>` for the DoD check).
+A JSON summary without that content only produces a wrapper document — every
+agent's `system_rules()` carries the `AUTHORING_CONTRACT` spelling this out,
+and invalid edits (path escape, missing/ambiguous search) fail the task with a
+precise error instead of silently delivering a stub.
+
 **Derived-state recompute** (`StateManager.recompute_derived_state`) runs after
 every status mutation and on `refresh_ready_states()`:
 

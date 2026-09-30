@@ -170,6 +170,24 @@ class BaseAgent:
         "DECISIONS.md."
     )
 
+    AUTHORING_CONTRACT = (
+        "Authoring contract — how to deliver file changes:\n"
+        "- Every expected_outputs entry is a file this task must deliver. For a new "
+        "or short file (up to ~150 lines), return its FULL content in "
+        'data.documents["<expected output path>"] using the exact expected output '
+        "string as the key.\n"
+        "- To modify an existing large file, return a targeted edit instead: "
+        'data.edits["<path>"] = {"search": "<exact text currently in the file>", '
+        '"replace": "<replacement text>"} — the search snippet must appear exactly '
+        "once (include a few surrounding lines to make it unique). Use one "
+        "mechanism per file.\n"
+        "- Replying with a JSON summary only (no documents/edits content) does NOT "
+        "deliver the file: the orchestrator wraps such output as-is and the task is "
+        "not really done.\n"
+        "- Never invent executed results: report test or verification statuses as "
+        "NOT RUN unless the payload contains real execution output."
+    )
+
     def __init__(
         self,
         project_path: Optional[str | Path] = None,
@@ -192,7 +210,7 @@ class BaseAgent:
     # ------------------------------------------------------------------
 
     def system_rules(self) -> str:
-        rules = [self.SYSTEM_RULES, self.OFFLINE_EXECUTION_RULE]
+        rules = [self.SYSTEM_RULES, self.OFFLINE_EXECUTION_RULE, self.AUTHORING_CONTRACT]
         for rule in self.extra_rules:
             rules.append(rule)
         return "\n".join(rules)
@@ -326,6 +344,8 @@ class BaseAgent:
                 output.status = config.AGENT_STATUS_FAILED
                 output.errors.extend(problems)
             if materialize and output.status == config.AGENT_STATUS_COMPLETED:
+                self._apply_edits(task, output)
+            if materialize and output.status == config.AGENT_STATUS_COMPLETED:
                 self._materialize_artifacts(task, output)
             return output
         except Exception as exc:  # noqa: BLE001 - agents must never crash the orchestrator
@@ -381,6 +401,71 @@ class BaseAgent:
             lines += ["", "## Warnings", ""] + [f"- {item}" for item in output.warnings]
         lines.append("")
         return "\n".join(lines)
+
+    def _apply_edits(self, task: Dict[str, Any], output: AgentOutput) -> None:
+        """Apply ``data.edits`` search/replace patches to real project files.
+
+        The post-edit content is mirrored into ``data.documents`` so the
+        normal ``docs/`` materialization (and the DoD existence check) sees
+        the actual file body instead of a fallback wrapper. Any problem
+        (path escape, missing/ambiguous search, unreadable file) fails the
+        output with a precise error instead of silently delivering a stub.
+        """
+        edits = output.data.get("edits")
+        if not isinstance(edits, dict) or not edits:
+            return
+        from ..state_manager import save_text_file
+
+        documents = output.data.setdefault("documents", {})
+        if not isinstance(documents, dict):
+            documents = {}
+            output.data["documents"] = documents
+        project_root = self.project_path.resolve()
+        for raw_name, spec in edits.items():
+            rel = str(raw_name).strip()
+            target = Path(rel)
+            if not rel or target.is_absolute() or ".." in target.parts:
+                output.status = config.AGENT_STATUS_FAILED
+                output.errors.append(f"edits path must be project-relative: {raw_name!r}")
+                return
+            resolved = project_root / target
+            try:
+                resolved = resolved.resolve()
+                if not resolved.is_relative_to(project_root):
+                    raise OSError(f"path escapes project: {rel}")
+                if not resolved.is_file():
+                    raise FileNotFoundError(f"edits target does not exist: {rel}")
+                if not isinstance(spec, dict):
+                    raise ValueError(
+                        f"edits[{rel!r}] must be an object with 'search' and 'replace'"
+                    )
+                search = spec.get("search")
+                replace = spec.get("replace")
+                if not isinstance(search, str) or not search or not isinstance(replace, str):
+                    raise ValueError(
+                        f"edits[{rel!r}] needs a non-empty string 'search' and a string 'replace'"
+                    )
+                content = resolved.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                output.status = config.AGENT_STATUS_FAILED
+                output.errors.append(str(exc))
+                return
+            matches = content.count(search)
+            if matches != 1:
+                output.status = config.AGENT_STATUS_FAILED
+                output.errors.append(
+                    f"edits[{rel!r}] search matched {matches} time(s) (need exactly 1)"
+                )
+                return
+            updated = content.replace(search, replace, 1)
+            try:
+                save_text_file(resolved, updated)
+            except OSError as exc:
+                output.status = config.AGENT_STATUS_FAILED
+                output.errors.append(f"edits[{rel!r}] write failed: {exc}")
+                return
+            documents.setdefault(rel, updated)
+            output.artifacts.append(rel)
 
     def _materialize_artifacts(self, task: Dict[str, Any], output: AgentOutput) -> None:
         """Write every expected output of the task into ``docs/``."""

@@ -47,6 +47,8 @@ Status: PASS / FAIL / BLOCKED / NOT RUN
 
 - TEST_PLAN.md with all tests defined
 - Test execution report (pass/fail status)
+- Test statuses are `NOT RUN` unless the payload contains real execution
+  output — never report a PASS that was not actually executed
 - Test coverage matrix (requirement → test mapping)
 - Evidence artifacts (logs, screenshots)
 - Regression test suite

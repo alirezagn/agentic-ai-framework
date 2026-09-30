@@ -321,6 +321,101 @@ class TestArtifactEmission:
         assert (test_project / "docs" / "REVIEW-TASK-002.md").exists()
 
 
+class TestEditsAuthoring:
+    """G16: data.edits patches real project files; contract reaches agents."""
+
+    @staticmethod
+    def _dummy_task(test_project: Path) -> Dict[str, Any]:
+        agent = RequirementsAgent(project_path=test_project)
+        task = dict(agent.state_manager.get_task("TASK-002"))
+        task["expected_outputs"] = ["target.txt"]
+        return task
+
+    @staticmethod
+    def _dummy(test_project: Path, answer: str) -> LLMAgent:
+        class Dummy(LLMAgent):
+            AGENT_ID = "dummy_agent"
+
+        return Dummy(project_path=test_project, llm_client=FakeLLMClient([answer]))
+
+    def test_edits_apply_to_real_file_and_mirror_docs(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        task = self._dummy_task(test_project)
+        answer = _answer(
+            "TASK-002",
+            "dummy",
+            edits={"target.txt": {"search": "BETA", "replace": "BETA13"}},
+        )
+        output = self._dummy(test_project, answer).run(task)
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA13\ngamma\n"
+        mirror = (test_project / "docs" / "target.txt").read_text(encoding="utf-8")
+        assert "BETA13" in mirror
+        assert "target.txt" in output.artifacts
+        assert "docs/target.txt" in output.artifacts
+
+    def test_ambiguous_search_fails_with_precise_error(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("BETA\nmiddle\nBETA\n", encoding="utf-8")
+        task = self._dummy_task(test_project)
+        answer = _answer(
+            "TASK-002",
+            "dummy",
+            edits={"target.txt": {"search": "BETA", "replace": "X"}},
+        )
+        output = self._dummy(test_project, answer).run(task)
+        assert output.status == config.AGENT_STATUS_FAILED
+        assert any("matched 2 time(s)" in item for item in output.errors)
+        assert target.read_text(encoding="utf-8") == "BETA\nmiddle\nBETA\n"
+
+    def test_missing_search_fails(self, test_project: Path) -> None:
+        target = test_project / "target.txt"
+        target.write_text("only here\n", encoding="utf-8")
+        task = self._dummy_task(test_project)
+        answer = _answer(
+            "TASK-002",
+            "dummy",
+            edits={"target.txt": {"search": "absent", "replace": "X"}},
+        )
+        output = self._dummy(test_project, answer).run(task)
+        assert output.status == config.AGENT_STATUS_FAILED
+        assert any("matched 0 time(s)" in item for item in output.errors)
+
+    def test_path_escape_rejected(self, test_project: Path) -> None:
+        task = self._dummy_task(test_project)
+        answer = _answer(
+            "TASK-002",
+            "dummy",
+            edits={"../outside.txt": {"search": "a", "replace": "b"}},
+        )
+        output = self._dummy(test_project, answer).run(task)
+        assert output.status == config.AGENT_STATUS_FAILED
+        assert any("project-relative" in item for item in output.errors)
+
+    def test_missing_edit_target_fails(self, test_project: Path) -> None:
+        task = self._dummy_task(test_project)
+        answer = _answer(
+            "TASK-002",
+            "dummy",
+            edits={"no_such_file.txt": {"search": "a", "replace": "b"}},
+        )
+        output = self._dummy(test_project, answer).run(task)
+        assert output.status == config.AGENT_STATUS_FAILED
+        assert any("does not exist" in item for item in output.errors)
+
+    def test_authoring_contract_in_every_agents_rules(self, tmp_path: Path) -> None:
+        agent = RequirementsAgent(project_path=tmp_path)
+        rules = agent.system_rules()
+        assert "Authoring contract" in rules
+        assert 'data.edits' in rules
+        assert "NOT RUN" in rules
+
+
 # ---------------------------------------------------------------------------
 # T8a — Definition of Done
 # ---------------------------------------------------------------------------
