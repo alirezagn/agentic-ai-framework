@@ -21,6 +21,12 @@ JSON `AgentOutput` only:
 }
 ```
 - `documents` are materialized by the runtime under `docs/` (artifact evidence)
+- Goal-driven graph requests: `data.tasks` carries the new tasks —
+  `{"data": {"tasks": [{...}]}}` with 0-based `dependencies` indices,
+  registered agent `owner` ids, optional `input_files` (1..6 real project
+  files the task must read — invalid paths are dropped, core docs attach
+  when empty) and `notes` (execution guidance), and no `id`/`status` fields
+  (see `framework/05_PLANNING_AGENT.md` → "Goal-driven task graph")
 - Failures: `"status": "failed"` with `errors: ["..."]` — never fake success
 - Blockers: `"status": "blocked"` with the specific missing input
 

@@ -41,14 +41,19 @@ DECISIONS.md  RISKS.md  CHANGELOG.md  docs/
 
 The scaffold passes `validate()` immediately, includes empty
 `constraints` / `budget` / `resources` blocks in `PROJECT.yaml` (fill them
-in — spec step "capture goal, constraints, budget, resources"), and writes
-the `cp-000-init` baseline checkpoint. Options:
+in — spec step "capture goal, constraints, budget, resources"), writes
+the `cp-000-init` baseline checkpoint, and **generates the task graph**:
+the planning agent turns `--goal` into a dependency-aware `TASKS.yaml`
+when an LLM backend is configured, otherwise a deterministic 5-task
+starter skeleton (requirements → architecture → implementation → test →
+documentation) is written so the project is runnable immediately. Options:
 
 | Flag | Effect |
 |---|---|
 | `--dest DIR` | Parent directory (default `projects/`) |
-| `--goal TEXT` | One-sentence goal written into `PROJECT_MEMORY.md` |
+| `--goal TEXT` | One-sentence goal written into `PROJECT_MEMORY.md` and used for planning |
 | `--force` | Overwrite state files of an existing directory |
+| `--no-plan` | Skip LLM planning; write the starter skeleton tasks instead |
 
 Alternative: copy the 7 templates from `project-templates/` by hand
 (see `project-templates/NEW_PROJECT_CHECKLIST.md`).
@@ -73,9 +78,12 @@ Then capture reality:
    session resumes from.
 2. **`CURRENT_STATE.md`** — phase, health, last updated.
 3. **Copy existing artifacts into `docs/`** — the Definition of Done
-   resolves `expected_outputs` under `docs/` only.
-4. **Backlog in `TASKS.yaml`** — finished work → `DONE`, current work →
-   `READY`/`IN_PROGRESS`, dependencies wired. Verify read-only first:
+   resolves `expected_outputs` under `docs/` only. The planning agent
+   reads the top `docs/*.md` files as context when generating the graph.
+4. **Backlog in `TASKS.yaml`** — `init --force` already generated a
+   goal-derived graph (or a starter skeleton). Reconcile it with reality:
+   finished work → `DONE`, current work → `READY`/`IN_PROGRESS`,
+   dependencies wired. Verify read-only first:
 
 ```bash
 ./bin/orchestrator --project /path/to/my-app tasks    # graph + critical path
@@ -101,11 +109,22 @@ dir under `projects/` (`init my-app --dest projects`), with
 
 ## 3. Define work
 
-Edit `TASKS.yaml` — every task needs id, owner, status, priority,
-dependencies, `expected_outputs`, `acceptance_criteria`, and optionally
-`review: {required: true}`, `milestone`, and `requirement_ids` (REQ ids
-from `docs/REQUIREMENTS.md`; the Definition of Done checks traceability
-whenever the field is present):
+The graph is **generated, not hand-written**: `init` seeds it (LLM plan or
+starter skeleton), and you can (re)generate it any time:
+
+```bash
+./bin/orchestrator --project projects/my-project plan            # from PROJECT_MEMORY.md goal
+./bin/orchestrator --project projects/my-project plan --force    # replace the graph
+./bin/orchestrator --project projects/my-project plan --goal "..." --max-tasks 6
+```
+
+Without an LLM backend, `plan` writes the starter skeleton (and refuses to
+touch a non-empty graph), and `run` on an empty graph prints a hint instead
+of dispatching. Then **refine** the generated `TASKS.yaml` — every task
+needs id, owner, status, priority, dependencies, `expected_outputs`,
+`acceptance_criteria`, and optionally `review: {required: true}`,
+`milestone`, and `requirement_ids` (REQ ids from `docs/REQUIREMENTS.md`;
+the Definition of Done checks traceability whenever the field is present):
 
 ```yaml
 tasks:
@@ -117,6 +136,7 @@ tasks:
     dependencies: []
     requirement_ids: [REQ-001]
     expected_outputs: [docs/REQUIREMENTS.md]
+    input_files: [docs/PRD.md, docs/ARCHITECTURE.md]
     acceptance_criteria:
       - At least 10 REQ entries with measurable criteria
     review:
@@ -150,11 +170,23 @@ Critical path: TASK-001 -> TASK-002 -> TASK-003
 # one bounded cycle (all READY tasks, sequential)
 ./bin/orchestrator --project projects/my-project run --max-tasks 10
 
+# run until it stops making progress; `|| break` exits on the first
+# problem (3 = loop limit, 4 = human decision required)
+for i in $(seq 1 11); do
+  ./bin/orchestrator --project projects/my-project run --max-tasks 10 || break
+done
+
 # overlap independent tasks (thread pool; state writes stay locked)
 ./bin/orchestrator --project projects/my-project run --max-concurrent 3
 
 # single task (REVIEW tasks route through the review flow)
 ./bin/orchestrator --project projects/my-project run --task TASK-002
+```
+
+When a run loop stops, its `hint:` line names the exact recovery command:
+
+```bash
+./bin/orchestrator --project projects/my-project retry TASK-003 --reason "inputs fixed"
 ```
 
 What happens per task:
@@ -200,8 +232,10 @@ Loop guards that can refuse dispatch (CLI exit code 3):
 | `repeated_output` | 3 substantially identical outputs |
 | `no_new_evidence` | 3 dispatches with no new artifacts or decisions |
 
-Recovery = change strategy materially (`data.strategy_changed`), replan, or
-escalate to a human — never retry identically.
+Recovery = fix the task's inputs, then `retry TASK-003 --reason "..."` (clears
+the loop counters and puts the task back to READY), or change strategy
+materially (`data.strategy_changed`), replan, or escalate to a human — never
+retry identically.
 
 ---
 
@@ -348,7 +382,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | dependency deadlock (exit 4) | `waive TASK-004 --dep TASK-003 --reason "..."` to drop the edge |
 | task stuck in `WAITING` | a pending `PROPOSED_CHANGE` affects it — approve/reject the decision |
 | phase looks wrong | `phase show` (stored vs derived); `phase set <NAME>` to override |
-| `LOOP LIMIT` (exit 3) | change strategy on the task or replan — see §5 |
+| `LOOP LIMIT` (exit 3) | fix the task's inputs, then `retry TASK-003 --reason "..."` to reset its loop counters; `run` prints the exact command in its hint |
 | memory/context grows forever | compaction folds MEMORY.md and resets utilization at the 70% threshold |
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
 | `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings |
@@ -358,5 +392,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 275 passed
+python3 -m pytest -q      # 314 passed
 ```

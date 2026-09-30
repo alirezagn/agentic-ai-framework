@@ -39,6 +39,7 @@ from .state_manager import (
     save_yaml_file,
     utc_now_iso,
 )
+from .llm_client import LLMClient, LLMError
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite state files if the project directory already exists",
     )
+    init_parser.add_argument(
+        "--no-plan",
+        dest="no_plan",
+        action="store_true",
+        help="Skip goal-driven LLM planning (write starter skeleton tasks instead)",
+    )
     init_parser.set_defaults(handler=cmd_init)
 
     tasks_parser = subparsers.add_parser(
@@ -157,6 +164,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of agent executions to overlap in one cycle (default: 1)",
     )
     run_parser.set_defaults(handler=cmd_run)
+
+    plan_parser = subparsers.add_parser(
+        "plan",
+        parents=[shared],
+        help="Generate the task graph from the goal (planning agent)",
+    )
+    plan_parser.add_argument(
+        "--goal",
+        dest="goal",
+        default=None,
+        help="One-sentence goal to plan from (default: PROJECT_MEMORY.md)",
+    )
+    plan_parser.add_argument(
+        "--force",
+        dest="force",
+        action="store_true",
+        help="Regenerate even if tasks exist (graph replaced only after a successful plan)",
+    )
+    plan_parser.add_argument(
+        "--max-tasks",
+        dest="max_tasks",
+        type=int,
+        default=8,
+        help="Maximum tasks the planning agent may emit (default: 8)",
+    )
+    plan_parser.set_defaults(handler=cmd_plan)
 
     health_parser = subparsers.add_parser(
         "health", parents=[shared], help="Run the supervisor health check"
@@ -206,6 +239,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reason recorded in CHANGELOG.md",
     )
     waive_parser.set_defaults(handler=cmd_waive)
+
+    retry_parser = subparsers.add_parser(
+        "retry",
+        parents=[shared],
+        help="Reset a stalled/loop-limited task so it can dispatch again",
+    )
+    retry_parser.add_argument("task", help="Task to retry (e.g. TASK-003)")
+    retry_parser.add_argument(
+        "--reason",
+        dest="reason",
+        default="",
+        help="Reason recorded in CHANGELOG.md",
+    )
+    retry_parser.set_defaults(handler=cmd_retry)
 
     agents_parser = subparsers.add_parser(
         "agents", parents=[shared], help="List registered specialist agents"
@@ -321,22 +368,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         },
     )
     atomic_write_text(
-        target / config.MEMORY_FILE,
-        (
-            f"# PROJECT_MEMORY — {name}\n\n"
-            "## Goal\n\n"
-            f"{goal}\n\n"
-            "## Status\n\n"
-            f"Initialized {now}. No tasks defined yet.\n\n"
-            "## Key Decisions\n\n"
-            "- (none yet)\n\n"
-            "## Next Steps\n\n"
-            "- Follow project-templates/NEW_PROJECT_CHECKLIST.md\n"
-            "- Create REQUIREMENTS.md with REQ-001.. entries\n"
-            "- Add initial tasks to TASKS.yaml\n"
-        ),
-    )
-    atomic_write_text(
         target / config.CURRENT_STATE_FILE,
         (
             f"# CURRENT_STATE — {name}\n\n"
@@ -363,6 +394,62 @@ def cmd_init(args: argparse.Namespace) -> int:
         f"# {name} — artifacts\n\nMaterialized agent artifacts land in this folder.\n",
     )
 
+    # G3: generate the task graph — LLM plan when a backend is configured,
+    # deterministic starter skeleton otherwise (--no-plan forces the latter).
+    seeded: List[str] = []
+    no_plan = bool(getattr(args, "no_plan", False))
+    if not no_plan and LLMClient.is_available():
+        print("Generating task graph with the planning agent (--no-plan to skip)...")
+        try:
+            seeded = MasterOrchestrator(target).build_plan(goal=goal)
+            print(f"  generated {len(seeded)} tasks: {', '.join(seeded)}")
+        except Exception as exc:  # noqa: BLE001 - never fail init on LLM issues
+            print(
+                f"warning: planning agent failed, writing starter tasks: {exc}",
+                file=sys.stderr,
+            )
+            seeded = []
+    if not seeded:
+        try:
+            seeded = StateManager(target).seed_starter_tasks(goal)
+        except StateError as exc:
+            print(f"warning: starter tasks not written: {exc}", file=sys.stderr)
+            seeded = []
+        if seeded:
+            print(f"  starter task graph: {len(seeded)} tasks (edit {target}/TASKS.yaml)")
+
+    if seeded:
+        status_line = (
+            f"Initialized {now}. Task graph generated: {len(seeded)} tasks "
+            f"({seeded[0]}..{seeded[-1]})."
+        )
+        next_steps = (
+            "- Review/edit the generated task graph: TASKS.yaml\n"
+            "- Create REQUIREMENTS.md with REQ-001.. entries\n"
+            "- Follow project-templates/NEW_PROJECT_CHECKLIST.md\n"
+        )
+    else:
+        status_line = f"Initialized {now}. No tasks defined yet — run `plan`."
+        next_steps = (
+            "- Generate the task graph: `orchestrator plan --project .`\n"
+            "- Create REQUIREMENTS.md with REQ-001.. entries\n"
+            "- Follow project-templates/NEW_PROJECT_CHECKLIST.md\n"
+        )
+    atomic_write_text(
+        target / config.MEMORY_FILE,
+        (
+            f"# PROJECT_MEMORY — {name}\n\n"
+            "## Goal\n\n"
+            f"{goal}\n\n"
+            "## Status\n\n"
+            f"{status_line}\n\n"
+            "## Key Decisions\n\n"
+            "- (none yet)\n\n"
+            "## Next Steps\n\n"
+            f"{next_steps}"
+        ),
+    )
+
     problems = StateManager(target).validate()
     if problems:
         for problem in problems:
@@ -380,9 +467,13 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     print(f"Initialized project '{name}' at {target}/")
     print("Next steps:")
-    print(f"  1. Write the one-sentence goal: {target}/{config.MEMORY_FILE}")
-    print(f"  2. Create REQUIREMENTS.md and initial TASKS.yaml tasks")
-    print(f"  3. Full checklist: project-templates/NEW_PROJECT_CHECKLIST.md")
+    if seeded:
+        print(f"  1. Review the task graph: {target}/TASKS.yaml")
+        print(f"  2. Refine the goal and write REQUIREMENTS.md (REQ-001..) in {target}/")
+    else:
+        print(f"  1. Generate the task graph: orchestrator plan --project {target}")
+        print(f"  2. Write the goal and REQUIREMENTS.md in {target}/")
+    print("  3. Full checklist: project-templates/NEW_PROJECT_CHECKLIST.md")
     print(f"  4. orchestrator --project {target} tasks")
     return 0
 
@@ -465,15 +556,47 @@ def cmd_run(args: argparse.Namespace) -> int:
             result = orchestrator.run_task(task_id)
         except LoopLimitExceededError as exc:
             print(f"LOOP LIMIT: {exc}")
+            print(
+                "hint: fix the task inputs/strategy, then run "
+                f"`orchestrator retry {task_id}` to reset its loop counters"
+            )
             return 3
         except TaskNotFoundError as exc:
             print(f"ERROR: {exc}")
             return 2
         results = [result]
     else:
+        # G5: an empty graph is generated on the fly when a backend exists.
+        if not orchestrator.state.load_tasks():
+            if LLMClient.is_available():
+                print("Task graph is empty — generating it with the planning agent...")
+                try:
+                    created = orchestrator.build_plan()
+                    print(f"  generated {len(created)} tasks: {', '.join(created)}")
+                except (StateError, OrchestratorError, LLMError) as exc:
+                    print(f"  auto-plan failed: {exc}")
+            else:
+                print(
+                    "Task graph is empty — run `orchestrator plan` or edit TASKS.yaml "
+                    "(LLM backend not configured)."
+                )
         results = orchestrator.run_cycle(max_tasks=max_tasks, max_concurrent=max_concurrent)
         if not results:
+            # Nothing to dispatch: give a one-line health summary instead of
+            # dumping the full report on every idle cycle of a run loop.
             print("No READY tasks available.")
+            report = orchestrator.sync_health()
+            detail = (
+                " (details: `orchestrator health --diagnose`)"
+                if report.state != config.HEALTH_HEALTHY
+                else ""
+            )
+            print(f"Health: {report.state}{detail}")
+            if report.state == config.HEALTH_HUMAN_DECISION_REQUIRED:
+                return 4
+            if report.state in (config.HEALTH_STALLED, config.HEALTH_BLOCKED):
+                return 3
+            return 0
 
     for result in results:
         marker = "OK" if result.succeeded else "FAIL"
@@ -492,12 +615,60 @@ def cmd_run(args: argparse.Namespace) -> int:
             for error in result.output.errors[:3]:
                 print(f"       error: {error}")
 
+    looped = [r.task_id for r in results if r.loop is not None and not r.succeeded]
+    if looped:
+        print(
+            "hint: fix the task inputs/strategy, then run "
+            f"`orchestrator retry {looped[0]}` to reset its loop counters"
+        )
+
     report = orchestrator.sync_health()
     print()
     print(report.render())
     if report.state == config.HEALTH_HUMAN_DECISION_REQUIRED:
         exit_code = max(exit_code, 4)
     return exit_code
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    """G4: generate the task graph (LLM plan, starter skeleton without a backend)."""
+    project = _resolve_project(args)
+    orchestrator = MasterOrchestrator(project)
+    if not LLMClient.is_available():
+        goal = getattr(args, "goal", None) or ""
+        try:
+            created = orchestrator.state.seed_starter_tasks(goal)
+        except StateError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        if created:
+            print(f"Starter task graph written ({len(created)} tasks): {', '.join(created)}")
+            print(
+                "LLM backend not configured — edit "
+                f"{project}/TASKS.yaml to refine the goal-derived tasks."
+            )
+            return 0
+        print(
+            "ERROR: LLM backend not configured and the graph already has tasks; "
+            "edit TASKS.yaml directly.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        created = orchestrator.build_plan(
+            goal=getattr(args, "goal", None),
+            max_tasks=int(getattr(args, "max_tasks", 8) or 8),
+            force=bool(getattr(args, "force", False)),
+        )
+    except StateError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except (OrchestratorError, LLMError) as exc:
+        print(f"ERROR: planning failed: {exc}", file=sys.stderr)
+        return 2
+    print(f"Generated {len(created)} tasks: {', '.join(created)}")
+    print(f"Edit {project}/TASKS.yaml to adjust.")
+    return 0
 
 
 def cmd_health(args: argparse.Namespace) -> int:
@@ -568,6 +739,49 @@ def cmd_waive(args: argparse.Namespace) -> int:
         entry += f": {reason}"
     state.append_changelog(entry)
     print(f"{entry} (task is now {task.get('status')})")
+    return 0
+
+
+def cmd_retry(args: argparse.Namespace) -> int:
+    """Human recovery: clear a task's loop counters so dispatch accepts it again."""
+    project = _resolve_project(args)
+    state = StateManager(project)
+    task_id = str(getattr(args, "task", "") or "").strip()
+    reason = str(getattr(args, "reason", "") or "")
+    try:
+        task = state.get_task(task_id)
+    except TaskNotFoundError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+    status = str(task.get("status") or "")
+    if status in config.TERMINAL_TASK_STATUSES:
+        print(f"ERROR: {task_id} is {status}; retry applies to active tasks only")
+        return 2
+    state.update_task_execution(
+        task_id,
+        set_values={
+            "attempts_since_change": 0,
+            "strategy_changes": 0,
+            "no_progress_cycles": 0,
+            "evidence_stall_count": 0,
+            "repeated_output_count": 0,
+            "last_output_hash": None,
+            "last_error": None,
+            "recovering": False,
+        },
+    )
+    if status in (config.TASK_READY, config.TASK_FAILED, config.TASK_IN_PROGRESS):
+        state.update_task_status(task_id, config.TASK_READY)
+    state.refresh_ready_states()
+    final = str(state.get_task(task_id).get("status") or "")
+    entry = f"retry {task_id} (loop counters reset)"
+    if reason:
+        entry += f": {reason}"
+    state.append_changelog(entry)
+    if final == config.TASK_READY:
+        print(f"{entry} — status READY; `orchestrator run` will dispatch it")
+    else:
+        print(f"{entry} — status {final} (promotes to READY when dependencies finish)")
     return 0
 
 

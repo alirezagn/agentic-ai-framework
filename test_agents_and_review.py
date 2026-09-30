@@ -165,6 +165,17 @@ class TestSpecialistRegistry:
         agent = create_agent("firmware_agent", project_path=test_project)
         assert isinstance(agent, SoftwareAgent)
 
+    def test_every_specialist_carries_the_offline_execution_rule(
+        self, test_project: Path
+    ) -> None:
+        for name in SPECIALIST_NAMES:
+            agent = create_agent(name, project_path=test_project)
+            assert BaseAgent.OFFLINE_EXECUTION_RULE in agent.system_rules(), (
+                f"{name} misses the offline anti-refusal rule"
+            )
+        hardware = create_agent("hardware_agent", project_path=test_project)
+        assert "never have physical access" in hardware.system_rules()
+
     def test_orchestrator_resolves_formerly_missing_owners(
         self, test_project: Path, checkpoints_root: Path
     ) -> None:

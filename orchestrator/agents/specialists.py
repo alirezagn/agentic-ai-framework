@@ -72,7 +72,24 @@ class PlanningAgent(LLMAgent):
         "- Every task needs an owner, priority, expected outputs and acceptance criteria.\n"
         "- Keep the dependency graph acyclic; dependent work must not start prematurely.\n"
         "- Identify tasks that can run in parallel.\n"
-        "- Replan when requirements or architecture change."
+        "- Replan when requirements or architecture change.\n"
+        "- When asked to plan a task graph, reply ONLY with JSON in this shape:\n"
+        '  {"status":"completed","summary":"<one line>",'
+        '"data":{"tasks":[{"title":"...","owner":"requirements_agent",'
+        '"priority":"CRITICAL","dependencies":[0],"expected_outputs":["..."],'
+        '"acceptance_criteria":["..."],"input_files":["docs/PRD.md"],'
+        '"notes":"execution guidance"}]}}\n'
+        "- Owner must be a registered agent id: requirements_agent, research_agent, "
+        "architecture_agent, planning_agent, hardware_agent, software_agent, "
+        "firmware_agent, test_agent, review_agent, documentation_agent.\n"
+        "- dependencies are 0-based indices into the tasks array you emit; only "
+        "reference EARLIER entries (never future indices). Do not include id "
+        "fields — they are assigned automatically.\n"
+        "- input_files: 1..6 REAL files each task must read (pick from the "
+        "listed project files/source index; missing files are dropped and "
+        "core docs attach automatically when empty).\n"
+        "- notes: one line of execution guidance for the task owner.\n"
+        "- Emit 3..8 tasks covering the goal end to end; never invent statuses."
     )
 
 
@@ -88,9 +105,15 @@ class HardwareAgent(LLMAgent):
     SYSTEM_RULES = (
         "Hardware rules:\n"
         "- Never guess voltage, polarity or pin assignment — verify or mark UNKNOWN/TBD.\n"
+        "- You never have physical access to boards or datasheets: audit from "
+        "documentation, schematics and source code only; anything unverifiable is "
+        "UNKNOWN/TBD — complete the task, never block on missing hardware.\n"
         "- Maintain BOM, pin map, wiring, power budget and mechanical notes.\n"
         "- Check component compatibility and connector/signal levels explicitly.\n"
-        "- Define hardware-specific validation for every design choice."
+        "- Define hardware-specific validation for every design choice.\n"
+        "- Keep reply data concise: summarize pin maps/BOM tables in a few "
+        "representative rows — never dump exhaustive tables (truncated JSON "
+        "fails validation)."
     )
 
 

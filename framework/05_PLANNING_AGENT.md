@@ -42,6 +42,8 @@ task:
     - artifact file
   acceptance_criteria:
     - measurable criterion
+  input_files:
+    - docs/PRD.md
   execution:
     attempt_count: 0
     no_progress_cycles: 0
@@ -61,3 +63,42 @@ task:
 - Parallel work groups identified
 - Milestones with entry/exit criteria
 - Risk/blocker list
+
+### Goal-driven task graph (`data.tasks`)
+
+When asked to plan a task graph (e.g. `orchestrator plan`,
+`init --goal`, or an empty graph before `run`), reply ONLY with JSON:
+
+```json
+{
+  "status": "completed",
+  "summary": "one-line factual summary",
+  "data": {
+    "tasks": [
+      {
+        "title": "Capture requirements",
+        "owner": "requirements_agent",
+        "priority": "CRITICAL",
+        "dependencies": [0],
+        "expected_outputs": ["docs/REQUIREMENTS.md"],
+        "acceptance_criteria": ["...measurable..."],
+        "input_files": ["docs/PRD.md"],
+        "notes": "one line of execution guidance"
+      }
+    ]
+  }
+}
+```
+
+- `owner` must be a registered agent id (see `orchestrator agents`)
+- `dependencies` are **0-based indices** into the `tasks` array you emit;
+  only reference **earlier** entries (never future indices)
+- `input_files` (optional): 1..6 **real** files each task must read —
+  nonexistent/absolute/traversal paths are dropped, and when nothing valid
+  remains the core docs are attached automatically so executors are never
+  context-starved (agents otherwise refuse with "missing input data")
+- `notes` (optional): execution guidance persisted with the task
+- Do **not** include `id`, `status` or `execution` fields — ids are
+  assigned `TASK-NNN` by the runtime and statuses are derived
+- 3..8 tasks covering the goal end to end; invalid specs are skipped
+  with a warning, an unusable plan aborts with a state error

@@ -30,6 +30,53 @@ from ..context_monitor import payload_chars
 from ..state_manager import StateManager, load_text_file, utc_now_iso
 
 
+# JSON only allows \" \\ \/ \b \f \n \r \t \uXXXX — anything else (e.g. a
+# literal backslash in a path, or a \u with non-hex digits) must be
+# escaped before parsing.
+_INVALID_JSON_ESCAPE = re.compile(r'\\(?![\\"/bfnrt]|u[0-9a-fA-F]{4})')
+_CONTROL_ESCAPES = {"\n": "\\n", "\t": "\\t", "\r": "\\r"}
+
+
+def _repair_json_candidate(candidate: str) -> Optional[Dict[str, Any]]:
+    r"""Best-effort parse of LLM JSON with common escape mistakes.
+
+    Fixes invalid backslash escapes (``docs\config.md``, broken ``\u`` forms)
+    and bare control characters (raw newlines) inside strings. Returns
+    ``None`` when the candidate cannot be salvaged.
+    """
+    repaired = _INVALID_JSON_ESCAPE.sub(r"\\\\", candidate)
+    try:
+        value = json.loads(repaired)
+        return value if isinstance(value, dict) else None
+    except json.JSONDecodeError:
+        pass
+    out: List[str] = []
+    in_string = False
+    escaped = False
+    for char in repaired:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            out.append(char)
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            out.append(char)
+            continue
+        if in_string and ord(char) < 0x20:
+            out.append(_CONTROL_ESCAPES.get(char, f"\\u{ord(char):04x}"))
+            continue
+        out.append(char)
+    try:
+        value = json.loads("".join(out))
+        return value if isinstance(value, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
 class AgentError(RuntimeError):
     """Base error raised inside agents."""
 
@@ -110,6 +157,18 @@ class BaseAgent:
         "return data.acceptance_results = [{name, status: PASS|FAIL, detail}]; "
         "failed checks block completion."
     )
+    # Appended to every agent's rules. Prevents the fabricated-refusal class:
+    # agents claiming "missing input file", "no physical hardware" or "no
+    # datasheet" as reasons to return blocked/failed instead of completing.
+    OFFLINE_EXECUTION_RULE = (
+        "Execution mode — offline: the payload is your complete working set; there is "
+        "no physical hardware, network access, or files beyond context. Missing "
+        "evidence (datasheets, board access, absent or empty input files) is itself a "
+        "FINDING: record it as UNKNOWN/TBD in data.warnings and CONTINUE to a "
+        "completed output. Never return blocked or failed because an input is "
+        "missing — the only valid block is a pending human decision recorded in "
+        "DECISIONS.md."
+    )
 
     def __init__(
         self,
@@ -133,7 +192,7 @@ class BaseAgent:
     # ------------------------------------------------------------------
 
     def system_rules(self) -> str:
-        rules = [self.SYSTEM_RULES]
+        rules = [self.SYSTEM_RULES, self.OFFLINE_EXECUTION_RULE]
         for rule in self.extra_rules:
             rules.append(rule)
         return "\n".join(rules)
@@ -378,6 +437,8 @@ class BaseAgent:
             candidates.append(fenced.group(1))
 
         start = text.find("{")
+        first_start = start
+        outer_closed = False
         while start != -1:
             depth = 0
             in_string = False
@@ -401,18 +462,35 @@ class BaseAgent:
                     depth -= 1
                     if depth == 0:
                         candidates.append(text[start : index + 1])
+                        if start == first_start:
+                            outer_closed = True
                         break
             start = text.find("{", start + 1)
             if len(candidates) > 20:
                 break
+
+        if fenced is None and first_start != -1 and not outer_closed:
+            # A truncated reply (output-token budget exhausted) leaves the
+            # outer object open; inner fragments would parse as bogus dicts
+            # and surface as confusing downstream validation errors.
+            tail = text.rstrip()[-70:]
+            raise AgentOutputError(
+                "agent output looks truncated (outer JSON object never "
+                f"closed; tail: ...{tail!r})"
+            )
 
         errors: List[str] = []
         for candidate in candidates:
             try:
                 parsed = json.loads(candidate)
             except json.JSONDecodeError as exc:
-                errors.append(str(exc))
-                continue
+                # LLM replies often embed literal backslashes (paths like
+                # docs\config.md) or raw newlines — repair instead of failing.
+                salvaged = _repair_json_candidate(candidate)
+                if salvaged is None:
+                    errors.append(str(exc))
+                    continue
+                parsed = salvaged
             if isinstance(parsed, dict):
                 return parsed
             errors.append("JSON block is not an object")

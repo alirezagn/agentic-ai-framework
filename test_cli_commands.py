@@ -92,6 +92,16 @@ class TestTasksCommand:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         main(["init", "empty", "--dest", str(tmp_path)])
+        # init seeds a starter graph (G3); clear it to exercise the empty branch
+        state = StateManager(tmp_path / "empty")
+        state.save_tasks_document(
+            {
+                "tasks": [],
+                "parallel_groups": [],
+                "critical_path": {"path": []},
+                "summary": {"total": 0},
+            }
+        )
         assert main(["--project", str(tmp_path / "empty"), "tasks"]) == 0
         assert "No tasks defined." in capsys.readouterr().out
 
@@ -131,6 +141,7 @@ class TestBinEntrypoint:
         )
         assert completed.returncode == 0, completed.stderr
         assert (tmp_path / "bin-demo" / config.PROJECT_FILE).is_file()
+        assert (tmp_path / "bin-demo" / config.TASKS_FILE).is_file()
 
         tasks_run = subprocess.run(
             [str(BIN), "--project", str(tmp_path / "bin-demo"), "tasks"],
@@ -140,7 +151,9 @@ class TestBinEntrypoint:
             timeout=60,
         )
         assert tasks_run.returncode == 0, tasks_run.stderr
-        assert "No tasks defined." in tasks_run.stdout
+        # G3: init always produces a graph (starter skeleton without an LLM)
+        assert "TASK-001" in tasks_run.stdout
+        assert "TOTAL 5" in tasks_run.stdout
 
 
 class TestPyproject:
@@ -262,6 +275,105 @@ class TestCLI:
         captured = capsys.readouterr()
         assert exit_code in (0, 3, 4)
         assert "SUPERVISOR HEALTH REPORT" in captured.out
+
+
+class TestRetryCommand:
+    """Human recovery: `retry` clears loop counters so a refused task runs again."""
+
+    @pytest.fixture(autouse=True)
+    def _run_from_tmp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+
+    def test_retry_clears_loop_limit_and_allows_dispatch(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = StateManager(test_project)
+        state.update_task_execution(
+            "TASK-002",
+            set_values={
+                "attempts_since_change": 3,
+                "no_progress_cycles": 5,
+                "last_error": "boom",
+            },
+        )
+        # Loop-limited dispatch refuses the task and prints the recovery hint.
+        assert cli.main(["--project", str(test_project), "run", "--task", "TASK-002"]) == 3
+        refused = capsys.readouterr().out
+        assert "LOOP LIMIT" in refused
+        assert "orchestrator retry TASK-002" in refused
+
+        # retry resets the counters, records history, and re-dispatch works.
+        code = cli.main(
+            ["--project", str(test_project), "retry", "TASK-002", "--reason", "inputs fixed"]
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "READY" in out
+        task = StateManager(test_project).get_task("TASK-002")
+        assert task["execution"]["attempts_since_change"] == 0
+        assert task["execution"]["no_progress_cycles"] == 0
+        assert task["execution"]["last_error"] is None
+        assert task["status"] == config.TASK_READY
+        changelog = (test_project / config.CHANGELOG_FILE).read_text(encoding="utf-8")
+        assert "retry TASK-002" in changelog
+
+        assert cli.main(["--project", str(test_project), "run", "--task", "TASK-002"]) == 0
+        assert StateManager(test_project).get_task("TASK-002")["status"] == config.TASK_DONE
+
+    def test_retry_unknown_task_exits_2(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cli.main(["--project", str(test_project), "retry", "TASK-999"]) == 2
+        assert "ERROR" in capsys.readouterr().out
+
+    def test_retry_rejects_terminal_task(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # TASK-001 is DONE in the fixture.
+        assert cli.main(["--project", str(test_project), "retry", "TASK-001"]) == 2
+        out = capsys.readouterr().out
+        assert "ERROR" in out
+        assert "DONE" in out
+
+    def test_retry_keeps_dependency_blocked_task_blocked(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # TASK-003 is BLOCKED with unmet deps (TASK-002 not finished): counters
+        # reset, but the status must not jump to READY.
+        state = StateManager(test_project)
+        state.update_task_execution("TASK-003", set_values={"attempts_since_change": 3})
+        assert cli.main(["--project", str(test_project), "retry", "TASK-003"]) == 0
+        out = capsys.readouterr().out
+        task = StateManager(test_project).get_task("TASK-003")
+        assert task["execution"]["attempts_since_change"] == 0
+        assert task["status"] == config.TASK_BLOCKED
+        assert "BLOCKED" in out
+
+    def test_retry_promotes_agent_blocked_task_when_deps_met(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # An agent-refusal leaves a task BLOCKED even though dependencies are
+        # met: retry must promote it back to READY via refresh.
+        state = StateManager(test_project)
+        state.update_task_status("TASK-002", config.TASK_DONE)
+        state.update_task_status("TASK-003", config.TASK_BLOCKED)
+        state.update_task_execution("TASK-003", set_values={"attempts_since_change": 3})
+        assert cli.main(["--project", str(test_project), "retry", "TASK-003"]) == 0
+        out = capsys.readouterr().out
+        task = StateManager(test_project).get_task("TASK-003")
+        assert task["status"] == config.TASK_READY
+        assert "READY" in out
+
+    def test_cycle_run_refusal_prints_retry_hint(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        StateManager(test_project).update_task_execution(
+            "TASK-002", set_values={"attempts_since_change": 3}
+        )
+        code = cli.main(["--project", str(test_project), "run", "--max-tasks", "4"])
+        out = capsys.readouterr().out
+        assert code != 0
+        assert "orchestrator retry TASK-002" in out
 
 
 # ---------------------------------------------------------------------------

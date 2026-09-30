@@ -115,6 +115,33 @@ class TestLLMClientDiscovery:
         with pytest.raises(LLMUnavailableError):
             LLMClient(provider="bogus")
 
+    def test_max_tokens_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ORCHESTRATOR_LLM_MAX_TOKENS", "8192")
+        client = LLMClient(provider="ollama", model="m")
+        assert client.max_tokens == 8192
+        # explicit argument still wins over the env default
+        explicit = LLMClient(provider="ollama", model="m", max_tokens=1024)
+        assert explicit.max_tokens == 1024
+
+    def test_max_tokens_default_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ORCHESTRATOR_LLM_MAX_TOKENS", raising=False)
+        client = LLMClient(provider="ollama", model="m")
+        assert client.max_tokens == 4096
+
+    def test_num_ctx_default_env_and_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ORCHESTRATOR_LLM_NUM_CTX", raising=False)
+        assert LLMClient(provider="ollama", model="m").num_ctx == 16384
+        monkeypatch.setenv("ORCHESTRATOR_LLM_NUM_CTX", "32768")
+        assert LLMClient(provider="ollama", model="m").num_ctx == 32768
+        assert LLMClient(provider="ollama", model="m", num_ctx=8192).num_ctx == 8192
+
+    def test_timeout_default_and_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ORCHESTRATOR_LLM_TIMEOUT", raising=False)
+        assert LLMClient(provider="ollama", model="m").timeout == 120.0
+        monkeypatch.setenv("ORCHESTRATOR_LLM_TIMEOUT", "300")
+        assert LLMClient(provider="ollama", model="m").timeout == 300.0
+        assert LLMClient(provider="ollama", model="m", timeout=42.0).timeout == 42.0
+
 
 class TestLLMClientCalls:
     def test_anthropic_request_and_usage_parsing(self) -> None:
@@ -172,6 +199,11 @@ class TestLLMClientCalls:
         call = transport.calls[0]
         assert call["url"] == "http://ollama.local:11434/api/chat"
         assert call["body"]["stream"] is False
+        # The context/output budget must reach the server: the 4096 server
+        # default silently truncates JSON (prompt + completion ≤ num_ctx).
+        assert call["body"]["options"]["num_ctx"] == 16384
+        assert call["body"]["options"]["num_predict"] == 4096
+        assert call["body"]["think"] is False
 
     def test_ollama_v1_base_uses_openai_shape(self) -> None:
         transport = RecordingTransport(
@@ -426,6 +458,38 @@ class TestStructuredOutputParsing:
     def test_non_object_json_is_rejected(self) -> None:
         with pytest.raises(AgentOutputError):
             BaseAgent.parse_structured_output("[1, 2, 3]")
+
+    def test_truncated_json_raises_specific_error(self) -> None:
+        # Data-heavy replies cut mid-object must NOT silently parse as a
+        # balanced inner fragment (that produced bogus "empty summary").
+        truncated = (
+            '{"status": "completed", "summary": "x", '
+            '"data": {"pin_map": {"CS": 10, "DC": 9}, "more": '
+        )
+        with pytest.raises(AgentOutputError, match="truncated"):
+            BaseAgent.parse_structured_output(truncated)
+
+    def test_prose_before_valid_json_still_parses(self) -> None:
+        payload = {"summary": "ok", "status": "completed"}
+        text = "Sure — here is the answer:\n" + json.dumps(payload)
+        assert BaseAgent.parse_structured_output(text) == payload
+
+    def test_invalid_backslash_escape_is_repaired(self) -> None:
+        # literal backslash-paths (docs\config.md) are a common LLM slip;
+        # the Python literal below yields JSON text with a raw single backslash
+        text = '{"summary": "ok", "data": {"path": "docs\\config.md"}}'
+        parsed = BaseAgent.parse_structured_output(text)
+        assert parsed["data"]["path"] == "docs\\config.md"
+
+    def test_broken_unicode_escape_is_repaired(self) -> None:
+        text = '{"summary": "ok", "data": {"note": "\\uZZZZ"}}'
+        parsed = BaseAgent.parse_structured_output(text)
+        assert parsed["data"]["note"] == "\\uZZZZ"
+
+    def test_raw_newline_inside_string_is_repaired(self) -> None:
+        text = '{"summary": "ok", "data": {"doc": "line1\nline2"}}'
+        parsed = BaseAgent.parse_structured_output(text)
+        assert parsed["data"]["doc"] == "line1\nline2"
 
     def test_llm_agent_without_json_fails_task(self, test_project: Path) -> None:
         fake = FakeLLMClient(["no structured answer, sorry"])

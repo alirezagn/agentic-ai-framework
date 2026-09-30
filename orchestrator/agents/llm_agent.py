@@ -105,9 +105,10 @@ class LLMAgent(BaseAgent):
         parsed = dict(parsed)
         parsed["agent_id"] = self.AGENT_ID
         if task_id:
-            parsed.setdefault("task_id", task_id)
-            if not parsed.get("task_id"):
-                parsed["task_id"] = task_id
+            # Force the executed task id: a model-invented task_id can never
+            # pass validate_output (it must match the executed task), so
+            # honoring it would only poison otherwise-good output.
+            parsed["task_id"] = task_id
         parsed.setdefault("status", config.AGENT_STATUS_COMPLETED)
         parsed.setdefault("summary", "")
         data = parsed.get("data")

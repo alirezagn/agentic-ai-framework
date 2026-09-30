@@ -43,7 +43,7 @@ control back to a human.
 | `orchestrator/prompt_builder.py` | Renders system prompts from `framework/*.md` specs |
 | `orchestrator/agents/` | `BaseAgent`, `LLMAgent`, 9 specialists + `ReviewAgent` |
 | `orchestrator/context_monitor.py` | Measured context-utilization accounting |
-| `orchestrator/cli.py` | Subcommands: `init`, `status`, `tasks`, `run`, `health`, `agents`, `checkpoint` |
+| `orchestrator/cli.py` | Subcommands: `init`, `status`, `tasks`, `run`, `plan`, `health`, `agents`, `checkpoint`, `phase`, `waive`, `retry` |
 
 > **Note:** `project_manager.py`, `task_executor.py` and `checkpoint.py` were
 > the v1.1 API and have been removed. Use `MasterOrchestrator` /
@@ -59,8 +59,8 @@ pip install -e .            # exposes the `orchestrator` command
 # — or use the repo entry point directly:
 chmod +x bin/orchestrator
 
-# 2. Scaffold a new project (creates projects/<name>/ with all state files)
-./bin/orchestrator init my-project
+# 2. Scaffold a new project (state files + auto-generated task graph)
+./bin/orchestrator init my-project --goal "One-sentence project goal"
 
 # 3. Inspect it
 ./bin/orchestrator --project projects/my-project status
@@ -89,13 +89,15 @@ orchestrator [--project PATH] [--version] <command>
 
 | Command | Description |
 |---|---|
-| `init NAME [--dest DIR] [--goal TEXT] [--force]` | Scaffold a valid project under `projects/` (default); writes the `cp-000-init` baseline checkpoint and empty `constraints`/`budget`/`resources` blocks |
+| `init NAME [--dest DIR] [--goal TEXT] [--force] [--no-plan]` | Scaffold a valid project under `projects/` (default); writes the `cp-000-init` baseline checkpoint, empty `constraints`/`budget`/`resources` blocks, and generates the task graph (LLM planning agent when a backend is configured, deterministic starter skeleton otherwise; `--no-plan` forces the skeleton) |
 | `status` | Print project/task summary + health recommendations |
 | `tasks` | Dependency-graph table (id, status, owner, deps, readiness) + critical path |
-| `run [--task ID] [--max-tasks N] [--max-concurrent N]` | Dispatch READY tasks (or one task) |
+| `run [--task ID] [--max-tasks N] [--max-concurrent N]` | Dispatch READY tasks (or one task); an empty graph is generated on the fly when an LLM backend is configured |
+| `plan [--goal TEXT] [--force] [--max-tasks N]` | Generate the task graph from the goal via the planning agent; without an LLM backend writes the starter skeleton (or errors when the graph already has tasks); `--force` replaces an existing graph only after a successful plan |
 | `health [--diagnose]` | Supervisor health check (writes `PROJECT.yaml` health block); `--diagnose` adds an LLM diagnosis when a provider is configured, rules-only otherwise |
 | `phase show\|set [PHASE]` | Show the current/derived lifecycle phase, or set it explicitly (validated against the phase vocabulary; forward moves checkpoint as `cp-phase-<name>`) |
 | `waive TASK --dep ID [--reason TEXT]` | Human unblock: drop one dependency edge (deadlock relief) and record it in `CHANGELOG.md` |
+| `retry TASK [--reason TEXT]` | Human recovery: clear a stalled/loop-limited task's counters (`same_strategy`, `no_progress`, evidence stalls), put it back to READY when its dependencies are met, and record it in `CHANGELOG.md` |
 | `agents` | List registered specialist agents |
 | `checkpoint save\|list\|restore` | Checkpoint management (`--checkpoint ID`, `--notes TEXT`) |
 
@@ -278,8 +280,9 @@ When a loop is exceeded:
 
 1. Dispatch refuses the task (`LoopLimitExceededError`, CLI exit code 3)
 2. State is preserved; the detection is recorded on the result/`loop` field
-3. Recovery: change strategy (`data.strategy_changed`), escalate to a human, or
-   rework the task graph
+3. Recovery: fix the inputs, then `orchestrator retry <TASK-ID>` to reset the
+   counters (equivalent to a human-approved strategy change), or change strategy
+   (`data.strategy_changed`), escalate to a human, or rework the task graph
 
 `state_oscillation` is checked **first** in the dispatch gate and applies to the
 whole project (task id `PROJECT`); the fingerprint history is cleared on
@@ -367,6 +370,9 @@ also auto-loads `./.env`, e.g. the repo's Ollama preset in `.env.example`):
 |---|---|
 | `ORCHESTRATOR_LLM_PROVIDER` | `anthropic` \| `ollama` \| `openrouter` (auto-detected from keys) |
 | `ORCHESTRATOR_LLM_MODEL` | Model id (project default: `gemma4:12b`) |
+| `ORCHESTRATOR_LLM_MAX_TOKENS` | Output-token budget per completion (default `4096`; raise for data-heavy replies — truncated JSON fails validation with an explicit "looks truncated" error) |
+| `ORCHESTRATOR_LLM_NUM_CTX` | Ollama context window for `num_ctx` (default `16384`; the server default of 4096 silently caps prompt+output and truncates JSON — native `/api/chat` only) |
+| `ORCHESTRATOR_LLM_TIMEOUT` | Per-request timeout in seconds (default `120`; raise for slow/busy servers) |
 | `ANTHROPIC_API_KEY` | Enables `anthropic` |
 | `OPENROUTER_API_KEY` | Enables `openrouter` |
 | `OLLAMA_BASE_URL` | Project default: `http://192.168.0.200:11434` (append `/v1` for OpenAI-compat) |

@@ -434,14 +434,14 @@ the runtime (checkpoints are the persistence mechanism).
 | 17 Stale derived state | ✅ `recompute_derived_state()` on every mutation |
 | 18 Unused vocabulary | ⚠️ `DONE WITH ACCEPTED LIMITATION` now used; WAITING/RECOVERY were dead — **both now live (C1/C2)** |
 | 19 Dependency hygiene | ✅ pyyaml + pytest only |
-| 20 Test structure | ✅ roadmap-named files, 234 tests (+41 gap-remediation = 275) |
+| 20 Test structure | ✅ roadmap-named files, 234 tests (+41 gap-remediation = 275; +39 auto-plan = **314**) |
 
 ---
 
 ## G. Verification after remediation
 
 ```bash
-python3 -m pytest -q                    # 275 passed
+python3 -m pytest -q                    # 314 passed
 grep -n "PHASES\|phase_index" orchestrator/config.py      # A1
 grep -n "append_task\|relax_dependency" orchestrator/state_manager.py   # A2/A6
 grep -n "detect_decision_conflicts\|detect_stale_blocks" orchestrator/supervisor.py  # A3

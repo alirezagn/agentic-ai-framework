@@ -235,6 +235,10 @@ class MasterOrchestrator:
             self.supervisor.record_attempt(
                 task_id, progressed=False, strategy_changed=strategy_changed
             )
+            # Phase 2 must see the post-update view: agents that inspect
+            # task.status (e.g. the reviewer) otherwise read the stale READY
+            # value and can refuse the work as "not executed".
+            task = self.get_task(task_id)
 
         # --- phase 2: agent execution (unlocked) ------------------------
         logger.info("dispatching %s -> %s", task_id, agent.AGENT_ID)
@@ -395,6 +399,373 @@ class MasterOrchestrator:
                 f"Tasks added from agent output: {', '.join(created)}"
             )
         return created
+
+    # ------------------------------------------------------------------
+    # Goal -> task graph (A2 / G2)
+    # ------------------------------------------------------------------
+
+    def build_plan(
+        self,
+        goal: Optional[str] = None,
+        max_tasks: int = 8,
+        force: bool = False,
+    ) -> List[str]:
+        """Generate the task graph from the goal via the planning agent.
+
+        Runs the planning agent on a synthetic planning task (no artifact
+        materialization), normalizes ``data.tasks`` and ingests it through
+        :meth:`_ingest_output_tasks`. An existing graph is only replaced
+        after the agent produced a usable plan, so a failed or unavailable
+        LLM never destroys existing tasks.
+        """
+        max_tasks = max(1, int(max_tasks or 8))
+        existing = self.state.load_tasks()
+        if existing and not force:
+            raise StateError(
+                f"graph already has {len(existing)} task(s); "
+                "edit TASKS.yaml or pass force=True to regenerate"
+            )
+        goal_text = str(goal or "").strip()
+        if not goal_text:
+            try:
+                goal_text = self.state.load_memory().strip()
+            except StateError:
+                goal_text = ""
+        agent = self.resolve_agent("planning_agent")
+        contract = (
+            "Reply ONLY with a single JSON object of the form:\n"
+            '{"status":"completed","summary":"<one line>","data":{"tasks":['
+            '{"title":"...","owner":"requirements_agent","priority":"CRITICAL",'
+            '"dependencies":[0],"expected_outputs":["docs/X.md"],'
+            '"acceptance_criteria":["..."],"input_files":["docs/PRD.md"],'
+            '"notes":"<one line of execution guidance>"}]}}\n'
+            "Rules: 3..8 tasks covering the goal; owner must be one of: "
+            "requirements_agent, research_agent, architecture_agent, "
+            "planning_agent, hardware_agent, software_agent, firmware_agent, "
+            "test_agent, review_agent, documentation_agent; dependencies are "
+            "0-based indices into this tasks array (earlier entries only); "
+            "never include id, status, agent_id or task_id fields.\n"
+            "input_files (optional): for each task pick 1..6 REAL files listed "
+            "below (or known project paths) that the task must read — "
+            "nonexistent paths are dropped and, when nothing valid remains, "
+            "core docs are attached automatically. notes (optional): short "
+            "execution guidance for the task owner."
+        )
+        plan_task: Dict[str, Any] = {
+            "id": "PLAN-001",
+            "title": "Plan the initial task graph for the project goal",
+            "owner": "planning_agent",
+            "status": config.TASK_IN_PROGRESS,
+            "priority": "CRITICAL",
+            "dependencies": [],
+            "expected_outputs": [],
+            "acceptance_criteria": [
+                "Task graph covers the goal end to end with valid owners, "
+                "priorities and an acyclic dependency graph"
+            ],
+            "notes": (
+                f"Goal:\n{goal_text}\n\n{contract}\n\n{self._plan_source_index()}"
+                if goal_text
+                else f"{contract}\n\n{self._plan_source_index()}"
+            ),
+            "input_files": self._plan_context_files(),
+        }
+        output = agent.run(plan_task, materialize=False)
+        if output.status != config.AGENT_STATUS_COMPLETED:
+            reason = "; ".join(output.errors) or output.summary or "unknown error"
+            raise StateError(f"planning agent failed: {reason}")
+        data = output.data if isinstance(output.data, dict) else {}
+        raw = data.get("tasks")
+        if not isinstance(raw, list) or not raw:
+            raise StateError(
+                "planning agent returned no tasks (expected JSON with "
+                f"data.tasks; summary={output.summary[:120]!r}, "
+                f"data keys={sorted(str(key) for key in data)})"
+            )
+        specs = self._normalize_plan_specs(raw[:max_tasks])
+        if not specs:
+            raise StateError("planning output contained no usable task specs")
+        prepared: List[Dict[str, Any]] = []
+        seen: set = set()
+        for spec in specs:
+            owner = str(spec.get("owner") or "").strip()
+            resolved_owner = self._resolve_plan_owner(owner)
+            if resolved_owner is None:
+                output.warnings = list(output.warnings) + [
+                    f"plan ingest skipped '{spec.get('title')}': "
+                    "task has no owner"
+                ]
+                continue
+            if resolved_owner != owner:
+                output.warnings = list(output.warnings) + [
+                    f"owner '{owner}' mapped to '{resolved_owner}' "
+                    f"for task '{spec.get('title')}'"
+                ]
+            spec["owner"] = resolved_owner
+            # G9: agents receive project files through input_files; a plan
+            # that omits them starves the executor of context (research/
+            # review agents then refuse with "missing input data").
+            validated = self._validated_input_files(spec.get("input_files"))
+            if validated:
+                spec["input_files"] = validated
+            else:
+                spec["input_files"] = list(self._plan_context_files(limit=4))
+            # Only backward references can exist by append time; unknown or
+            # forward dependencies are dropped instead of skipping the task.
+            spec["dependencies"] = [
+                dep for dep in list(spec.get("dependencies") or []) if dep in seen
+            ]
+            prepared.append(spec)
+            seen.add(str(spec.get("id")))
+        if not prepared:
+            raise StateError("planning output contained no valid task specs")
+        with self._state_lock:
+            if existing:
+                document = self.state.load_tasks_document()
+                document["tasks"] = []
+                self.state.save_tasks_document(document)
+            output.data = dict(data)
+            output.data["tasks"] = prepared
+            created = self._ingest_output_tasks(output)
+        if not created:
+            raise StateError("no tasks could be ingested from planning output")
+        self.state.refresh_ready_states()
+        return created
+
+    # Keyword buckets checked in order; first hit wins. Weak models invent
+    # domain owners ("qa_agent", "kernel_dev_agent") — map them instead of
+    # dropping otherwise-good planning output.
+    _PLAN_OWNER_KEYWORDS: Sequence[Tuple[frozenset, str]] = (
+        (frozenset({"requirement", "requirements", "req"}), "requirements_agent"),
+        (frozenset({"research", "investigation"}), "research_agent"),
+        (frozenset({"architecture", "architect", "design"}), "architecture_agent"),
+        (
+            frozenset({"plan", "planning", "planner", "roadmap", "milestone"}),
+            "planning_agent",
+        ),
+        (frozenset({"documentation", "docs", "doc"}), "documentation_agent"),
+        (frozenset({"review", "reviewer"}), "review_agent"),
+        (
+            frozenset({"hardware", "pcb", "pinout", "schematic", "bom"}),
+            "hardware_agent",
+        ),
+        (frozenset({"firmware", "driver", "hal", "boot", "partition"}), "firmware_agent"),
+        (
+            frozenset({
+                "test", "tests", "qa", "verify", "verification", "validate",
+                "validation", "audit", "quality",
+            }),
+            "test_agent",
+        ),
+        (
+            frozenset({
+                "software", "kernel", "fs", "filesystem", "app", "application",
+                "frontend", "backend", "web", "api", "code", "dev", "develop",
+                "implement", "integration", "cli",
+            }),
+            "software_agent",
+        ),
+    )
+
+    @staticmethod
+    def _resolve_plan_owner(owner: str) -> Optional[str]:
+        """Map a model-chosen owner onto a registered agent id (G2).
+
+        Exact matches win; otherwise the owner name is tokenized and
+        matched against keyword buckets (``qa_agent`` -> ``test_agent``).
+        Unknown but non-empty owners fall back to ``software_agent``; only
+        a missing owner causes the spec to be dropped.
+        """
+        from .agents.base_agent import agent_names  # local import: avoid cycle
+
+        key = str(owner or "").strip().lower()
+        if not key:
+            return None
+        canonical = {name.lower(): name for name in agent_names()}
+        if key in canonical:
+            return canonical[key]
+        tokens = set(re.findall(r"[a-z]+", key))
+        tokens.discard("agent")
+        for keywords, agent_id in MasterOrchestrator._PLAN_OWNER_KEYWORDS:
+            if tokens & keywords:
+                return agent_id
+        return canonical.get("software_agent", "software_agent")
+
+    @staticmethod
+    def _normalize_plan_specs(raw: Sequence[Any]) -> List[Dict[str, Any]]:
+        """Turn raw planning-agent task entries into ingestible specs (G2).
+
+        Repairs the common LLM mistakes: missing ids (assigned ``TASK-NNN``
+        in array order) and dependencies expressed as 0-based array indices,
+        titles or stray ids. Only whitelisted task fields survive, so a
+        model cannot inject ``status``/``execution`` state.
+        """
+        allowed = (
+            "title",
+            "owner",
+            "priority",
+            "dependencies",
+            "expected_outputs",
+            "acceptance_criteria",
+            "notes",
+            "input_files",
+        )
+        entries = [dict(item) for item in raw if isinstance(item, dict)]
+        lookup: Dict[str, int] = {}
+        for index, entry in enumerate(entries):
+            model_id = str(entry.get("id") or "").strip().lower()
+            entry["id"] = f"TASK-{index + 1:03d}"
+            for key in list(entry):
+                if key not in allowed and key != "id":
+                    entry.pop(key, None)
+            title = str(entry.get("title") or "").strip().lower()
+            if model_id and model_id not in lookup:
+                lookup[model_id] = index
+            if entry["id"].lower() not in lookup:
+                lookup[entry["id"].lower()] = index
+            if title and title not in lookup:
+                lookup[title] = index
+        specs: List[Dict[str, Any]] = []
+        for index, entry in enumerate(entries):
+            if not str(entry.get("title") or "").strip():
+                continue
+            resolved: List[str] = []
+            for dep in entry.get("dependencies") or []:
+                dep_index: Optional[int] = None
+                if isinstance(dep, bool):
+                    continue
+                if isinstance(dep, int):
+                    dep_index = dep
+                else:
+                    dep_key = str(dep).strip()
+                    if dep_key.isdigit():
+                        dep_index = int(dep_key)
+                    else:
+                        dep_index = lookup.get(dep_key.lower())
+                if dep_index is None or not (0 <= dep_index < len(entries)):
+                    continue
+                dep_id = f"TASK-{dep_index + 1:03d}"
+                if dep_index != index and dep_id not in resolved:
+                    resolved.append(dep_id)
+            entry["dependencies"] = resolved
+            for key in ("title", "owner", "priority"):
+                if key in entry:
+                    entry[key] = str(entry[key]).strip()
+            entry["expected_outputs"] = [
+                str(item) for item in (entry.get("expected_outputs") or [])
+                if str(item).strip()
+            ]
+            entry["acceptance_criteria"] = [
+                str(item) for item in (entry.get("acceptance_criteria") or [])
+                if str(item).strip()
+            ]
+            entry["input_files"] = [
+                str(item).strip()
+                for item in (entry.get("input_files") or [])
+                if str(item).strip()
+            ][:12]
+            if "notes" in entry:
+                entry["notes"] = str(entry["notes"]).strip()[:600]
+            specs.append(entry)
+        return specs
+
+    def _plan_context_files(self, limit: int = 6) -> List[str]:
+        """Existing docs fed to the planning agent as task context (G2)."""
+        root = Path(self.project_path)
+        state_files = {
+            config.MEMORY_FILE,
+            config.CURRENT_STATE_FILE,
+            config.DECISIONS_FILE,
+            config.RISKS_FILE,
+            config.CHANGELOG_FILE,
+            # Project agent-instruction files fight the planning contract
+            # (they teach the model a different output shape).
+            "AGENTS.md",
+        }
+        preferred = [
+            "README.md",
+            "PRD.md",
+            "ROADMAP.md",
+            "docs/README.md",
+            "docs/PRD.md",
+            "docs/ARCHITECTURE.md",
+            "docs/REQUIREMENTS.md",
+            "docs/PLAN.md",
+        ]
+        picked: List[str] = []
+        for rel in preferred:
+            if len(picked) >= limit:
+                break
+            if (root / rel).is_file():
+                picked.append(rel)
+        if len(picked) < limit:
+            candidates = sorted(root.glob("*.md"))
+            docs_dir = root / "docs"
+            if docs_dir.is_dir():
+                candidates += sorted(docs_dir.glob("*.md"))
+            for path in candidates:
+                if len(picked) >= limit:
+                    break
+                rel = str(path.relative_to(root))
+                if rel in picked or rel in state_files:
+                    continue
+                picked.append(rel)
+        return picked
+
+    def _validated_input_files(self, files: Any, limit: int = 12) -> List[str]:
+        """Keep only existing plain project files from a model-provided list.
+
+        Rejects absolute paths, ``..`` traversal and non-files so a model
+        cannot point agents outside the project (G9).
+        """
+        root = Path(self.project_path).resolve()
+        validated: List[str] = []
+        if not isinstance(files, (list, tuple)):
+            return validated
+        for item in files:
+            rel = str(item).strip()
+            if not rel or len(validated) >= limit:
+                continue
+            candidate = Path(rel)
+            if candidate.is_absolute() or ".." in candidate.parts:
+                continue
+            resolved = (root / candidate).resolve()
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                continue
+            if resolved.is_file():
+                validated.append(rel)
+        return validated
+
+    def _plan_source_index(self, limit: int = 60) -> str:
+        """Compact list of real source paths for the planning contract.
+
+        Lets the model cite genuine files (``kernel/kernel.c``) in task
+        ``input_files`` — it never sees the tree otherwise, and research/audit
+        tasks refuse when no source files reach their payload.
+        """
+        root = Path(self.project_path)
+        skip = {
+            "build", "build_host_test", "managed_components", "node_modules",
+            ".git", ".pio", "dist", "venv", "__pycache__", "checkpoints",
+        }
+        found: List[str] = []
+        for pattern in ("*.c", "*.h", "*.cpp", "*.ino", "*.py"):
+            for path in sorted(root.rglob(pattern)):
+                if any(part in skip for part in path.parts):
+                    continue
+                found.append(str(path.relative_to(root)))
+                if len(found) >= limit:
+                    break
+            if len(found) >= limit:
+                break
+        if not found:
+            return ""
+        return (
+            "Available source files (real paths for input_files): "
+            + ", ".join(found)
+        )
 
     def _checkpoint_phase_advance(self, previous_phase: str) -> Optional[str]:
         """Checkpoint when the derived lifecycle phase moves forward (A7)."""

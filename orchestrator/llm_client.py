@@ -120,8 +120,9 @@ class LLMClient:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
-        timeout: float = 120.0,
+        max_tokens: Optional[int] = None,
+        num_ctx: Optional[int] = None,
+        timeout: Optional[float] = None,
         transport: Optional[Transport] = None,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
@@ -133,8 +134,28 @@ class LLMClient:
             )
         self.model = model or self._default_model()
         self.temperature = float(temperature)
-        self.max_tokens = int(max_tokens)
-        self.timeout = float(timeout)
+        if max_tokens is not None:
+            self.max_tokens = int(max_tokens)
+        else:
+            # Output budget: 4096 truncates data-heavy agent replies (the
+            # cut JSON then parses as a stray inner object). Override with
+            # ORCHESTRATOR_LLM_MAX_TOKENS.
+            env_max = os.environ.get("ORCHESTRATOR_LLM_MAX_TOKENS")
+            self.max_tokens = int(env_max) if env_max else 4096
+        # Ollama context window: the server default (often 4096) silently
+        # caps prompt+completion and truncates JSON mid-object. 16384 fits a
+        # ~4k prompt plus the default 4k output budget.
+        if num_ctx is not None:
+            self.num_ctx = int(num_ctx)
+        else:
+            env_ctx = os.environ.get("ORCHESTRATOR_LLM_NUM_CTX")
+            self.num_ctx = int(env_ctx) if env_ctx else 16384
+        # Generations on a busy LAN server can exceed the 120s default.
+        if timeout is not None:
+            self.timeout = float(timeout)
+        else:
+            env_timeout = os.environ.get("ORCHESTRATOR_LLM_TIMEOUT")
+            self.timeout = float(env_timeout) if env_timeout else 120.0
         self.transport: Transport = transport or _default_transport
         self._api_key = api_key
         self._base_url = base_url
@@ -307,18 +328,38 @@ class LLMClient:
                 **kwargs,
             )
         url = base + "/api/chat"
+        # Thinking/hybrid models (gemma4, qwen3, ...) spend the whole
+        # num_predict budget on their reasoning field and return an empty
+        # completion. `think: false` forces a direct answer; servers that
+        # predate the field reject it, so retry once without it.
+        options = {
+            "temperature": kwargs.get("temperature", self.temperature),
+            "num_predict": kwargs.get("max_tokens", self.max_tokens),
+        }
+        if self.num_ctx:
+            options["num_ctx"] = self.num_ctx
         body = json.dumps(
             {
                 "model": self.model,
                 "messages": chat_messages,
                 "stream": False,
-                "options": {
-                    "temperature": kwargs.get("temperature", self.temperature),
-                    "num_predict": kwargs.get("max_tokens", self.max_tokens),
-                },
+                "think": False,
+                "options": options,
             }
         ).encode("utf-8")
         status, payload = self.transport("POST", url, {"content-type": "application/json"}, body, self.timeout)
+        if (status < 200 or status >= 300) and b'"think"' in body:
+            body = json.dumps(
+                {
+                    "model": self.model,
+                    "messages": chat_messages,
+                    "stream": False,
+                    "options": options,
+                }
+            ).encode("utf-8")
+            status, payload = self.transport(
+                "POST", url, {"content-type": "application/json"}, body, self.timeout
+            )
         if status < 200 or status >= 300:
             raise LLMClientError(
                 f"Ollama API returned HTTP {status}: "
