@@ -664,6 +664,167 @@ class TestDefinitionOfDone:
 
 
 # ---------------------------------------------------------------------------
+# G19 — Definition-of-Done auto-repair + failure feedback loop
+# ---------------------------------------------------------------------------
+
+
+class TestDoDAutoRepair:
+    """A DoD rejection is fed back to the model once instead of failing cold."""
+
+    @staticmethod
+    def _task(test_project: Path) -> Dict[str, Any]:
+        agent = RequirementsAgent(project_path=test_project)
+        task = dict(agent.state_manager.get_task("TASK-002"))
+        task["expected_outputs"] = ["target.txt"]
+        return task
+
+    @staticmethod
+    def _meta_answer() -> str:
+        # Prose metadata: valid schema, no documents/edits — exactly what the
+        # model returned in the screensaver runs that G18 rejected.
+        return _answer(
+            "TASK-002",
+            "software_agent",
+            implementation_scope="decoupled refresh",
+            files_changed=["target.txt"],
+        )
+
+    def test_repair_delivery_patches_after_rejection(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        task = self._task(test_project)
+        good = _answer(
+            "TASK-002",
+            "software_agent",
+            edits={"target.txt": {"search": "BETA", "replace": "BETA13"}},
+        )
+        client = FakeLLMClient([self._meta_answer(), good])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "software_agent"
+
+        dummy = Dummy(project_path=test_project, llm_client=client)
+        output = dummy.run(task)
+        assert output.status == config.AGENT_STATUS_COMPLETED
+
+        repaired = dummy.repair_delivery(
+            task, output, ["delivered docs/target.txt shares no line with existing target.txt"]
+        )
+        assert repaired is not None
+        assert repaired.status == config.AGENT_STATUS_COMPLETED
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA13\ngamma\n"
+        assert len(client.calls) == 2
+        assert any("DoD auto-repair" in item for item in repaired.warnings)
+
+    def test_repair_delivery_none_when_repair_reply_unusable(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        task = self._task(test_project)
+        client = FakeLLMClient([self._meta_answer(), "sorry, no JSON here"])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "software_agent"
+
+        dummy = Dummy(project_path=test_project, llm_client=client)
+        output = dummy.run(task)
+        repaired = dummy.repair_delivery(task, output, ["a problem"])
+        assert repaired is None
+        assert len(client.calls) == 2
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA\ngamma\n"
+
+    def test_deterministic_agent_has_no_repair(self, test_project: Path) -> None:
+        agent = RequirementsAgent(project_path=test_project)
+        task = dict(agent.state_manager.get_task("TASK-002"))
+        task["expected_outputs"] = ["TASK-002.md"]
+        output = agent.run(task)
+        assert agent.repair_delivery(task, output, ["a problem"]) is None
+
+    def test_dispatch_auto_repair_turns_prose_delivery_into_done(
+        self, test_project: Path, checkpoints_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        document = yaml.safe_load((test_project / "TASKS.yaml").read_text(encoding="utf-8"))
+        for entry in document["tasks"]:
+            if entry.get("id") == "TASK-002":
+                entry["expected_outputs"] = ["target.txt"]
+        (test_project / "TASKS.yaml").write_text(
+            yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+        )
+        good = _answer(
+            "TASK-002",
+            "software_agent",
+            edits={"target.txt": {"search": "BETA", "replace": "BETA13"}},
+        )
+        client = FakeLLMClient([self._meta_answer(), good])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "software_agent"
+
+        dummy = Dummy(project_path=test_project, llm_client=client)
+        orchestrator = MasterOrchestrator(
+            test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
+        )
+        monkeypatch.setattr(orchestrator, "resolve_agent", lambda owner, fresh=False: dummy)
+
+        result = orchestrator.dispatch("TASK-002")
+        assert result.new_status == config.TASK_DONE
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA13\ngamma\n"
+        assert len(client.calls) == 2
+        task = orchestrator.get_task("TASK-002")
+        assert task["status"] == config.TASK_DONE
+        assert task["execution"]["last_error"] is None
+        assert task["execution"]["retry_reason"] is None
+
+    def test_dispatch_keeps_rejection_when_repair_fails(
+        self, test_project: Path, checkpoints_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        document = yaml.safe_load((test_project / "TASKS.yaml").read_text(encoding="utf-8"))
+        for entry in document["tasks"]:
+            if entry.get("id") == "TASK-002":
+                entry["expected_outputs"] = ["target.txt"]
+        (test_project / "TASKS.yaml").write_text(
+            yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+        )
+        client = FakeLLMClient([self._meta_answer(), "still just prose, no JSON"])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "software_agent"
+
+        dummy = Dummy(project_path=test_project, llm_client=client)
+        orchestrator = MasterOrchestrator(
+            test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
+        )
+        monkeypatch.setattr(orchestrator, "resolve_agent", lambda owner, fresh=False: dummy)
+
+        result = orchestrator.dispatch("TASK-002")
+        assert result.new_status == config.TASK_FAILED
+        task = orchestrator.get_task("TASK-002")
+        assert "shares no line" in (task["execution"]["last_error"] or "")
+        assert "DoD unmet" in (task.get("notes") or "")
+        assert len(client.calls) == 2
+
+    def test_recovery_feedback_reaches_the_prompt(self, test_project: Path) -> None:
+        agent = RequirementsAgent(project_path=test_project)
+        task: Dict[str, Any] = {
+            "id": "TASK-002",
+            "execution": {"retry_reason": "deliver via data.edits, not prose"},
+        }
+        payload = agent.build_payload(task)
+        from orchestrator.prompt_builder import build_prompt
+
+        prompt = build_prompt(payload)
+        assert "recovery_feedback_from_previous_attempt" in prompt
+        assert "deliver via data.edits, not prose" in prompt
+
+
+# ---------------------------------------------------------------------------
 # T8b — independent review flow
 # ---------------------------------------------------------------------------
 

@@ -46,23 +46,31 @@ logger = logging.getLogger(__name__)
 
 
 def _shares_meaningful_line(left: Path, right: Path) -> bool:
-    """True when both files share at least one non-trivial line.
+    """True when both files plausibly contain the same content.
 
-    Lines shorter than 12 characters are ignored so brace-only/JSON-fragment
-    lines cannot create a false overlap between unrelated files. Unreadable
-    files return True (the existence check already covers them).
+    Primary signal: a shared line of at least 12 characters (short brace/JSON
+    lines cannot fake an overlap between a prose wrapper and source code).
+    Files too short to contain any such line fall back to sharing ANY
+    non-empty line, so tiny post-edit files still pass. Unreadable files
+    return True (the existence check already covers them).
     """
 
-    def meaningful(path: Path) -> set:
+    def lines(path: Path) -> set:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return set()
-        return {
-            line.strip() for line in text.splitlines() if len(line.strip()) >= 12
-        }
+        return {line.strip() for line in text.splitlines() if line.strip()}
 
-    return bool(meaningful(left) & meaningful(right))
+    left_lines = lines(left)
+    right_lines = lines(right)
+    left_long = {line for line in left_lines if len(line) >= 12}
+    right_long = {line for line in right_lines if len(line) >= 12}
+    if left_long & right_long:
+        return True
+    if not left_long and not right_long:
+        return bool(left_lines & right_lines)
+    return False
 
 
 class OrchestratorError(RuntimeError):
@@ -276,6 +284,20 @@ class MasterOrchestrator:
             if output.status == config.AGENT_STATUS_COMPLETED:
                 review_block = task.get("review") or {}
                 dod_problems = self.definition_of_done(task, output)
+                if dod_problems:
+                    # One automatic repair round: feed the DoD problems back to
+                    # the agent instead of failing cold (symmetric to the
+                    # truncation repair on parse failures).
+                    repaired = agent.repair_delivery(task, output, dod_problems)
+                    if repaired is not None:
+                        repaired.task_id = task_id
+                        logger.info("DoD auto-repair succeeded for %s", task_id)
+                        output = repaired
+                        dod_problems = self.definition_of_done(task, output)
+                    else:
+                        logger.info(
+                            "DoD auto-repair produced no fix for %s", task_id
+                        )
                 if review_block.get("required"):
                     new_status = config.TASK_REVIEW
                     self.state.set_review_status(task_id, "READY")
@@ -285,10 +307,12 @@ class MasterOrchestrator:
                     self.state.update_task_execution(task_id, reset_error=True)
                 elif dod_problems:
                     # Definition of Done is not met: the task may not become DONE.
+                    # Record the rejection (not the claiming summary) as the note
+                    # so the next attempt sees honest context.
                     new_status = config.TASK_FAILED
                     error_text = "DoD unmet: " + "; ".join(dod_problems)
                     self.state.update_task_status(
-                        task_id, new_status, note=output.summary, error=error_text
+                        task_id, new_status, note=error_text, error=error_text
                     )
                     self.state.append_current_state(
                         f"{task_id} rejected by Definition of Done: {error_text}"

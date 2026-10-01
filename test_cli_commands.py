@@ -398,6 +398,51 @@ class TestRetryCommand:
         assert cli.main(["--project", str(test_project), "run", "--task", "TASK-002"]) == 0
         assert StateManager(test_project).get_task("TASK-002")["status"] == config.TASK_DONE
 
+    def test_retry_reason_reaches_next_attempt_as_feedback(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = StateManager(test_project)
+        state.update_task_status(
+            "TASK-002", config.TASK_FAILED, error="DoD unmet: prose metadata"
+        )
+        assert (
+            cli.main(
+                [
+                    "--project",
+                    str(test_project),
+                    "retry",
+                    "TASK-002",
+                    "--reason",
+                    "deliver via data.edits",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        execution = state.get_task("TASK-002")["execution"]
+        feedback = execution["retry_reason"]
+        assert "deliver via data.edits" in feedback
+        assert "prose metadata" in feedback  # previous failure carried along
+        assert execution["last_error"] is None
+        assert state.get_task("TASK-002")["status"] == config.TASK_READY
+
+    def test_retry_without_reason_carries_previous_error(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = StateManager(test_project)
+        state.update_task_status(
+            "TASK-002", config.TASK_FAILED, error="not parseable JSON"
+        )
+        assert cli.main(["--project", str(test_project), "retry", "TASK-002"]) == 0
+        capsys.readouterr()
+        feedback = state.get_task("TASK-002")["execution"]["retry_reason"]
+        assert "not parseable JSON" in feedback
+        # success clears the feedback for the next cycle
+        assert cli.main(["--project", str(test_project), "run", "--task", "TASK-002"]) == 0
+        execution = state.get_task("TASK-002")["execution"]
+        assert execution["retry_reason"] is None
+        assert execution["last_error"] is None
+
     def test_retry_unknown_task_exits_2(
         self, test_project: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

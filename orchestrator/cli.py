@@ -791,6 +791,16 @@ def cmd_retry(args: argparse.Namespace) -> int:
     if status in config.TERMINAL_TASK_STATUSES:
         print(f"ERROR: {task_id} is {status}; retry applies to active tasks only")
         return 2
+    # Feedback loop: the reason (or, absent one, the failure that caused this
+    # retry) must reach the next dispatch prompt — without it the model is
+    # blind to why previous attempts failed and repeats them. Stored on the
+    # task so build_prompt renders it with the task JSON.
+    prev_error = str(((task.get("execution") or {}).get("last_error")) or "")
+    feedback = str(reason or "").strip()
+    if feedback and prev_error and prev_error not in feedback:
+        feedback = f"{feedback}\nprevious failure: {prev_error}"
+    elif not feedback:
+        feedback = prev_error
     state.update_task_execution(
         task_id,
         set_values={
@@ -801,6 +811,7 @@ def cmd_retry(args: argparse.Namespace) -> int:
             "repeated_output_count": 0,
             "last_output_hash": None,
             "last_error": None,
+            "retry_reason": feedback or None,
             "recovering": False,
         },
     )

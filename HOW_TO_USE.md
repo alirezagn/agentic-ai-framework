@@ -392,8 +392,8 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | task `FAILED` (agent/validation error) | read the printed error, fix the inputs or model output, then `retry TASK-005 --reason "..."` — the same hint appears in `run` output |
 | memory/context grows forever | compaction folds MEMORY.md and resets utilization at the 70% threshold |
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
-| `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings |
-| `DoD unmet: delivered docs/X shares no line with existing Y` | the model returned prose metadata instead of editing — `retry TASK-003 --reason "use data.edits on Y: search/replace the real file, never reply with a summary"` |
+| `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings — the first rejection triggers **one automatic repair call**; if it still fails, `retry TASK-003 --reason "use data.edits on <file>"` (the reason reaches the next prompt) |
+| `DoD unmet: delivered docs/X shares no line with existing Y` | the model returned prose metadata instead of editing — the auto-repair call already fed this back once; retry with a more specific `--reason` if it repeated |
 | `docs/*.log` or docs "Verification Results" claim tests ran | agents cannot execute anything — claims are unverified until YOU run `ctest`; treat as claims |
 | `LLM backend unavailable` | set provider env vars (§8) |
 | state corrupted | `checkpoint restore cp-...` |
@@ -401,5 +401,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 372 passed
+python3 -m pytest -q      # 380 passed
 ```

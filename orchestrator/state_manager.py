@@ -695,6 +695,7 @@ class StateManager:
                 execution["recovering"] = False
         if reset_error:
             execution["last_error"] = None
+            execution["retry_reason"] = None
         elif error is not None:
             execution["last_error"] = str(error)[: config.ERROR_SNIPPET_LENGTH]
         if set_values:
@@ -777,6 +778,7 @@ class StateManager:
         execution.setdefault("attempts_since_change", 0)
         execution.setdefault("recovering", False)
         execution.setdefault("last_error", None)
+        execution.setdefault("retry_reason", None)
         task["execution"] = execution
         review = dict(task.get("review") or {})
         review.setdefault("required", False)

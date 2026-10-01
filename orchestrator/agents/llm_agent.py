@@ -48,6 +48,24 @@ class LLMAgent(BaseAgent):
         "Head of your truncated attempt (for intent only, do not repeat it):\n"
     )
 
+    # Sent when the Definition of Done rejects a parseable-but-empty delivery
+    # (summary/prose JSON instead of real file content).
+    DOD_REPAIR_NOTE = (
+        "\n\nThe Definition of Done REJECTED your previous reply as a delivery:\n"
+        "{problems}\n"
+        "It was valid JSON but did not deliver real file content. Reply ONLY "
+        "with one compact JSON object (under 600 tokens) that actually patches "
+        "the project files:\n"
+        '{"status": "completed", "summary": "<one line>", "data": {"edits": '
+        '{"<project-relative path>": {"search": "<shortest unique snippet>", '
+        '"replace": "<replacement>"}}}}\n'
+        "Use data.edits for files that already exist (never repeat whole "
+        "files), or data.documents only for a brand-new file under 60 lines. "
+        "Do not reply with descriptions, scopes, or metadata.\n"
+        "If you truly cannot deliver, reply "
+        '{"status": "failed", "summary": "<why>", "data": {}} instead.'
+    )
+
     def __init__(
         self,
         project_path: Optional[str | Path] = None,
@@ -149,6 +167,45 @@ class LLMAgent(BaseAgent):
             return self.output_from_parsed(parsed, task_id=task_id, result=result)
         except AgentOutputError:
             return None
+
+    def repair_delivery(
+        self,
+        task: Dict[str, Any],
+        output: AgentOutput,
+        problems: List[str],
+    ) -> Optional[AgentOutput]:
+        """Send DoD rejection reasons back to the model for one re-attempt.
+
+        Best-effort: any failure to produce a usable completed delivery
+        (network, unparseable repair, still-empty content) returns None so
+        dispatch keeps the original rejection.
+        """
+        task_id = str(task.get("id") or "")
+        try:
+            payload = self.build_payload(task)
+            prompt = build_prompt(payload, agent_spec=self.spec_text())
+            system = render_system_prompt(self.system_rules(), self.spec_text())
+            bullets = "\n".join(f"- {problem}" for problem in list(problems)[:8])
+            note = self.DOD_REPAIR_NOTE.replace("{problems}", bullets)
+            result = self.client().complete(
+                system=system, messages=[{"role": "user", "content": prompt + note}]
+            )
+            parsed = self.parse_structured_output(result.text)
+            repaired = self.output_from_parsed(parsed, task_id=task_id, result=result)
+            if repaired.status != config.AGENT_STATUS_COMPLETED:
+                return None
+            self._apply_edits(task, repaired)
+            if repaired.status != config.AGENT_STATUS_COMPLETED:
+                return None
+            self._materialize_artifacts(task, repaired)
+            if repaired.status != config.AGENT_STATUS_COMPLETED:
+                return None
+        except Exception:  # noqa: BLE001 — repair is best-effort, never fatal
+            return None
+        repaired.warnings.append(
+            "delivery repaired via DoD auto-repair (first reply was rejected)"
+        )
+        return repaired
 
     def output_from_parsed(
         self,

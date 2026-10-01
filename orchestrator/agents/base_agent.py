@@ -232,6 +232,12 @@ class BaseAgent:
         notes = task.get("notes")
         if notes:
             context["task_notes"] = str(notes)
+        # Feedback loop: why the previous attempt failed must be salient in
+        # the prompt — retry --reason and DoD/agent errors land here.
+        execution = task.get("execution") if isinstance(task.get("execution"), dict) else {}
+        feedback = execution.get("retry_reason") or execution.get("last_error")
+        if feedback:
+            context["recovery_feedback_from_previous_attempt"] = str(feedback)
         # B4: always surface decisions gating this task and its REQ traceability.
         decisions = self._decisions_affecting(str(task.get("id") or ""))
         if decisions:
@@ -324,6 +330,20 @@ class BaseAgent:
         raise NotImplementedError(
             f"Agent '{self.AGENT_ID}' must implement execute()"
         )
+
+    def repair_delivery(
+        self,
+        task: Dict[str, Any],
+        output: AgentOutput,
+        problems: List[str],
+    ) -> Optional[AgentOutput]:
+        """One automatic re-attempt after a Definition-of-Done rejection.
+
+        Deterministic agents have nothing to re-ask; LLM agents override this
+        to send the DoD problems back to the model once. Returns None when no
+        usable repair is available (callers keep the original failure).
+        """
+        return None
 
     def run(self, task: Dict[str, Any], materialize: bool = True) -> AgentOutput:
         """Build the payload, execute, and never let exceptions escape.

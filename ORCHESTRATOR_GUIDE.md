@@ -97,7 +97,7 @@ orchestrator [--project PATH] [--version] <command>
 | `health [--diagnose]` | Supervisor health check (writes `PROJECT.yaml` health block); `--diagnose` adds an LLM diagnosis when a provider is configured, rules-only otherwise |
 | `phase show\|set [PHASE]` | Show the current/derived lifecycle phase, or set it explicitly (validated against the phase vocabulary; forward moves checkpoint as `cp-phase-<name>`) |
 | `waive TASK --dep ID [--reason TEXT]` | Human unblock: drop one dependency edge (deadlock relief) and record it in `CHANGELOG.md` |
-| `retry TASK [--reason TEXT]` | Human recovery: clear a failed/stalled/loop-limited task's counters (`same_strategy`, `no_progress`, evidence stalls), put it back to READY when its dependencies are met, and record it in `CHANGELOG.md` |
+| `retry TASK [--reason TEXT]` | Human recovery: clear a failed/stalled/loop-limited task's counters (`same_strategy`, `no_progress`, evidence stalls), put it back to READY when its dependencies are met, and record it in `CHANGELOG.md`. The reason (or, absent one, the previous failure) is stored as `execution.retry_reason` and surfaced to the next attempt as `recovery_feedback_from_previous_attempt` in the prompt — without it the model is blind to why earlier attempts failed |
 | `agents` | List registered specialist agents |
 | `checkpoint save\|list\|restore` | Checkpoint management (`--checkpoint ID`, `--notes TEXT`) |
 
@@ -248,7 +248,12 @@ dispatch batch, `_run_pending_reviews()` routes them to `dispatch_review()`:
 expected output already exists in the project, its `docs/` mirror must share
 at least one meaningful line with the real file (summary/prose JSON wrappers
 rejected: deliver via `data.edits` or full file content) — and review passed
-when required. Unmet → task `FAILED` with `DoD unmet: …`.
+when required. Unmet → task `FAILED` with `DoD unmet: …`. Before failing
+cold, dispatch makes **one auto-repair round**: the DoD problems are sent
+back to the agent (`repair_delivery`), which may re-materialize a real
+delivery; LLM agents re-ask the model, deterministic agents skip. The DoD
+rejection is stored as the task note (not the claiming summary) so the next
+attempt sees honest context.
 
 ### Dependency gating
 
