@@ -35,11 +35,14 @@ from .agents.base_agent import (
 )
 from .checkpoint_manager import CheckpointManager
 from .context_monitor import tokens_for_output, utilization_for_output
+from .deploy_runner import DeployRecord, DeployRunner
 from .state_manager import (
+    UNTRUSTED_TASK_FIELDS,
     StateError,
     StateManager,
     TaskNotFoundError,
     save_text_file,
+    strip_untrusted_task_fields,
     utc_now_iso,
 )
 from .supervisor import HealthReport, LoopDetection, SupervisorAgent
@@ -94,6 +97,51 @@ class TaskRunResult:
         }
 
 
+#: Suffixes on a task's ``expected_outputs`` that indicate a build/test
+#: artifact, i.e. something that can only legitimately be produced by running
+#: something. A task delivering one of these is asking for ground truth.
+_TEST_LIKE_SUFFIXES = (
+    ".log",
+    ".bin",
+    ".elf",
+    ".map",
+    ".o",
+    ".obj",
+    ".out",
+    ".hex",
+    ".test",
+    ".xml",
+    ".json",
+    ".trx",
+    ".junit",
+    ".coverage",
+    ".lcov",
+)
+
+
+def _test_like_outputs(task: Dict[str, Any]) -> bool:
+    """True when a task's expected outputs look like build/test artifacts.
+
+    A third trigger for the evidence check, alongside a declared ``data.deploy``
+    and a summary claiming execution. Recognising the artifact by shape catches
+    the case where the agent neither declares nor narrates — it just quietly
+    hands over a plausible-looking ``test_results.log``.
+    """
+    outputs = task.get("expected_outputs") or []
+    if not isinstance(outputs, list):
+        return False
+    for item in outputs:
+        name = str(item).strip().lower()
+        if not name:
+            continue
+        if name.endswith(_TEST_LIKE_SUFFIXES):
+            return True
+        base = name.rsplit("/", 1)[-1]
+        if base.startswith(("test_", "tests_")) or "test_result" in base:
+            return True
+    return False
+
+
 class MasterOrchestrator:
     """Master execution loop linking managers, agents and tracking loops."""
 
@@ -110,6 +158,9 @@ class MasterOrchestrator:
         self.supervisor = SupervisorAgent(state_manager=self.state)
         self.auto_checkpoint = auto_checkpoint
         self.agent_resolver = agent_resolver
+        # GAP-CRIT-01: the only component in the package that may spawn a
+        # process. Injectable so tests can substitute a fake and stay hermetic.
+        self.deploy_runner = DeployRunner(self.project_path)
         self._checkpoint_counter = 0
         self._idle_cycles = 0
         self._last_fingerprint: Optional[str] = None
@@ -249,6 +300,13 @@ class MasterOrchestrator:
         output = agent.run(task)
         output.task_id = task_id
 
+        # GAP-CRIT-01: run anything the agent asked to execute, HERE — outside
+        # the state lock. A build or test suite can run for minutes, and holding
+        # `_state_lock` across it would stall every other worker's state turn.
+        # This is the only ground truth in the system: the runner, not the model,
+        # stamps `executed` and the exit code.
+        deploy_records = self._run_requested_deploys(task_id, output)
+
         # --- phase 3: apply results (locked) ----------------------------
         with self._state_lock:
             self._update_context_utilization(agent, output)
@@ -260,7 +318,9 @@ class MasterOrchestrator:
             if output.status == config.AGENT_STATUS_COMPLETED:
                 review_block = task.get("review") or {}
                 dod_problems = self.definition_of_done(
-                    task, output, preexisting=delivery_snapshot
+                    task, output,
+                    preexisting=delivery_snapshot,
+                    deploy_records=deploy_records,
                 )
                 if dod_problems:
                     # One automatic repair round: feed the DoD problems back to
@@ -272,7 +332,9 @@ class MasterOrchestrator:
                         logger.info("DoD auto-repair succeeded for %s", task_id)
                         output = repaired
                         dod_problems = self.definition_of_done(
-                            task, output, preexisting=delivery_snapshot
+                            task, output,
+                            preexisting=delivery_snapshot,
+                            deploy_records=deploy_records,
                         )
                     else:
                         logger.info(
@@ -398,8 +460,73 @@ class MasterOrchestrator:
         normalized = " ".join(" ".join(parts).lower().split())
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
+    def _run_requested_deploys(
+        self,
+        task_id: str,
+        output: AgentOutput,
+    ) -> List[DeployRecord]:
+        """Execute whatever the agent asked to run, off the state lock.
+
+        GAP-CRIT-01. An agent may propose *what* to run; it never decides
+        *whether* it ran. Every invocation goes through
+        :class:`~orchestrator.deploy_runner.DeployRunner`, which stamps
+        ``executed`` and the real exit code itself.
+
+        Records are attached to ``output.data["deploy_results"]`` so the agent's
+        own edit session and the DoD see identical evidence, and each executed
+        transcript is persisted under ``docs/evidence/<task>/``.
+
+        Returns an empty list when the agent requested nothing — that is the
+        common case and must stay cheap.
+        """
+        if output is None:
+            return []
+        data = output.data if isinstance(output.data, dict) else {}
+        requested = data.get("deploy")
+        if not requested:
+            return []
+
+        records: List[DeployRecord] = []
+        try:
+            records = list(self.deploy_runner.run_payload(requested))
+        except Exception as exc:  # pragma: no cover - runner is defensive already
+            logger.warning("deploy runner failed for %s: %s", task_id, exc)
+            return []
+
+        for index, record in enumerate(records):
+            if not record.executed:
+                logger.info(
+                    "deploy not executed for %s (%s): %s",
+                    task_id,
+                    record.status,
+                    record.reason,
+                )
+                continue
+            artifact = self.deploy_runner.write_evidence(task_id, record, index)
+            if artifact:
+                record.artifact_path = artifact
+
+        # Attach to the output so the DoD, a repair turn and any later reviewer
+        # all read the same records rather than re-deriving them.
+        data["deploy_results"] = [record.to_dict() for record in records]
+        output.data = data
+        return records
+
     def _ingest_output_tasks(self, output: AgentOutput) -> List[str]:
-        """Append goal-derived tasks carried in ``data.tasks`` (A2)."""
+        """Append goal-derived tasks carried in ``data.tasks`` (A2).
+
+        This is the untrusted boundary: ``data.tasks`` is model-authored. GAP-CRIT-05
+        — every spec is sanitized by :func:`strip_untrusted_task_fields` before
+        ``append_task`` sees it, and ``append_task`` derives the status from the
+        dependency list regardless. So a planner replying
+        ``{"status": "DONE"}`` or ``{"execution": {"attempt_count": 999}}``
+        gets a task that is genuinely pending (or BLOCKED when it has
+        dependencies) with zeroed counters.
+
+        Anything stripped is reported as an output warning rather than silently
+        discarded, so a misbehaving model is visible in the dispatch log
+        instead of quietly corrected.
+        """
         if output.status != config.AGENT_STATUS_COMPLETED:
             return []
         data = output.data if isinstance(output.data, dict) else {}
@@ -407,21 +534,29 @@ class MasterOrchestrator:
         if not isinstance(raw, list) or not raw:
             return []
         created: List[str] = []
+        warnings: List[str] = []
         for spec in raw:
             if not isinstance(spec, dict):
                 continue
+            rejected = sorted(set(UNTRUSTED_TASK_FIELDS) & set(spec))
             try:
-                task = self.state.append_task(dict(spec))
+                cleaned = strip_untrusted_task_fields(spec)
+                task = self.state.append_task(cleaned)
             except StateError as exc:
-                output.warnings = list(output.warnings) + [
-                    f"task ingest skipped: {exc}"
-                ]
+                warnings.append(f"task ingest skipped: {exc}")
                 continue
             created.append(str(task.get("id")))
+            if rejected:
+                warnings.append(
+                    f"task {task.get('id')}: ignored model-supplied "
+                    f"{', '.join(rejected)} (status is derived from dependencies)"
+                )
         if created:
             self.state.append_current_state(
                 f"Tasks added from agent output: {', '.join(created)}"
             )
+        if warnings:
+            output.warnings = list(output.warnings) + warnings
         return created
 
     # ------------------------------------------------------------------
@@ -705,6 +840,12 @@ class MasterOrchestrator:
             ][:12]
             if "notes" in entry:
                 entry["notes"] = str(entry["notes"]).strip()[:600]
+            # GAP-CRIT-05: strip runtime-state fields here too, not only at the
+            # ingestion call. The whitelist above already excludes them for the
+            # keys it names, but producer wiring re-reads the model's original
+            # input_files and merges back into these entries, so this is the
+            # point where a merged-back key could reappear.
+            entry = strip_untrusted_task_fields(entry)
             specs.append(entry)
         return specs
 
@@ -1153,18 +1294,122 @@ class MasterOrchestrator:
         self.state.append_current_state(f"{dec_id} {verb} by human; affected tasks un-gated.")
         return record
 
+    def _evidence_problems(
+        self,
+        task: Dict[str, Any],
+        output: Optional[AgentOutput],
+        deploy_records: Optional[Sequence[DeployRecord]],
+    ) -> List[str]:
+        """GAP-CRIT-01: require ground truth for any claimed verification.
+
+        This is the check that closes the fabrication hole. Three conditions
+        force it, because all three are ways a task can appear verified without
+        anything having run:
+
+        1. the output declares ``data.deploy`` — the agent asked to execute;
+        2. the agent's summary or artifacts *claim* an executed verification
+           (matched by :func:`config.claims_execution`), e.g. "42/42 tests
+           passed", "build succeeded", "flashed";
+        3. the task's expected outputs look like build/test artifacts.
+
+        When it fires, one of two things must be true:
+
+        * a record with ``executed=True`` exists — then the real exit code is
+          authoritative. A non-zero exit is ground truth too: the build
+          genuinely failed, which is precisely the fact a fabricated report
+          erases. It blocks DONE and routes to repair.
+        * or the agent reports ``NOT RUN`` — an honest negative, which is
+          allowed to proceed on its other merits. "I could not run this" is a
+          legitimate outcome; inventing a pass is not.
+
+        The asymmetry is deliberate: refusing an unevidenced claim is always
+        correct, while forcing NOT RUN on a task that legitimately had nothing
+        to run would be noise.
+        """
+        problems: List[str] = []
+        records = list(deploy_records or [])
+
+        # ``output`` is optional: definition_of_done(task) is a valid call (the
+        # review path and several tests do it), in which case there is no claim
+        # to check and only the expected-output shape can still trigger this.
+        data: Dict[str, Any] = {}
+        claims = False
+        if output is not None:
+            data = output.data if isinstance(output.data, dict) else {}
+            claims = config.claims_execution(output.summary)
+            for artifact in output.artifacts or []:
+                if config.claims_execution(str(artifact)):
+                    claims = True
+                    break
+        declares_deploy = bool(data.get("deploy"))
+        test_like_outputs = _test_like_outputs(task)
+
+        if not (declares_deploy or claims or test_like_outputs):
+            return problems
+
+        ground_truth = [record for record in records if record.executed]
+        if not ground_truth:
+            reported = str(data.get("test_status") or "").strip().upper()
+            if reported == config.TEST_STATUS_NOT_RUN:
+                # Honest negative. Nothing ran, and the agent said so.
+                return problems
+            if declares_deploy:
+                reasons = "; ".join(
+                    record.reason for record in records if record.reason
+                ) or "the deployment channel produced no executed record"
+                problems.append(
+                    "task declared data.deploy but nothing was executed "
+                    f"({reasons}); report test_status={config.TEST_STATUS_NOT_RUN} "
+                    "or enable the deployment channel"
+                )
+            else:
+                problems.append(
+                    "output claims an executed verification with no ground-truth record "
+                    f"(channel enabled: {self.deploy_runner.enabled}); report "
+                    f"test_status={config.TEST_STATUS_NOT_RUN} or provide real execution output"
+                )
+            return problems
+
+        failing = [record for record in ground_truth if record.exit_code != 0]
+        if failing:
+            detail = ", ".join(
+                f"{record.command} exited {record.exit_code}" for record in failing
+            )
+            problems.append(f"executed verification failed: {detail}")
+
+        mismatched = [
+            record
+            for record in ground_truth
+            if record.expect_matched is False
+        ]
+        if mismatched:
+            detail = ", ".join(
+                f"{record.command} expected {record.declared_expect}"
+                for record in mismatched
+            )
+            problems.append(
+                f"declared expectation did not match reality: {detail}"
+            )
+
+        if claims and all(record.succeeded for record in ground_truth):
+            # The claim is backed by real passing runs — nothing to add.
+            return problems
+        return problems
+
     def definition_of_done(
         self,
         task: Dict[str, Any],
         output: Optional[AgentOutput] = None,
         preexisting: Optional[Any] = None,
+        deploy_records: Optional[Sequence[DeployRecord]] = None,
     ) -> List[str]:
         """Structural Definition-of-Done checks (empty list == satisfied).
 
-        Mirrors README.md's DoD criteria that can be verified without an LLM:
+        Mirrors the DoD criteria that can be verified without an LLM:
         measurable acceptance criteria exist, every expected output was
-        materialized under ``docs/``, and — when the task demands one — an
-        independent review has passed.
+        materialized, an independent review passed when required, and — when
+        the task claims or requires an executed verification — ground truth
+        exists for it (:meth:`_evidence_problems`).
         """
         problems: List[str] = []
         criteria = task.get("acceptance_criteria") or []
@@ -1218,6 +1463,10 @@ class MasterOrchestrator:
         review = task.get("review") or {}
         if review.get("required") and review.get("status") not in ("PASS", "PASS WITH ACTIONS"):
             problems.append("independent review not passed")
+
+        problems.extend(
+            self._evidence_problems(task, output, deploy_records)
+        )
         return problems
 
     def complete_review(

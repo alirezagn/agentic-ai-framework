@@ -38,6 +38,8 @@ from .state_manager import (
     StateFileMissingError,
     StateManager,
     TaskNotFoundError,
+    derive_initial_status,
+    strip_untrusted_task_fields,
 )
 from .supervisor import (
     Escalation,
@@ -56,6 +58,8 @@ __all__ = [
     "StateFileMissingError",
     "StateCorruptedError",
     "TaskNotFoundError",
+    "derive_initial_status",
+    "strip_untrusted_task_fields",
     "Checkpoint",
     "CheckpointManager",
     "CheckpointError",

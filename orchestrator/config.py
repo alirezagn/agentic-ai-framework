@@ -111,7 +111,23 @@ def build_system_keys() -> SystemKeys:
         SystemKey(
             key="checkpoint_signing_key",
             env_var="CHECKPOINT_SIGNING_KEY",
-            description="Optional HMAC key used to sign checkpoint metadata.",
+            description=(
+                "Optional HMAC key used to sign checkpoint metadata. Setting it ENABLES signing "
+                "(every new checkpoint is written with signed=true plus a signature); it does not "
+                "merely enable a check."
+            ),
+            required=False,
+        )
+    )
+    registry.register(
+        SystemKey(
+            key="checkpoint_signing_key_id",
+            env_var="ORCHESTRATOR_CHECKPOINT_KEY_ID",
+            description=(
+                "Identifier for the active checkpoint signing key. Bound into the HMAC so a "
+                "rotated key cannot verify snapshots signed with a retired one, and so the "
+                "verifier can tell which key a snapshot claims to need."
+            ),
             required=False,
         )
     )
@@ -525,6 +541,202 @@ MAX_CONSECUTIVE_IDLE_CYCLES = LOOP_THRESHOLDS.no_progress_max_cycles
 # Checksum algorithm used for checkpoint integrity verification.
 CHECKSUM_ALGORITHM = "sha256"
 
+# ---------------------------------------------------------------------------
+# Deployment / execution policy (GAP-CRIT-01)
+# ---------------------------------------------------------------------------
+
+# The runtime is offline by design. Executing a build, a test or a flash is the
+# one capability that can change the world outside the project directory, so it
+# is opt-in twice over: the channel must be *enabled*, and the executable must be
+# on the allowlist. Defaults are therefore both closed.
+#
+# Set ORCHESTRATOR_DEPLOY_ENABLED=1 and list executables in
+# ORCHESTRATOR_DEPLOY_ALLOWLIST (comma-separated, resolved via PATH lookup) to
+# let agents run them. With the channel off, `data.deploy` is reported as
+# executed=false, which is what forces an honest NOT RUN downstream.
+DEPLOY_ENABLED = False
+
+# Comma-separated executable names permitted to be spawned. Empty by default.
+DEPLOY_ALLOWLIST: Tuple[str, ...] = ()
+
+# Wall-clock ceiling for one invocation, in seconds. A compiler or a test suite
+# legitimately needs minutes; a hung process must not hold a worker forever.
+DEPLOY_TIMEOUT_SECONDS = 300
+
+# Hard cap on captured stdout/stderr per stream, in bytes. Output is truncated
+# with an explicit marker rather than silently, so an agent reading the tail
+# knows it is not seeing everything.
+DEPLOY_MAX_OUTPUT_BYTES = 64 * 1024
+
+# Where evidence transcripts are written, relative to the project root.
+DEPLOY_EVIDENCE_DIR = "docs/evidence"
+
+# Status vocabulary an agent may report for a verification it could not run.
+TEST_STATUS_NOT_RUN = "NOT RUN"
+
+# Substrings that mark an output as *claiming* an executed verification. Used
+# by the DoD to decide when ground truth is mandatory. Deliberately narrow: a
+# false positive forces a real check (annoying), a false negative lets a
+# fabrication through (fatal), so the list favours recall.
+DEPLOY_CLAIM_PATTERNS: Tuple[str, ...] = (
+    "executed",
+    "ran the test",
+    "ran the tests",
+    "test run",
+    "tests passed",
+    "test passed",
+    "all tests",
+    "42/42",
+    "build succeeded",
+    "build passed",
+    "compiled successfully",
+    "compilation succeeded",
+    "ctest",
+    "pytest",
+    "idf.py build",
+    "idf.py flash",
+    "flashed",
+    "flash succeeded",
+    "coverage",
+    "test report",
+    "verification log",
+    "exit code",
+)
+
+
+def _env_flag_deploy(name: str, default: bool = False) -> bool:
+    """Read the deploy enable flag. Truthy: 1/true/yes/on (case-insensitive)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def deploy_enabled() -> bool:
+    """True when agents may execute allowlisted commands.
+
+    Read dynamically so a test (or an operator) can toggle it without a code
+    change. Always False unless *both* the flag is set and the allowlist is
+    non-empty: enabling the channel with nothing allowlisted would be a flag
+    that appears to work and does nothing.
+    """
+    if not _env_flag_deploy("ORCHESTRATOR_DEPLOY_ENABLED", DEPLOY_ENABLED):
+        return False
+    return bool(deploy_allowlist())
+
+
+def deploy_allowlist() -> Tuple[str, ...]:
+    """Executables permitted to be spawned, from the environment.
+
+    Read dynamically (see :func:`_env_flag_deploy`). Entries are normalised to
+    a bare basename so ``/usr/bin/gcc`` and ``gcc`` are the same permission,
+    and a path traversal attempt cannot smuggle a different binary through.
+    """
+    raw = os.environ.get("ORCHESTRATOR_DEPLOY_ALLOWLIST", "")
+    if not raw.strip():
+        return DEPLOY_ALLOWLIST
+    names: List[str] = []
+    for item in raw.split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        names.append(os.path.basename(candidate))
+    return tuple(dict.fromkeys(names))
+
+
+def deploy_timeout() -> float:
+    """Per-invocation timeout in seconds, clamped to a sane range."""
+    raw = os.environ.get("ORCHESTRATOR_DEPLOY_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+            if 1.0 <= value <= 3600.0:
+                return value
+        except ValueError:
+            pass
+    return float(DEPLOY_TIMEOUT_SECONDS)
+
+
+def deploy_max_output_bytes() -> int:
+    """Byte cap per captured stream, clamped so a value of 0 cannot pass."""
+    raw = os.environ.get("ORCHESTRATOR_DEPLOY_MAX_OUTPUT")
+    if raw:
+        try:
+            value = int(raw)
+            if 1024 <= value <= 8 * 1024 * 1024:
+                return value
+        except ValueError:
+            pass
+    return int(DEPLOY_MAX_OUTPUT_BYTES)
+
+
+def deploy_evidence_dir() -> str:
+    """Project-relative directory for evidence transcripts."""
+    return os.environ.get("ORCHESTRATOR_DEPLOY_EVIDENCE_DIR", "").strip() or DEPLOY_EVIDENCE_DIR
+
+
+def claims_execution(text: str) -> bool:
+    """True when ``text`` claims a verification was actually executed.
+
+    Used to decide when the DoD must demand a ground-truth record. Recall is
+    favoured over precision: a false positive merely forces a real check.
+    """
+    if not text:
+        return False
+    lowered = str(text).lower()
+    return any(pattern in lowered for pattern in DEPLOY_CLAIM_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint signing / integrity policy
+# ---------------------------------------------------------------------------
+
+# Algorithm used for the checkpoint HMAC. Changing this invalidates every
+# previously signed snapshot, so it is a named constant rather than a literal
+# so the coupling is at least visible in one place.
+CHECKPOINT_SIGNATURE_ALGORITHM = "HMAC-SHA256"
+
+# Key id recorded in metadata when no explicit id is configured. Signing with a
+# named key (rather than an anonymous one) is what makes rotation possible: a
+# snapshot records which key it needs, so a retired key can be identified
+# instead of silently producing a confusing mismatch.
+DEFAULT_CHECKPOINT_KEY_ID = "default"
+
+# Version of the metadata signing envelope. Bump when the MAC's input string
+# changes shape, so an old snapshot is reported as "signed with an unknown
+# scheme" rather than as tampered.
+CHECKPOINT_SIGNATURE_VERSION = 1
+
+# Escape hatch: when true, a snapshot whose provenance cannot be positively
+# established (never signed, or signed under a key that is not configured) is
+# accepted on checksums alone with a loud warning. Defaults to FALSE, because
+# the point of persisting `signed` explicitly is that "unsigned" must never be
+# reachable by deleting a field. Operators set CHECKPOINT_ALLOW_UNSIGNED=1 to
+# restore the pre-2.0.1 behaviour for a snapshot store they cannot re-sign.
+ALLOW_UNSIGNED = False
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean-ish environment variable.
+
+    Truthy: ``1``, ``true``, ``yes``, ``on`` (case-insensitive). Anything else
+    falsy. Deliberately evaluated on every call rather than captured at import
+    so tests can toggle behaviour with ``monkeypatch.setenv``.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def allow_unsigned_checkpoints() -> bool:
+    """True when a snapshot store may fall back to checksum-only verification.
+
+    Read dynamically (see :func:`_env_flag`) so it is testable and so an
+    operator can set it without a code change.
+    """
+    return _env_flag("CHECKPOINT_ALLOW_UNSIGNED", ALLOW_UNSIGNED)
+
 # Characters of an agent error retained inside TASKS.yaml.
 ERROR_SNIPPET_LENGTH = 500
 
@@ -638,6 +850,24 @@ __all__ = [
     "VAGUE_ACCEPTANCE_TERMS",
     "ERROR_SNIPPET_LENGTH",
     "CHECKSUM_ALGORITHM",
+    "DEPLOY_ENABLED",
+    "DEPLOY_ALLOWLIST",
+    "DEPLOY_TIMEOUT_SECONDS",
+    "DEPLOY_MAX_OUTPUT_BYTES",
+    "DEPLOY_EVIDENCE_DIR",
+    "DEPLOY_CLAIM_PATTERNS",
+    "TEST_STATUS_NOT_RUN",
+    "deploy_enabled",
+    "deploy_allowlist",
+    "deploy_timeout",
+    "deploy_max_output_bytes",
+    "deploy_evidence_dir",
+    "claims_execution",
+    "CHECKPOINT_SIGNATURE_ALGORITHM",
+    "DEFAULT_CHECKPOINT_KEY_ID",
+    "CHECKPOINT_SIGNATURE_VERSION",
+    "ALLOW_UNSIGNED",
+    "allow_unsigned_checkpoints",
     "is_terminal_status",
     "priority_rank",
 ]
