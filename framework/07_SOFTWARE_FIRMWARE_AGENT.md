@@ -43,6 +43,9 @@ Implement software, firmware, scripts, APIs and configuration.
 - Implementation delivered via `data.edits["<path>"]` (exact search/replace
   into the real file) for existing sources, or `data.documents["<path>"]`
   (full file body) for new/short files — a summary alone does not deliver code
+- Delivered through a **multi-turn edit session** (`EDIT_SESSION_TURNS = 3`):
+  one small change-set reply per turn, applied deterministically, verification
+  feedback returned between turns — never one giant reply echoing full files
 - Build instructions that work from scratch
 - Configuration template
 - Logging/error output examples

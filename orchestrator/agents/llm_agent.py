@@ -15,13 +15,16 @@ inherited. Clients are injectable so tests run fully offline::
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from .. import config
 from ..llm_client import LLMClient, LLMError, LLMResult
 from ..prompt_builder import build_prompt, load_agent_spec, render_system_prompt
-from .base_agent import AgentOutput, AgentOutputError, BaseAgent
+from .base_agent import AgentOutput, AgentOutputError, BaseAgent, delivery_problems
+
+logger = logging.getLogger(__name__)
 
 
 class LLMAgent(BaseAgent):
@@ -66,6 +69,27 @@ class LLMAgent(BaseAgent):
         '{"status": "failed", "summary": "<why>", "data": {}} instead.'
     )
 
+    # > 1 switches execute() from the single-shot JSON delivery to a bounded
+    # multi-turn edit session: small change-set replies, deterministic apply
+    # between turns, verification feedback fed back to the model.
+    EDIT_SESSION_TURNS = 0
+
+    EDIT_SESSION_INSTRUCTION = (
+        "\n\n# Edit session — turn {turn} of {max}\n"
+        "This task is delivered through a MULTI-TURN EDIT SESSION. Reply with "
+        "ONE small JSON object containing ONLY the next change set — no file "
+        "bodies, no retyping of content already applied, no prose:\n"
+        '{"status": "completed", "summary": "<one line>", "data": {"edits": '
+        '{"<project-relative path>": {"search": "<shortest unique snippet>", '
+        '"replace": "<replacement>"}}}}\n'
+        "Rules: change existing files ONLY through data.edits (search/replace, "
+        "the snippet must match exactly once); create a NEW file through "
+        "data.documents carrying the complete body (small files only); never "
+        "repeat content that was already applied. When nothing more is needed "
+        'reply with an empty "edits" object.\n'
+        "Feedback from the previous turn:\n{feedback}\n"
+    )
+
     def __init__(
         self,
         project_path: Optional[str | Path] = None,
@@ -105,6 +129,8 @@ class LLMAgent(BaseAgent):
     def execute(self, payload: Dict[str, Any]) -> AgentOutput:
         task = payload.get("task") or {}
         task_id = str(task.get("id", "")) if isinstance(task, dict) else ""
+        if self.EDIT_SESSION_TURNS > 1 and isinstance(task, dict) and task_id:
+            return self._execute_edit_session(payload, task, task_id)
         spec = self.spec_text()
         prompt = build_prompt(payload, agent_spec=spec)
         system = render_system_prompt(self.system_rules(), spec)
@@ -144,6 +170,110 @@ class LLMAgent(BaseAgent):
                 f"Model output for '{self.AGENT_ID}' failed validation",
                 errors=[str(exc), _snippet(result.text)],
             )
+
+    def _execute_edit_session(
+        self, payload: Dict[str, Any], task: Dict[str, Any], task_id: str
+    ) -> AgentOutput:
+        """Bounded multi-turn delivery: small replies, apply, verify, feed back.
+
+        Replaces the fragile single giant JSON: each turn asks only for the
+        next change set, the deterministic applier patches the real files,
+        ``delivery_problems`` verifies the workspace (not the JSON), and the
+        results — apply errors or remaining DoD problems — go back to the
+        model as turn feedback. At most ``EDIT_SESSION_TURNS`` model calls.
+        """
+        base_prompt = build_prompt(payload, agent_spec=self.spec_text())
+        system = render_system_prompt(self.system_rules(), self.spec_text())
+        max_turns = int(self.EDIT_SESSION_TURNS)
+        feedback = "(first turn — no previous feedback)"
+        for turn in range(1, max_turns + 1):
+            logger.info(
+                "%s edit session turn %d/%d for %s",
+                self.AGENT_ID, turn, max_turns, task_id,
+            )
+            prompt = (
+                base_prompt
+                + self.EDIT_SESSION_INSTRUCTION.replace("{turn}", str(turn))
+                .replace("{max}", str(max_turns))
+                .replace("{feedback}", feedback)
+            )
+            try:
+                result = self.client().complete(
+                    system=system, messages=[{"role": "user", "content": prompt}]
+                )
+            except LLMError as exc:
+                message = f"LLM backend unavailable for '{self.AGENT_ID}': {exc}"
+                return self.failed(task_id, message, errors=[message])
+
+            output: Optional[AgentOutput] = None
+            parse_errors: List[str] = []
+            try:
+                parsed = self.parse_structured_output(result.text)
+                output = self.output_from_parsed(parsed, task_id=task_id, result=result)
+            except AgentOutputError as exc:
+                output = self._repair_truncated_output(
+                    system, prompt, result.text, task_id
+                )
+                parse_errors = [str(exc), _snippet(result.text)]
+            if output is None:
+                return self.failed(
+                    task_id,
+                    f"Model output for '{self.AGENT_ID}' was not parseable JSON",
+                    errors=parse_errors + ["truncation-repair attempt also failed"],
+                )
+
+            problems = self.validate_output(output)
+            if problems:
+                output.status = config.AGENT_STATUS_FAILED
+                output.errors.extend(problems)
+            if output.status == config.AGENT_STATUS_BLOCKED:
+                return output
+            if output.status != config.AGENT_STATUS_COMPLETED:
+                # apply/validation error or explicit give-up: feed it back
+                # unless this was the last turn.
+                if turn >= max_turns:
+                    return output
+                errs = list(output.errors) or [output.summary]
+                feedback = "your previous reply failed:\n" + "\n".join(
+                    f"- {err}" for err in errs[-4:]
+                )
+                continue
+
+            self._apply_edits(task, output)
+            if output.status == config.AGENT_STATUS_COMPLETED:
+                applied = list((output.data.get("edits") or {}).keys())
+                if applied:
+                    # Consume the change set: run() must not re-apply it, and
+                    # delivery_problems must know the real file was patched.
+                    output.data["edits_applied"] = applied
+                    output.data.pop("edits", None)
+                self._materialize_artifacts(task, output)
+            if output.status != config.AGENT_STATUS_COMPLETED:
+                if turn >= max_turns:
+                    return output
+                errs = list(output.errors) or ["edit application failed"]
+                feedback = "your edits could not be applied:\n" + "\n".join(
+                    f"- {err}" for err in errs[-4:]
+                )
+                continue
+
+            delivery = delivery_problems(self.project_path, task, output)
+            if not delivery:
+                output.warnings.append(
+                    f"delivered via {turn}-turn edit session (max {max_turns})"
+                )
+                return output
+            if turn >= max_turns:
+                output.status = config.AGENT_STATUS_FAILED
+                output.errors.extend(delivery)
+                return output
+            feedback = (
+                "your changes were applied; Definition-of-Done problems remain:\n"
+                + "\n".join(f"- {item}" for item in delivery[:6])
+            )
+        return self.failed(  # unreachable: every loop path returns
+            task_id, "edit session exhausted without a deliverable output"
+        )
 
     def _repair_truncated_output(
         self, system: str, prompt: str, raw: str, task_id: str

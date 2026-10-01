@@ -126,6 +126,10 @@ class HardwareAgent(LLMAgent):
 @register_agent("software_agent")
 class SoftwareAgent(LLMAgent):
     AGENT_ID = "software_agent"
+    # Code delivery is the fragile one (truncated JSON, prose metadata,
+    # half-applied changes): deliver through a bounded multi-turn edit
+    # session instead of one giant reply.
+    EDIT_SESSION_TURNS = 3
 
     SYSTEM_RULES = (
         "Software/firmware rules:\n"

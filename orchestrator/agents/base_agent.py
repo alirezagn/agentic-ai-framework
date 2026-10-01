@@ -37,6 +37,105 @@ _INVALID_JSON_ESCAPE = re.compile(r'\\(?![\\"/bfnrt]|u[0-9a-fA-F]{4})')
 _CONTROL_ESCAPES = {"\n": "\\n", "\t": "\\t", "\r": "\\r"}
 
 
+def shares_meaningful_line(left: Path, right: Path) -> bool:
+    """True when both files plausibly contain the same content.
+
+    Primary signal: a shared line of at least 12 characters (short brace/JSON
+    lines cannot fake an overlap between a prose wrapper and source code).
+    Files too short to contain any such line fall back to sharing ANY
+    non-empty line, so tiny post-edit files still pass. Unreadable files
+    return True (the existence check already covers them).
+    """
+
+    def lines(path: Path) -> set:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return set()
+        return {line.strip() for line in text.splitlines() if line.strip()}
+
+    left_lines = lines(left)
+    right_lines = lines(right)
+    left_long = {line for line in left_lines if len(line) >= 12}
+    right_long = {line for line in right_lines if len(line) >= 12}
+    if left_long & right_long:
+        return True
+    if not left_long and not right_long:
+        return bool(left_lines & right_lines)
+    return False
+
+
+def delivery_problems(
+    project_path: Path,
+    task: Dict[str, Any],
+    output: Optional["AgentOutput"] = None,
+) -> List[str]:
+    """Single source of truth for delivery checks (DoD + edit sessions).
+
+    For every ``expected_outputs`` entry:
+    - the ``docs/`` mirror must exist;
+    - when the expected path already exists in the project (and is not a
+      ``docs/``-relative target), the mirror must share real content with it
+      — a summary/prose JSON wrapper shares no line and is rejected;
+    - carrying such a file through ``data.documents`` (which never touches
+      the real file) is rejected outright: existing files are changed only
+      with ``data.edits`` (or, for ``docs/`` targets, by full-body rewrite
+      of that same path).
+    """
+    problems: List[str] = []
+    expected = task.get("expected_outputs") or []
+    if not isinstance(expected, list):
+        return problems
+    project = Path(project_path)
+    docs_dir = project / "docs"
+    data: Dict[str, Any] = {}
+    if output is not None and isinstance(output.data, dict):
+        data = output.data
+    documents = data.get("documents") if isinstance(data.get("documents"), dict) else {}
+    edits = data.get("edits") if isinstance(data.get("edits"), dict) else {}
+    applied = data.get("edits_applied") if isinstance(data.get("edits_applied"), list) else []
+    delivered = set(documents) | set(edits) | set(applied)
+
+    def has_channel(name: str, filename: str) -> bool:
+        return name in delivered or filename in delivered
+
+    for raw_name in expected:
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            continue
+        name = raw_name.strip()
+        filename = Path(name).name
+        mirror = docs_dir / filename
+        if not mirror.exists():
+            problems.append(f"expected output not materialized: {filename}")
+            continue
+        project_file = project / name
+        if name.split("/")[0] == "docs" or mirror.resolve() == project_file.resolve():
+            continue  # docs/ target: the mirror IS the deliverable
+        try:
+            inside = project_file.resolve().is_relative_to(project.resolve())
+        except OSError:
+            inside = False
+        if not inside or not project_file.is_file():
+            continue  # new file: no existing content to compare
+        if has_channel(name, filename) and not (
+            (name in edits or filename in edits or name in applied or filename in applied)
+        ):
+            problems.append(
+                f"{name} already exists — deliver it with data.edits; "
+                "data.documents may only create new files (documents never "
+                "touch the real file)"
+            )
+            continue
+        if not shares_meaningful_line(project_file, mirror):
+            problems.append(
+                f"delivered docs/{filename} shares no line with existing "
+                f"{name} — summary/prose metadata does not deliver the "
+                "file; use data.edits (search/replace) or the full file "
+                "content"
+            )
+    return problems
+
+
 def _repair_json_candidate(candidate: str) -> Optional[Dict[str, Any]]:
     r"""Best-effort parse of LLM JSON with common escape mistakes.
 

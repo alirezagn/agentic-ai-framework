@@ -825,6 +825,162 @@ class TestDoDAutoRepair:
 
 
 # ---------------------------------------------------------------------------
+# G20 — multi-turn edit-session delivery
+# ---------------------------------------------------------------------------
+
+
+class TestEditSession:
+    """Software-class agents deliver through bounded apply-and-verify turns."""
+
+    @staticmethod
+    def _task(test_project: Path) -> Dict[str, Any]:
+        agent = RequirementsAgent(project_path=test_project)
+        task = dict(agent.state_manager.get_task("TASK-002"))
+        task["expected_outputs"] = ["target.txt"]
+        return task
+
+    @staticmethod
+    def _session_agent(test_project: Path, responses: List[Any]) -> Any:
+        class SessionDummy(LLMAgent):
+            AGENT_ID = "software_agent"
+            EDIT_SESSION_TURNS = 3
+
+        client = FakeLLMClient(list(responses))
+        agent = SessionDummy(project_path=test_project, llm_client=client)
+        return agent, client
+
+    def test_session_converges_with_feedback_between_turns(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        agent, client = self._session_agent(
+            test_project,
+            [
+                _answer("TASK-002", "software_agent"),  # no edits: wrapper lands
+                _answer(
+                    "TASK-002",
+                    "software_agent",
+                    edits={"target.txt": {"search": "BETA", "replace": "BETA13"}},
+                ),
+            ],
+        )
+        task = self._task(test_project)
+        output = agent.run(task)
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA13\ngamma\n"
+        assert len(client.calls) == 2
+        turn2_prompt = client.calls[1]["messages"][0]["content"]
+        assert "Edit session — turn 2 of 3" in turn2_prompt
+        assert "Definition-of-Done problems remain" in turn2_prompt
+        assert "shares no line" in turn2_prompt
+        assert any("edit session" in item for item in output.warnings)
+
+    def test_session_feeds_apply_errors_back(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        agent, client = self._session_agent(
+            test_project,
+            [
+                _answer(
+                    "TASK-002",
+                    "software_agent",
+                    edits={"target.txt": {"search": "absent", "replace": "X"}},
+                ),
+                _answer(
+                    "TASK-002",
+                    "software_agent",
+                    edits={"target.txt": {"search": "BETA", "replace": "BETA13"}},
+                ),
+            ],
+        )
+        task = self._task(test_project)
+        output = agent.run(task)
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA13\ngamma\n"
+        assert len(client.calls) == 2
+        turn2_prompt = client.calls[1]["messages"][0]["content"]
+        assert "could not be applied" in turn2_prompt
+        assert "matched 0" in turn2_prompt
+
+    def test_session_gives_up_after_max_turns(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        agent, client = self._session_agent(
+            test_project,
+            [_answer("TASK-002", "software_agent") for _ in range(3)],
+        )
+        task = self._task(test_project)
+        output = agent.run(task)
+        assert output.status == config.AGENT_STATUS_FAILED
+        assert any("shares no line" in item for item in output.errors)
+        assert len(client.calls) == 3
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA\ngamma\n"
+
+    def test_documents_cannot_deliver_existing_file(
+        self, test_project: Path, checkpoints_root: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        body = "alpha\nBETA\ngamma\n"
+        target.write_text(body, encoding="utf-8")
+        docs = test_project / "docs"
+        docs.mkdir(exist_ok=True)
+        (docs / "target.txt").write_text(body, encoding="utf-8")
+        orchestrator = MasterOrchestrator(
+            test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
+        )
+        agent = RequirementsAgent(project_path=test_project)
+        task = self._task(test_project)
+        output = agent.completed(
+            "TASK-002", "delivered full body", data={"documents": {"target.txt": body}}
+        )
+        problems = orchestrator.definition_of_done(task, output)
+        assert any("data.edits" in item and "already exists" in item for item in problems)
+
+    def test_single_shot_agents_stay_single_shot(self, test_project: Path) -> None:
+        from orchestrator.agents import ResearchAgent
+
+        assert ResearchAgent.EDIT_SESSION_TURNS == 0
+
+    def test_dispatch_runs_edit_session_end_to_end(
+        self, test_project: Path, checkpoints_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        document = yaml.safe_load((test_project / "TASKS.yaml").read_text(encoding="utf-8"))
+        for entry in document["tasks"]:
+            if entry.get("id") == "TASK-002":
+                entry["expected_outputs"] = ["target.txt"]
+        (test_project / "TASKS.yaml").write_text(
+            yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+        )
+        agent, client = self._session_agent(
+            test_project,
+            [
+                _answer("TASK-002", "software_agent"),
+                _answer(
+                    "TASK-002",
+                    "software_agent",
+                    edits={"target.txt": {"search": "BETA", "replace": "BETA13"}},
+                ),
+            ],
+        )
+        orchestrator = MasterOrchestrator(
+            test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
+        )
+        monkeypatch.setattr(orchestrator, "resolve_agent", lambda owner, fresh=False: agent)
+
+        result = orchestrator.dispatch("TASK-002")
+        assert result.new_status == config.TASK_DONE
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA13\ngamma\n"
+        assert len(client.calls) == 2
+
+
+# ---------------------------------------------------------------------------
 # T8b — independent review flow
 # ---------------------------------------------------------------------------
 

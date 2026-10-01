@@ -203,6 +203,20 @@ agent's `system_rules()` carries the `AUTHORING_CONTRACT` spelling this out,
 and invalid edits (path escape, missing/ambiguous search) fail the task with a
 precise error instead of silently delivering a stub.
 
+**Edit session (G20):** `software_agent` does not deliver in one giant JSON
+reply. `EDIT_SESSION_TURNS = 3` switches `execute()` into a bounded
+**multi-turn edit session**: each turn asks only for the next change set
+(small JSON — no truncation), the deterministic applier patches the real
+files, and `delivery_problems()` verifies the **workspace** (mirror exists,
+real file shares content, `data.documents` cannot stand in for an existing
+file). Apply errors and remaining DoD problems are fed back as the next
+turn's feedback; after the last failing turn the output returns `failed`
+with those problems. Successful change sets are recorded in
+`data.edits_applied` and consumed so `run()` never re-applies them.
+Verification is shared: `definition_of_done` delegates its delivery checks to
+the same `delivery_problems()` helper (`orchestrator/agents/base_agent.py`),
+so the session and the DoD can never disagree.
+
 **Derived-state recompute** (`StateManager.recompute_derived_state`) runs after
 every status mutation and on `refresh_ready_states()`:
 

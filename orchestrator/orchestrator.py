@@ -29,6 +29,7 @@ from .agents.base_agent import (
     AgentOutput,
     BaseAgent,
     create_agent,
+    delivery_problems,
     normalize_agent_name,
 )
 from .checkpoint_manager import CheckpointManager
@@ -43,34 +44,6 @@ from .state_manager import (
 from .supervisor import HealthReport, LoopDetection, SupervisorAgent
 
 logger = logging.getLogger(__name__)
-
-
-def _shares_meaningful_line(left: Path, right: Path) -> bool:
-    """True when both files plausibly contain the same content.
-
-    Primary signal: a shared line of at least 12 characters (short brace/JSON
-    lines cannot fake an overlap between a prose wrapper and source code).
-    Files too short to contain any such line fall back to sharing ANY
-    non-empty line, so tiny post-edit files still pass. Unreadable files
-    return True (the existence check already covers them).
-    """
-
-    def lines(path: Path) -> set:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return set()
-        return {line.strip() for line in text.splitlines() if line.strip()}
-
-    left_lines = lines(left)
-    right_lines = lines(right)
-    left_long = {line for line in left_lines if len(line) >= 12}
-    right_long = {line for line in right_lines if len(line) >= 12}
-    if left_long & right_long:
-        return True
-    if not left_long and not right_long:
-        return bool(left_lines & right_lines)
-    return False
 
 
 class OrchestratorError(RuntimeError):
@@ -1192,49 +1165,12 @@ class MasterOrchestrator:
         if not usable:
             problems.append("no acceptance criteria defined")
 
-        expected = task.get("expected_outputs") or []
-        docs_dir = self.state.project_path / "docs"
-        if isinstance(expected, list):
-            for raw_name in expected:
-                if not isinstance(raw_name, str) or not raw_name.strip():
-                    continue
-                name = raw_name.strip()
-                filename = Path(name).name
-                mirror = docs_dir / filename
-                if not mirror.exists():
-                    problems.append(f"expected output not materialized: {filename}")
-                    continue
-                # Content plausibility: when the expected output already exists
-                # in the project, the delivered docs/ mirror must share real
-                # content with it — a summary/prose JSON wrapper (metadata the
-                # model returns instead of editing) shares no line and must not
-                # pass DoD. data.edits deliveries mirror the post-edit file,
-                # and full-body rewrites keep most lines, so both still pass.
-                project_file = self.state.project_path / name
-                if (
-                    name.split("/")[0] == "docs"
-                    or mirror.resolve() == project_file.resolve()
-                ):
-                    continue
-                try:
-                    inside = project_file.resolve().is_relative_to(
-                        self.state.project_path.resolve()
-                    )
-                except OSError:
-                    inside = False
-                if not inside or not project_file.is_file():
-                    continue
-                if not _shares_meaningful_line(project_file, mirror):
-                    problems.append(
-                        f"delivered docs/{filename} shares no line with existing "
-                        f"{name} — summary/prose metadata does not deliver the "
-                        "file; use data.edits (search/replace) or the full file "
-                        "content"
-                    )
+        problems.extend(delivery_problems(self.state.project_path, task, output))
 
         # B3: requirement traceability — every declared REQ id must exist.
         declared = task.get("requirement_ids")
         if isinstance(declared, list) and declared:
+            docs_dir = self.state.project_path / "docs"
             req_doc = docs_dir / "REQUIREMENTS.md"
             body = ""
             if req_doc.exists():
