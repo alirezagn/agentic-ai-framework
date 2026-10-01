@@ -427,7 +427,12 @@ also auto-loads `./.env`, e.g. the repo's Ollama preset in `.env.example`):
 | `OLLAMA_BASE_URL` | Project default: `http://192.168.0.200:11434` (append `/v1` for OpenAI-compat) |
 | `ORCHESTRATOR_CONTEXT_WINDOW_TOKENS` | Context window for utilization math |
 | `ORCHESTRATOR_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default `INFO`; `-v` / `-q` override) |
-| `CHECKPOINT_SIGNING_KEY` | Optional HMAC-SHA256 key; signed checkpoints fail `verify_checkpoint()` if files *and* metadata are rewritten |
+| `CHECKPOINT_SIGNING_KEY` | HMAC-SHA256 key. Setting it **enables signing**: new snapshots record `signed: true` plus a signature bound to contents, id, key id and timestamp. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`. Without it, snapshots are written `signed: false` and verify on checksums only |
+| `ORCHESTRATOR_CHECKPOINT_KEY_ID` | Identifies the signing key (default `default`). Bound into the signature, so a rotated secret reports `UNVERIFIABLE` rather than `TAMPERED` |
+| `CHECKPOINT_ALLOW_UNSIGNED` | `1` lets a snapshot whose signature cannot currently be checked fall back to checksums with a warning. Never allows a tampered snapshot to pass |
+
+See [Snapshot integrity](#snapshot-integrity) for the four verdicts
+(`VERIFIED` / `UNSIGNED` / `TAMPERED` / `UNVERIFIABLE`) and how they are decided.
 
 ```python
 from orchestrator.llm_client import LLMClient, is_available
@@ -457,6 +462,54 @@ checkpoints/
   loop/oscillation history
 
 No chat history required — the files are the memory.
+
+### Snapshot integrity
+
+Verification runs three ordered stages, and each can end it:
+
+1. **Containment** — every filename in `metadata.json` must be a safe relative
+   path *and* a member of `config.STATE_FILES`. A manifest naming
+   `../escape.txt` or `/etc/passwd` is refused before any file is opened, so a
+   valid signature can never authorise a write outside the project.
+2. **Contents** — per-file SHA-256 recomputed from disk, then the aggregate
+   checksum.
+3. **Signature policy** — evaluated from the persisted `signed` flag, *never*
+   from the presence of the `signature` field (which is itself writable by
+   whoever can write the snapshot).
+
+`metadata.json` records the claim explicitly, so "unsigned" cannot be reached by
+deleting a field:
+
+| Field | Meaning |
+|---|---|
+| `signed` | `true`/`false` — whether this snapshot claims a signature |
+| `key_id` | which signing key it was signed with (`ORCHESTRATOR_CHECKPOINT_KEY_ID`) |
+| `signature` | HMAC-SHA256 over `checkpoint_id`, `key_id`, `created_at` and every `name=digest` pair |
+| `signature_algorithm`, `signature_version` | scheme identifiers, so an unknown scheme is reported rather than guessed at |
+
+`evaluate_integrity()` returns one of four verdicts:
+
+| Verdict | Condition | `verify_checkpoint()` |
+|---|---|---|
+| `VERIFIED` | claims signed, key available, MAC matches the recomputed payload | passes |
+| `UNSIGNED` | `signed=false` and no key configured | passes on checksums |
+| `TAMPERED` | signature claim exists but does not hold — wrong MAC, missing/empty signature under `signed: true`, rewritten contents | **always fails** |
+| `UNVERIFIABLE` | signature claim exists but cannot be checked — no key configured, or the recorded `key_id` is not the active one | fails unless `CHECKPOINT_ALLOW_UNSIGNED=1` |
+
+Two consequences worth stating plainly. First, `UNSIGNED` passing is deliberate:
+with no key configured there is no signature claim to violate, and refusing would
+break restore for any deployment that has not set a key while protecting against
+nobody. The row that carries signal is `UNVERIFIABLE` — a claim that cannot be
+checked. Second, the MAC binds the per-file digests, so rewriting both the files
+and the self-declared checksums no longer satisfies it.
+
+`CHECKPOINT_ALLOW_UNSIGNED=1` downgrades `UNVERIFIABLE` to a warning for
+snapshot stores you cannot re-sign. It never permits a `TAMPERED` snapshot.
+
+```python
+report = orch.checkpoints.evaluate_integrity("cp-001")
+print(report.verdict.value, report.detail, report.key_id)
+```
 
 ---
 

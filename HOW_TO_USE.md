@@ -278,8 +278,31 @@ design risks manually in the same format.
   (`cp-phase-<name>`), on recorded failure risks (`cp-risk-NNN`), and at
   context compaction (`cp-auto-NNN`); `orchestrator init` writes the
   `cp-000-init` baseline.
-- Restore verifies SHA-256 checksums first; with `CHECKPOINT_SIGNING_KEY` set
-  it also verifies the HMAC signature.
+- Restore validates in three ordered stages: filenames in the snapshot manifest
+  must be allowlisted project state files (so `../escape.txt` and absolute paths
+  are refused before anything is opened), then SHA-256 checksums, then the
+  signature policy.
+- Setting `CHECKPOINT_SIGNING_KEY` **enables** signing — it is not merely a
+  switch on an extra check. Every new snapshot then records `signed: true`
+  explicitly, alongside `key_id` and a signature covering the file contents,
+  the checkpoint id and the creation timestamp. Generate one with
+  `python3 -c "import secrets; print(secrets.token_hex(32))"`.
+- Each snapshot is therefore reported with one of four verdicts:
+
+  | Verdict | When | Restore |
+  |---|---|---|
+  | `VERIFIED` | signed, key present, signature matches | proceeds |
+  | `UNSIGNED` | never signed, no key configured | proceeds on checksums |
+  | `TAMPERED` | signature claim exists but does not hold (including a missing signature on a `signed: true` snapshot) | **refused** |
+  | `UNVERIFIABLE` | signature claim exists but cannot be checked — key missing, or a different `key_id` | refused unless `CHECKPOINT_ALLOW_UNSIGNED=1` |
+
+  Because the signature binds the per-file digests, rewriting a snapshot's files
+  *and* its checksums no longer verifies.
+- To migrate an existing unsigned snapshot store, set the key once and create new
+  checkpoints; old ones continue to verify as `UNSIGNED`. If you must restore
+  signed snapshots on a machine without the key, set
+  `CHECKPOINT_ALLOW_UNSIGNED=1` — it downgrades only `UNVERIFIABLE`, never a
+  tampered snapshot.
 - Resume needs **no chat history** — the files are the memory; loop history is
   cleared on restore.
 
@@ -406,5 +429,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 401 passed
+python3 -m pytest -q      # 510 passed
 ```

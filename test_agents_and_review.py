@@ -176,6 +176,43 @@ class TestSpecialistRegistry:
         hardware = create_agent("hardware_agent", project_path=test_project)
         assert "never have physical access" in hardware.system_rules()
 
+    def test_every_specialist_carries_the_global_directives(
+        self, test_project: Path
+    ) -> None:
+        """GAP-CRIT-08: base rules must survive subclass shadowing.
+
+        Every registered agent overrides ``SYSTEM_RULES``, so anything placed
+        only in that block never reached a model — which is how rule 6
+        (``data.acceptance_results``) came to be specified but never delivered.
+        ``GLOBAL_SYSTEM_RULES`` is read by ``system_rules()`` alone, so it
+        cannot be shadowed.
+        """
+        for name in SPECIALIST_NAMES:
+            agent = create_agent(name, project_path=test_project)
+            rules = agent.system_rules()
+            assert BaseAgent.GLOBAL_SYSTEM_RULES in rules, (
+                f"{name} misses the global directives"
+            )
+            assert "NEVER fabricate" in rules, f"{name} misses the anti-fabrication directive"
+            assert "data.acceptance_results" in rules, (
+                f"{name} misses the acceptance-evidence mandate"
+            )
+
+    def test_global_directives_precede_subclass_rules(
+        self, test_project: Path
+    ) -> None:
+        """Ordering matters: base directives first, subclass cannot dilute."""
+        for name in SPECIALIST_NAMES:
+            rules = create_agent(name, project_path=test_project).system_rules()
+            global_at = rules.find("CRITICAL SYSTEM DIRECTIVES")
+            own = getattr(type(create_agent(name, project_path=test_project)), "SYSTEM_RULES", "")
+            own_head = own.strip().splitlines()[0][:30] if own.strip() else ""
+            if own_head:
+                assert global_at != -1, f"{name} has no global block"
+                assert global_at < rules.find(own_head), (
+                    f"{name} places its own rules before the global directives"
+                )
+
     def test_orchestrator_resolves_formerly_missing_owners(
         self, test_project: Path, checkpoints_root: Path
     ) -> None:

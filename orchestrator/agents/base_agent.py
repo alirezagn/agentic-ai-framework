@@ -29,6 +29,10 @@ from .. import config
 from ..context_monitor import payload_chars
 from ..state_manager import StateManager, load_text_file, utc_now_iso
 
+import os
+import hmac
+import hashlib
+
 
 # JSON only allows \" \\ \/ \b \f \n \r \t \uXXXX — anything else (e.g. a
 # literal backslash in a path, or a \u with non-hex digits) must be
@@ -43,6 +47,39 @@ _EXPECTED_TOTAL_CAP = 40_000
 # Current bodies injected into edit-session feedback after apply errors.
 _EDITS_FEEDBACK_CAP = 12_000
 
+
+def restore_checkpoint(base_dir: str, metadata_filename: str):
+    # Old vulnerable line: target = os.path.join(base_dir, metadata_filename)
+    
+    # Updated secure line:
+    target = validate_safe_path(base_dir, metadata_filename)
+    
+    with open(target, 'r') as f:
+        # Load checkpoint data safely...
+        pass
+
+def validate_safe_path(base_dir: str, target_filename: str) -> Path:
+    """Prevents Zip Slip / Path Traversal by enforcing directory boundaries."""
+    base_path = Path(base_dir).resolve()
+    target_path = (base_path / target_filename).resolve()
+    
+    if not target_path.is_relative_to(base_path):
+        raise ValueError(f"Path traversal detected for filename: {target_filename}")
+        
+    return target_path
+
+def verify_hmac_signature(payload: bytes, signature: str | None, secret_key: str | None) -> bool:
+    """Fails safely if key or signature is missing."""
+    if not secret_key or not signature:
+        return False
+        
+    expected_sig = hmac.new(
+        secret_key.encode('utf-8'), 
+        payload, 
+        hashlib.sha256
+    ).hexdigest()
+    
+    return hmac.compare_digest(expected_sig, signature)
 
 def shares_meaningful_line(left: Path, right: Path) -> bool:
     """True when both files plausibly contain the same content.
@@ -301,21 +338,42 @@ class AgentOutput:
             produced_at=str(payload.get("produced_at") or utc_now_iso()),
         )
 
-
 class BaseAgent:
-    """Parent class: builds payloads, executes, parses and validates output."""
-
     AGENT_ID = "base_agent"
+
+    # Non-negotiable directives applied to EVERY agent, ahead of and separately
+    # from any subclass rules. Kept as its own block (rather than folded into
+    # SYSTEM_RULES) because SYSTEM_RULES is overridden by every subclass, so
+    # anything placed there is shadowed for all 10 registered agents — which
+    # is exactly how rule 6 (data.acceptance_results) and rule 4 came to be
+    # specified but never delivered. Only system_rules() reads this attribute,
+    # so it is structurally unreachable by a subclass that replaces SYSTEM_RULES.
+    GLOBAL_SYSTEM_RULES = (
+        "CRITICAL SYSTEM DIRECTIVES (override nothing, apply to every task):\n"
+        "1. NEVER fabricate execution results, test outcomes, or measured numbers. "
+        "A status you cannot evidence must be reported as NOT RUN or UNKNOWN, never "
+        "as PASS.\n"
+        "2. A task is DONE only when its deliverable exists AND you can point to the "
+        "evidence for it. Claiming DONE without verifiable ground truth is a "
+        "contract violation, not a shortcut.\n"
+        "3. Missing inputs, absent files, or unavailable hardware are FINDINGS to "
+        "report as UNKNOWN/TBD — never a reason to refuse. The only valid block is "
+        "a pending human decision in DECISIONS.md.\n"
+        "4. Always report acceptance evidence: for every acceptance criterion you "
+        "checked, emit data.acceptance_results = [{name, status: PASS|FAIL, detail}]. "
+        "A non-passing entry blocks completion, so an honest FAIL is always better "
+        "than an omitted field."
+    )
     # Human-readable operating rules injected into every payload.
     SYSTEM_RULES = (
         "1. Project files are the source of truth; chat history is temporary.\n"
         "2. Do not silently change approved architecture or decisions.\n"
         "3. Stop repeating the same failing strategy after the configured retry limit.\n"
         "4. Report measurable results only; vague claims are rejected.\n"
-        "5. Never mark your own significant work DONE without independent review.\n"
-        "6. Report acceptance evidence: for every acceptance criterion you verified "
-        "return data.acceptance_results = [{name, status: PASS|FAIL, detail}]; "
-        "failed checks block completion."
+        "5. Never mark your own significant work DONE without independent review."
+        # The acceptance-evidence requirement (previously rule 6 here) now lives
+        # in GLOBAL_SYSTEM_RULES, because this block is overridden by every
+        # subclass and was therefore never reaching any model.
     )
     # Appended to every agent's rules. Prevents the fabricated-refusal class:
     # agents claiming "missing input file", "no physical hardware" or "no
@@ -380,10 +438,26 @@ class BaseAgent:
     # ------------------------------------------------------------------
 
     def system_rules(self) -> str:
-        rules = [self.SYSTEM_RULES, self.OFFLINE_EXECUTION_RULE, self.AUTHORING_CONTRACT]
-        for rule in self.extra_rules:
-            rules.append(rule)
-        return "\n".join(rules)
+        """Compose the full rule set sent to the model.
+
+        Order is significant: the global directives come first so a subclass
+        rule cannot dilute them, then the agent's own rules, then the two
+        shared contracts, then per-instance extras.
+
+        ``GLOBAL_SYSTEM_RULES`` and ``OFFLINE_EXECUTION_RULE`` / ``AUTHORING_CONTRACT``
+        are read from ``self`` but assigned only on this class. A subclass that
+        overrides ``SYSTEM_RULES`` — which all ten registered agents do — extends
+        rather than shadows them. Empty entries are dropped so a subclass with no
+        rules of its own still receives the base directives.
+        """
+        rules = [
+            self.GLOBAL_SYSTEM_RULES,
+            self.SYSTEM_RULES,
+            self.OFFLINE_EXECUTION_RULE,
+            self.AUTHORING_CONTRACT,
+        ]
+        rules.extend(self.extra_rules)
+        return "\n\n".join(rule.strip() for rule in rules if rule and rule.strip())
 
     def relevant_context(self, task: Dict[str, Any]) -> Dict[str, str]:
         """Load only the files the task explicitly asks for."""

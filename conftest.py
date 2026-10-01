@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -214,6 +215,119 @@ def checkpoints_root(tmp_path: Path) -> Path:
     return tmp_path / "checkpoints"
 
 
+class FakeDeployRunner:
+    """Offline stand-in for :class:`orchestrator.deploy_runner.DeployRunner`.
+
+    The real runner spawns processes. The test suite must stay hermetic and
+    100% offline, so every test that exercises the evidence path injects this
+    instead and gets deterministic records.
+
+    It records what was requested, so a test can assert *which* commands an
+    agent asked to run without anything executing.
+
+    Behaviour knobs for tests:
+
+    ``executed``
+        What ``run_one`` reports. ``False`` reproduces a disabled channel.
+    ``exit_code``
+        Exit code reported for executed invocations — set non-zero to model a
+        genuinely failing build.
+    ``refuse``
+        When true, every invocation is refused as if the allowlist rejected it.
+    ``captured_output``
+        stdout text placed in the returned record.
+    """
+
+    def __init__(
+        self,
+        executed: bool = True,
+        exit_code: Optional[int] = 0,
+        refuse: bool = False,
+        captured_output: str = "fake output",
+    ) -> None:
+        self.executed = executed
+        self.exit_code = exit_code
+        self.refuse = refuse
+        self.captured_output = captured_output
+        self.requests: List[Dict[str, Any]] = []
+        self.evidence_written: List[str] = []
+
+    @property
+    def enabled(self) -> bool:
+        return not self.refuse
+
+    @property
+    def allowlist(self) -> List[str]:
+        return ["ctest", "pytest", "cmake"]
+
+    def run_one(self, invocation: Dict[str, Any]) -> Any:
+        from orchestrator.deploy_runner import (
+            STATUS_EXECUTED,
+            STATUS_REFUSED,
+            DeployRecord,
+        )
+
+        self.requests.append(dict(invocation))
+        command = str(invocation.get("command") or "")
+        args = [str(item) for item in (invocation.get("args") or [])]
+        if self.refuse:
+            return DeployRecord(
+                command=command,
+                args=args,
+                executed=False,
+                status=STATUS_REFUSED,
+                reason="fake runner refuses everything",
+            )
+        return DeployRecord(
+            command=command,
+            args=args,
+            cwd="<fake>",
+            exit_code=self.exit_code,
+            stdout_tail=self.captured_output,
+            duration_ms=1,
+            executed=self.executed,
+            status=STATUS_EXECUTED if self.executed else STATUS_REFUSED,
+            reason="" if self.executed else "fake runner configured as not executed",
+            declared_expect=str(invocation.get("expect") or "").strip().upper() or "",
+            expect_matched=None,
+        )
+
+    def run_payload(self, payload: Any) -> List[Any]:
+        records: List[Any] = []
+        items = payload if isinstance(payload, list) else [payload]
+        for item in items:
+            if isinstance(item, dict):
+                records.append(self.run_one(item))
+        return records
+
+    def write_evidence(self, task_id: str, record: Any, index: int = 0) -> Optional[str]:
+        path = f"docs/evidence/{task_id}/{index:02d}-{record.command}.json"
+        self.evidence_written.append(path)
+        return path
+
+    @staticmethod
+    def has_ground_truth(records: Any) -> bool:
+        return any(getattr(record, "executed", False) for record in records or [])
+
+
+@pytest.fixture()
+def fake_deploy_runner() -> FakeDeployRunner:
+    """Reachable runner: every requested command really executed and passed."""
+    return FakeDeployRunner(executed=True, exit_code=0)
+
+
+@pytest.fixture()
+def disabled_deploy_runner() -> FakeDeployRunner:
+    """Disabled channel: nothing executes, so claims must become NOT RUN."""
+    return FakeDeployRunner(executed=False, refuse=True)
+
+
+@pytest.fixture()
+def failing_deploy_runner() -> FakeDeployRunner:
+    """Channel on, build genuinely fails with a non-zero exit."""
+    return FakeDeployRunner(executed=True, exit_code=2, captured_output="2 tests failed")
+
+
 @pytest.fixture(autouse=True)
 def _redirect_default_checkpoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Keep default-root checkpoints inside the test's tmp dir (gap E1).
@@ -225,3 +339,45 @@ def _redirect_default_checkpoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     root = tmp_path / "default-checkpoints"
     monkeypatch.setenv("ORCHESTRATOR_CHECKPOINTS_DIR", str(root))
     return root
+
+#: Loopback literals permitted during tests. The LLM client targets
+#: ``127.0.0.1`` in a handful of tests that exercise the transport, so those
+#: must keep working; everything else is refused.
+ALLOWED_TEST_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"})
+
+
+@pytest.fixture(autouse=True)
+def block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail loudly if a test attempts a real outbound connection.
+
+    The suite must stay offline-safe: an inherited ``ANTHROPIC_API_KEY`` in the
+    developer's shell would otherwise turn it into an unbilled, unbounded API
+    consumer. A test that *wants* an LLM injects ``FakeLLMClient`` or a
+    ``transport`` callable instead.
+
+    Address-family handling matters here. ``socket.connect`` is called as
+    ``connect(address)`` for ``AF_INET``/``AF_INET6`` (a tuple) but as
+    ``connect(path)`` for ``AF_UNIX`` (a string). Unpacking ``args[0][0]``
+    unconditionally raises ``TypeError`` on a Unix-domain socket, which is both
+    the wrong exception and a confusing one. So the family is checked first and
+    Unix sockets are allowed through: they are filesystem-local by definition
+    and cannot reach the network.
+    """
+    original_connect = socket.socket.connect
+
+    def guarded_connect(self: socket.socket, address: Any, /) -> Any:
+        if self.family in (socket.AF_UNIX, getattr(socket, "AF_UNSPEC", None)):
+            return original_connect(self, address)
+        if not isinstance(address, (tuple, list)) or not address:
+            raise RuntimeError(
+                f"Unauthorized network egress: unrecognised address form {address!r} "
+                f"for family {self.family!r} during test execution"
+            )
+        host = address[0]
+        if host not in ALLOWED_TEST_HOSTS:
+            raise RuntimeError(
+                f"Unauthorized network egress attempt detected during test execution to: {host}"
+            )
+        return original_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
