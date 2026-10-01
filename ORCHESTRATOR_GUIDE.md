@@ -43,7 +43,7 @@ control back to a human.
 | `orchestrator/prompt_builder.py` | Renders system prompts from `framework/*.md` specs |
 | `orchestrator/agents/` | `BaseAgent`, `LLMAgent`, 9 specialists + `ReviewAgent` |
 | `orchestrator/context_monitor.py` | Measured context-utilization accounting |
-| `orchestrator/cli.py` | Subcommands: `init`, `status`, `tasks`, `run`, `plan`, `health`, `agents`, `checkpoint`, `phase`, `waive`, `retry` |
+| `orchestrator/cli.py` | Subcommands: `init`, `status`, `tasks`, `run`, `plan`, `health`, `agents`, `checkpoint`, `phase`, `waive`, `retry`, `reopen` |
 
 > **Note:** `project_manager.py`, `task_executor.py` and `checkpoint.py` were
 > the v1.1 API and have been removed. Use `MasterOrchestrator` /
@@ -98,6 +98,7 @@ orchestrator [--project PATH] [--version] <command>
 | `phase show\|set [PHASE]` | Show the current/derived lifecycle phase, or set it explicitly (validated against the phase vocabulary; forward moves checkpoint as `cp-phase-<name>`) |
 | `waive TASK --dep ID [--reason TEXT]` | Human unblock: drop one dependency edge (deadlock relief) and record it in `CHANGELOG.md` |
 | `retry TASK [--reason TEXT]` | Human recovery: clear a failed/stalled/loop-limited task's counters (`same_strategy`, `no_progress`, evidence stalls), put it back to READY when its dependencies are met, and record it in `CHANGELOG.md`. The reason (or, absent one, the previous failure) is stored as `execution.retry_reason` and surfaced to the next attempt as `recovery_feedback_from_previous_attempt` in the prompt — without it the model is blind to why earlier attempts failed |
+| `reopen TASK --reason TEXT` | Conscious overturn of a **terminal** task (`DONE`, `DONE WITH ACCEPTED LIMITATION`, `CANCELLED`) back to READY — the alternative to hand-editing TASKS.yaml. `--reason` is required and feeds the next prompt; refused for non-terminal statuses (use `retry`) |
 | `agents` | List registered specialist agents |
 | `checkpoint save\|list\|restore` | Checkpoint management (`--checkpoint ID`, `--notes TEXT`) |
 

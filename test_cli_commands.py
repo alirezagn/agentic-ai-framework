@@ -355,6 +355,65 @@ class TestCLI:
         assert f"orchestrator init demo-ws --dest {tmp_path} --force" in captured.out
 
 
+class TestReopenCommand:
+    """`reopen` overturns terminal tasks deliberately — no sed on TASKS.yaml."""
+
+    @pytest.fixture(autouse=True)
+    def _run_from_tmp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+
+    def test_reopen_done_task_with_reason(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = StateManager(test_project)
+        state.update_task_status("TASK-002", config.TASK_DONE)
+        code = cli.main(
+            [
+                "--project",
+                str(test_project),
+                "reopen",
+                "TASK-002",
+                "--reason",
+                "screensaver fix was incomplete",
+            ]
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "reopen TASK-002" in out
+        assert "READY" in out
+        task = state.get_task("TASK-002")
+        assert task["status"] == config.TASK_READY
+        assert "screensaver fix was incomplete" in task["execution"]["retry_reason"]
+        changelog = (test_project / config.CHANGELOG_FILE).read_text(encoding="utf-8")
+        assert "reopen TASK-002" in changelog
+
+    def test_reopen_requires_reason(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = StateManager(test_project)
+        state.update_task_status("TASK-002", config.TASK_DONE)
+        code = cli.main(["--project", str(test_project), "reopen", "TASK-002"])
+        assert code == 2
+        assert "requires --reason" in capsys.readouterr().out
+        assert state.get_task("TASK-002")["status"] == config.TASK_DONE
+
+    def test_reopen_rejects_active_task(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = cli.main(
+            ["--project", str(test_project), "reopen", "TASK-002", "--reason", "x"]
+        )
+        assert code == 2
+        assert "terminal tasks only" in capsys.readouterr().out
+
+    def test_retry_on_terminal_points_to_reopen(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = cli.main(["--project", str(test_project), "retry", "TASK-001"])
+        assert code == 2
+        assert "reopen TASK-001" in capsys.readouterr().out
+
+
 class TestRetryCommand:
     """Human recovery: `retry` clears loop counters so a refused task runs again."""
 

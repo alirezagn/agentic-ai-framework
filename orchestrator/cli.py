@@ -256,6 +256,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retry_parser.set_defaults(handler=cmd_retry)
 
+    reopen_parser = subparsers.add_parser(
+        "reopen",
+        parents=[shared],
+        help="Consciously overturn a finished (DONE/CANCELLED) task back to READY",
+    )
+    reopen_parser.add_argument("task", help="Task to reopen (e.g. TASK-003)")
+    reopen_parser.add_argument(
+        "--reason",
+        dest="reason",
+        default="",
+        help="Why the finished task is being overturned (required; feeds the next prompt)",
+    )
+    reopen_parser.set_defaults(handler=cmd_reopen)
+
     agents_parser = subparsers.add_parser(
         "agents", parents=[shared], help="List registered specialist agents"
     )
@@ -776,6 +790,22 @@ def cmd_waive(args: argparse.Namespace) -> int:
     return 0
 
 
+def _recovery_feedback(task: dict, reason: str) -> str:
+    """Feedback that must reach the next dispatch prompt after a recovery.
+
+    The human reason (or, absent one, the failure that caused the recovery)
+    is stored as ``execution.retry_reason`` — without it the model is blind
+    to why previous attempts failed and repeats them.
+    """
+    prev_error = str(((task.get("execution") or {}).get("last_error")) or "")
+    feedback = str(reason or "").strip()
+    if feedback and prev_error and prev_error not in feedback:
+        feedback = f"{feedback}\nprevious failure: {prev_error}"
+    elif not feedback:
+        feedback = prev_error
+    return feedback
+
+
 def cmd_retry(args: argparse.Namespace) -> int:
     """Human recovery: clear a task's loop counters so dispatch accepts it again."""
     project = _resolve_project(args)
@@ -789,18 +819,12 @@ def cmd_retry(args: argparse.Namespace) -> int:
         return 2
     status = str(task.get("status") or "")
     if status in config.TERMINAL_TASK_STATUSES:
-        print(f"ERROR: {task_id} is {status}; retry applies to active tasks only")
+        print(
+            f"ERROR: {task_id} is {status}; retry applies to active tasks only — "
+            f'for a finished task use: orchestrator reopen {task_id} --reason "..."'
+        )
         return 2
-    # Feedback loop: the reason (or, absent one, the failure that caused this
-    # retry) must reach the next dispatch prompt — without it the model is
-    # blind to why previous attempts failed and repeats them. Stored on the
-    # task so build_prompt renders it with the task JSON.
-    prev_error = str(((task.get("execution") or {}).get("last_error")) or "")
-    feedback = str(reason or "").strip()
-    if feedback and prev_error and prev_error not in feedback:
-        feedback = f"{feedback}\nprevious failure: {prev_error}"
-    elif not feedback:
-        feedback = prev_error
+    feedback = _recovery_feedback(task, reason)
     state.update_task_execution(
         task_id,
         set_values={
@@ -823,6 +847,62 @@ def cmd_retry(args: argparse.Namespace) -> int:
     if reason:
         entry += f": {reason}"
     state.append_changelog(entry)
+    if final == config.TASK_READY:
+        print(f"{entry} — status READY; `orchestrator run` will dispatch it")
+    else:
+        print(f"{entry} — status {final} (promotes to READY when dependencies finish)")
+    return 0
+
+
+def cmd_reopen(args: argparse.Namespace) -> int:
+    """Consciously overturn a terminal task (DONE/CANCELLED) back to READY.
+
+    Deliberately separate from ``retry``: re-running finished work must be an
+    explicit, reasoned act (no sed on TASKS.yaml), and the reason feeds the
+    next attempt's prompt like ``retry --reason`` does.
+    """
+    project = _resolve_project(args)
+    state = StateManager(project)
+    task_id = str(getattr(args, "task", "") or "").strip()
+    reason = str(getattr(args, "reason", "") or "").strip()
+    try:
+        task = state.get_task(task_id)
+    except TaskNotFoundError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+    status = str(task.get("status") or "")
+    if status not in config.TERMINAL_TASK_STATUSES:
+        print(
+            f"ERROR: {task_id} is {status}; reopen applies to terminal tasks only "
+            f"({', '.join(config.TERMINAL_TASK_STATUSES)}) — use retry for "
+            "failed/active tasks"
+        )
+        return 2
+    if not reason:
+        print(
+            f"ERROR: reopen {task_id} requires --reason "
+            "(record why the finished task is being overturned)"
+        )
+        return 2
+    state.update_task_execution(
+        task_id,
+        set_values={
+            "attempts_since_change": 0,
+            "strategy_changes": 0,
+            "no_progress_cycles": 0,
+            "evidence_stall_count": 0,
+            "repeated_output_count": 0,
+            "last_output_hash": None,
+            "last_error": None,
+            "retry_reason": _recovery_feedback(task, reason) or None,
+            "recovering": False,
+        },
+    )
+    state.update_task_status(task_id, config.TASK_READY)
+    state.refresh_ready_states()
+    entry = f"reopen {task_id} from {status}: {reason}"
+    state.append_changelog(entry)
+    final = str(state.get_task(task_id).get("status") or "")
     if final == config.TASK_READY:
         print(f"{entry} — status READY; `orchestrator run` will dispatch it")
     else:
