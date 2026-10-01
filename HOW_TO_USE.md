@@ -393,11 +393,13 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | memory/context grows forever | compaction folds MEMORY.md and resets utilization at the 70% threshold |
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
 | `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings |
+| `DoD unmet: delivered docs/X shares no line with existing Y` | the model returned prose metadata instead of editing — `retry TASK-003 --reason "use data.edits on Y: search/replace the real file, never reply with a summary"` |
+| `docs/*.log` or docs "Verification Results" claim tests ran | agents cannot execute anything — claims are unverified until YOU run `ctest`; treat as claims |
 | `LLM backend unavailable` | set provider env vars (§8) |
 | state corrupted | `checkpoint restore cp-...` |
 
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 314 passed
+python3 -m pytest -q      # 372 passed
 ```

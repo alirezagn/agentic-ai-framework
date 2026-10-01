@@ -244,8 +244,11 @@ dispatch batch, `_run_pending_reviews()` routes them to `dispatch_review()`:
 ### Definition of Done
 
 `definition_of_done(task, output)` requires: DoD criteria present, all
-`expected_outputs` materialized on disk, and review passed (when required).
-Unmet → task `FAILED` with `DoD unmet: …`.
+`expected_outputs` materialized on disk, **content plausibility** — when an
+expected output already exists in the project, its `docs/` mirror must share
+at least one meaningful line with the real file (summary/prose JSON wrappers
+rejected: deliver via `data.edits` or full file content) — and review passed
+when required. Unmet → task `FAILED` with `DoD unmet: …`.
 
 ### Dependency gating
 

@@ -45,6 +45,26 @@ from .supervisor import HealthReport, LoopDetection, SupervisorAgent
 logger = logging.getLogger(__name__)
 
 
+def _shares_meaningful_line(left: Path, right: Path) -> bool:
+    """True when both files share at least one non-trivial line.
+
+    Lines shorter than 12 characters are ignored so brace-only/JSON-fragment
+    lines cannot create a false overlap between unrelated files. Unreadable
+    files return True (the existence check already covers them).
+    """
+
+    def meaningful(path: Path) -> set:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return set()
+        return {
+            line.strip() for line in text.splitlines() if len(line.strip()) >= 12
+        }
+
+    return bool(meaningful(left) & meaningful(right))
+
+
 class OrchestratorError(RuntimeError):
     """Base error for orchestration failures."""
 
@@ -1154,9 +1174,39 @@ class MasterOrchestrator:
             for raw_name in expected:
                 if not isinstance(raw_name, str) or not raw_name.strip():
                     continue
-                filename = Path(raw_name.strip()).name
-                if not (docs_dir / filename).exists():
+                name = raw_name.strip()
+                filename = Path(name).name
+                mirror = docs_dir / filename
+                if not mirror.exists():
                     problems.append(f"expected output not materialized: {filename}")
+                    continue
+                # Content plausibility: when the expected output already exists
+                # in the project, the delivered docs/ mirror must share real
+                # content with it — a summary/prose JSON wrapper (metadata the
+                # model returns instead of editing) shares no line and must not
+                # pass DoD. data.edits deliveries mirror the post-edit file,
+                # and full-body rewrites keep most lines, so both still pass.
+                project_file = self.state.project_path / name
+                if (
+                    name.split("/")[0] == "docs"
+                    or mirror.resolve() == project_file.resolve()
+                ):
+                    continue
+                try:
+                    inside = project_file.resolve().is_relative_to(
+                        self.state.project_path.resolve()
+                    )
+                except OSError:
+                    inside = False
+                if not inside or not project_file.is_file():
+                    continue
+                if not _shares_meaningful_line(project_file, mirror):
+                    problems.append(
+                        f"delivered docs/{filename} shares no line with existing "
+                        f"{name} — summary/prose metadata does not deliver the "
+                        "file; use data.edits (search/replace) or the full file "
+                        "content"
+                    )
 
         # B3: requirement traceability — every declared REQ id must exist.
         declared = task.get("requirement_ids")

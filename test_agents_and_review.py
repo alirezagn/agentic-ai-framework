@@ -588,6 +588,64 @@ class TestDefinitionOfDone:
         problems = orchestrator.definition_of_done(task)
         assert any("independent review not passed" in item for item in problems)
 
+    def test_dod_rejects_prose_metadata_for_existing_file(
+        self, test_project: Path, checkpoints_root: Path
+    ) -> None:
+        orchestrator = MasterOrchestrator(
+            test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
+        )
+        source = test_project / "main" / "input_service.c"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            '#include "freertos/FreeRTOS.h"\n'
+            "static void input_dispatch_task(void *arg) {\n"
+            "    while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        docs = test_project / "docs"
+        docs.mkdir(exist_ok=True)
+        (docs / "input_service.c").write_text(
+            "# input_service.c\n\n- Task: TASK-003\n\n## Data\n\n"
+            '```json\n{"summary": "implemented decoupled refresh"}\n```\n',
+            encoding="utf-8",
+        )
+        task = {
+            "acceptance_criteria": ["fix applied"],
+            "expected_outputs": ["main/input_service.c"],
+        }
+        problems = orchestrator.definition_of_done(task)
+        assert any("shares no line" in item for item in problems)
+        assert any("data.edits" in item for item in problems)
+
+        # an edits-style delivery (mirror = post-edit file content) passes:
+        (docs / "input_service.c").write_text(
+            '#include "freertos/FreeRTOS.h"\n'
+            "static void input_dispatch_task(void *arg) {\n"
+            "    /* clock moved to display_refresh_task */\n"
+            "    while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        assert orchestrator.definition_of_done(task) == []
+
+    def test_dod_content_check_skips_new_files(
+        self, test_project: Path, checkpoints_root: Path
+    ) -> None:
+        orchestrator = MasterOrchestrator(
+            test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
+        )
+        docs = test_project / "docs"
+        docs.mkdir(exist_ok=True)
+        (docs / "new_module.c").write_text(
+            "#include <stdio.h>\nint main(void) { return 0; }\n", encoding="utf-8"
+        )
+        task = {
+            "acceptance_criteria": ["authored"],
+            "expected_outputs": ["src/new_module.c"],
+        }
+        assert orchestrator.definition_of_done(task) == []
+
     def test_review_pass_cannot_bypass_dod(
         self, test_project: Path, checkpoints_root: Path
     ) -> None:
