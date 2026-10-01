@@ -236,6 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     waive_parser.add_argument(
         "--reason",
+        nargs="?",
         dest="reason",
         default="",
         help="Reason recorded in CHANGELOG.md",
@@ -250,6 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     retry_parser.add_argument("task", help="Task to retry (e.g. TASK-003)")
     retry_parser.add_argument(
         "--reason",
+        nargs="?",
         dest="reason",
         default="",
         help="Reason recorded in CHANGELOG.md",
@@ -264,6 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     reopen_parser.add_argument("task", help="Task to reopen (e.g. TASK-003)")
     reopen_parser.add_argument(
         "--reason",
+        nargs="?",
         dest="reason",
         default="",
         help="Why the finished task is being overturned (required; feeds the next prompt)",

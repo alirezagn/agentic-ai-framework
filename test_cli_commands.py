@@ -397,6 +397,20 @@ class TestReopenCommand:
         assert "requires --reason" in capsys.readouterr().out
         assert state.get_task("TASK-002")["status"] == config.TASK_DONE
 
+    def test_reopen_empty_reason_shows_friendly_error_not_argparse(
+        self, test_project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `reopen TASK-002 --reason` (no value) must reach the handler's
+        # friendly error, not die in argparse with "expected one argument".
+        state = StateManager(test_project)
+        state.update_task_status("TASK-002", config.TASK_DONE)
+        code = cli.main(["--project", str(test_project), "reopen", "TASK-002", "--reason"])
+        assert code == 2
+        out = capsys.readouterr().out
+        assert "requires --reason" in out
+        assert "expected one argument" not in out
+        assert state.get_task("TASK-002")["status"] == config.TASK_DONE
+
     def test_reopen_rejects_active_task(
         self, test_project: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
