@@ -218,6 +218,23 @@ Verification is shared: `definition_of_done` delegates its delivery checks to
 the same `delivery_problems()` helper (`orchestrator/agents/base_agent.py`),
 so the session and the DoD can never disagree.
 
+**Delivery manifest (G22):** the agent never guesses the delivery channel.
+At payload build, `relevant_context()` adds a `delivery_manifest` entry
+classifying every `expected_outputs` path — `EXISTS` (update with
+`data.edits` only), `MISSING` (create with `data.documents`), or a `docs/`
+deliverable — and the same **task-start snapshot**
+(`preexisting_expected()`) is threaded through the edit session,
+artifact materialization and every dispatch-time DoD check. Consequences:
+`data.documents` actually **creates a missing expected file at its real
+project path** (previously it only wrote the `docs/` mirror, so no channel
+could create a new source file at all), it never touches files that
+pre-existed (those belong to `data.edits`), the rendered wrapper fallback
+is never written to a real file, and the DoD rejects content delivered only
+to `docs/` when the real file is missing (`expected output missing from the
+project`). Files the task itself created mid-session are therefore not
+mistaken for pre-existing project files — redelivery inside the session
+converges instead of looping.
+
 **Derived-state recompute** (`StateManager.recompute_derived_state`) runs after
 every status mutation and on `refresh_ready_states()`:
 

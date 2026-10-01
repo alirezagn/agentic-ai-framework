@@ -395,6 +395,8 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
 | `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings — the first rejection triggers **one automatic repair call**; if it still fails, `retry TASK-003 --reason "use data.edits on <file>"` (the reason reaches the next prompt) |
 | `DoD unmet: delivered docs/X shares no line with existing Y` | the model returned prose metadata instead of editing — the auto-repair call already fed this back once; retry with a more specific `--reason` if it repeated |
+| `expected output missing from the project: …` | the model delivered content only to `docs/` — `data.documents` writes the real path for files missing at task start; the `delivery_manifest` in the prompt now states the channel up front, so `retry TASK-00X` |
+| `… exists in the project — update it with data.edits` | the file pre-existed at task start; `data.documents` never modifies it — `retry TASK-00X` (the manifest tells the agent this before generation) |
 | `docs/*.log` or docs "Verification Results" claim tests ran | agents cannot execute anything — claims are unverified until YOU run `ctest`; treat as claims |
 | `LLM backend unavailable` | set provider env vars (§8) |
 | state corrupted | `checkpoint restore cp-...` |
@@ -402,5 +404,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 391 passed
+python3 -m pytest -q      # 397 passed
 ```

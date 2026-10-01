@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Union
 from .. import config
 from ..llm_client import LLMClient, LLMError, LLMResult
 from ..prompt_builder import build_prompt, load_agent_spec, render_system_prompt
-from .base_agent import AgentOutput, AgentOutputError, BaseAgent, delivery_problems
+from .base_agent import AgentOutput, AgentOutputError, BaseAgent, delivery_problems, preexisting_expected
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +185,9 @@ class LLMAgent(BaseAgent):
         base_prompt = build_prompt(payload, agent_spec=self.spec_text())
         system = render_system_prompt(self.system_rules(), self.spec_text())
         max_turns = int(self.EDIT_SESSION_TURNS)
+        snapshot = getattr(self, "_delivery_snapshot", None)
+        if snapshot is None:
+            snapshot = preexisting_expected(self.project_path, task)
         feedback = "(first turn — no previous feedback)"
         for turn in range(1, max_turns + 1):
             logger.info(
@@ -257,7 +260,7 @@ class LLMAgent(BaseAgent):
                 )
                 continue
 
-            delivery = delivery_problems(self.project_path, task, output)
+            delivery = delivery_problems(self.project_path, task, output, preexisting=snapshot)
             if not delivery:
                 output.warnings.append(
                     f"delivered via {turn}-turn edit session (max {max_turns})"

@@ -31,6 +31,7 @@ from .agents.base_agent import (
     create_agent,
     delivery_problems,
     normalize_agent_name,
+    preexisting_expected,
 )
 from .checkpoint_manager import CheckpointManager
 from .context_monitor import tokens_for_output, utilization_for_output
@@ -242,6 +243,8 @@ class MasterOrchestrator:
             task = self.get_task(task_id)
 
         # --- phase 2: agent execution (unlocked) ------------------------
+        # G22: task-start snapshot shared by this attempt's DoD checks.
+        delivery_snapshot = preexisting_expected(self.state.project_path, task)
         logger.info("dispatching %s -> %s (owner: %s)", task_id, agent.AGENT_ID, owner)
         output = agent.run(task)
         output.task_id = task_id
@@ -256,7 +259,9 @@ class MasterOrchestrator:
 
             if output.status == config.AGENT_STATUS_COMPLETED:
                 review_block = task.get("review") or {}
-                dod_problems = self.definition_of_done(task, output)
+                dod_problems = self.definition_of_done(
+                    task, output, preexisting=delivery_snapshot
+                )
                 if dod_problems:
                     # One automatic repair round: feed the DoD problems back to
                     # the agent instead of failing cold (symmetric to the
@@ -266,7 +271,9 @@ class MasterOrchestrator:
                         repaired.task_id = task_id
                         logger.info("DoD auto-repair succeeded for %s", task_id)
                         output = repaired
-                        dod_problems = self.definition_of_done(task, output)
+                        dod_problems = self.definition_of_done(
+                            task, output, preexisting=delivery_snapshot
+                        )
                     else:
                         logger.info(
                             "DoD auto-repair produced no fix for %s", task_id
@@ -1147,7 +1154,10 @@ class MasterOrchestrator:
         return record
 
     def definition_of_done(
-        self, task: Dict[str, Any], output: Optional[AgentOutput] = None
+        self,
+        task: Dict[str, Any],
+        output: Optional[AgentOutput] = None,
+        preexisting: Optional[Any] = None,
     ) -> List[str]:
         """Structural Definition-of-Done checks (empty list == satisfied).
 
@@ -1165,7 +1175,11 @@ class MasterOrchestrator:
         if not usable:
             problems.append("no acceptance criteria defined")
 
-        problems.extend(delivery_problems(self.state.project_path, task, output))
+        problems.extend(
+            delivery_problems(
+                self.state.project_path, task, output, preexisting=preexisting
+            )
+        )
 
         # B3: requirement traceability — every declared REQ id must exist.
         declared = task.get("requirement_ids")

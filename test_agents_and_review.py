@@ -939,7 +939,10 @@ class TestEditSession:
             "TASK-002", "delivered full body", data={"documents": {"target.txt": body}}
         )
         problems = orchestrator.definition_of_done(task, output)
-        assert any("data.edits" in item and "already exists" in item for item in problems)
+        assert any(
+            "exists in the project" in item and "data.edits" in item
+            for item in problems
+        )
 
     def test_single_shot_agents_stay_single_shot(self, test_project: Path) -> None:
         from orchestrator.agents import ResearchAgent
@@ -1284,6 +1287,150 @@ class TestRequirementsAgent:
         assert isinstance(agent, RequirementsAgent)
         with pytest.raises(AgentError):
             create_agent("no_such_agent", project_path=test_project)
+
+
+# ---------------------------------------------------------------------------
+# Phase D.5 — G22: delivery manifest, real-file creation, snapshot semantics
+# ---------------------------------------------------------------------------
+
+
+class TestDeliveryManifest:
+    """Existence facts reach the prompt BEFORE generation.
+
+    Replaces guess-the-channel: the manifest states per expected output
+    whether the file exists and which delivery channel is required, and
+    ``data.documents`` actually creates missing expected files at their
+    real path (previously it only wrote docs/ mirrors — no channel could
+    create a new source file at all).
+    """
+
+    def test_manifest_states_channel_per_expected_output(
+        self, test_project: Path
+    ) -> None:
+        (test_project / "main").mkdir(exist_ok=True)
+        (test_project / "main" / "input_service.c").write_text(
+            "int x;\n", encoding="utf-8"
+        )
+        agent = RequirementsAgent(project_path=test_project)
+        task = {
+            "id": "TASK-002",
+            "expected_outputs": [
+                "main/input_service.c",
+                "src/new_module.c",
+                "docs/REQUIREMENTS.md",
+            ],
+        }
+        context = agent.relevant_context(task)
+        manifest = context["delivery_manifest"]
+        assert "main/input_service.c: EXISTS" in manifest
+        assert "update it with data.edits" in manifest
+        assert "src/new_module.c: MISSING" in manifest
+        assert "create it with data.documents" in manifest
+        assert "docs/REQUIREMENTS.md: docs deliverable" in manifest
+
+    def test_authoring_contract_mentions_manifest(self) -> None:
+        assert "delivery_manifest" in BaseAgent.AUTHORING_CONTRACT
+
+    def test_documents_create_missing_real_file(self, test_project: Path) -> None:
+        agent = RequirementsAgent(project_path=test_project)
+        task = {"id": "TASK-002", "expected_outputs": ["src/new_module.c"]}
+        output = agent.completed(
+            "TASK-002",
+            "created module",
+            data={"documents": {"src/new_module.c": "int helper(void) { return 1; }\n"}},
+        )
+        agent._materialize_artifacts(task, output)
+        real = test_project / "src" / "new_module.c"
+        assert real.is_file()
+        assert "int helper" in real.read_text(encoding="utf-8")
+        mirror = test_project / "docs" / "new_module.c"
+        assert mirror.is_file()
+
+    def test_documents_never_touch_preexisting_real_file(
+        self, test_project: Path
+    ) -> None:
+        target = test_project / "target.txt"
+        target.write_text("original body\n", encoding="utf-8")
+        agent = RequirementsAgent(project_path=test_project)
+        task = {"id": "TASK-002", "expected_outputs": ["target.txt"]}
+        agent._delivery_snapshot = {"target.txt"}  # run() takes this before execute
+        output = agent.completed(
+            "TASK-002",
+            "attempted overwrite",
+            data={"documents": {"target.txt": "model claims new body\n"}},
+        )
+        agent._materialize_artifacts(task, output)
+        assert target.read_text(encoding="utf-8") == "original body\n"
+        mirror = test_project / "docs" / "target.txt"
+        assert mirror.read_text(encoding="utf-8") == "model claims new body\n"
+
+    def test_dispatch_dod_requires_real_file(
+        self, test_project: Path, checkpoints_root: Path
+    ) -> None:
+        # The TASK-004 pattern: docs mirror exists, real source never
+        # created — dispatch-context DoD (snapshot provided) must reject.
+        orchestrator = MasterOrchestrator(
+            test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
+        )
+        body = "int ra8875_init(void) { return 1; }\n"
+        docs = test_project / "docs"
+        docs.mkdir(exist_ok=True)
+        (docs / "display_ra8875.c").write_text(body, encoding="utf-8")
+        task = {
+            "acceptance_criteria": ["driver created"],
+            "expected_outputs": ["hal/display/display_ra8875.c"],
+        }
+        output = RequirementsAgent(project_path=test_project).completed(
+            "TASK-002",
+            "created driver",
+            data={"documents": {"hal/display/display_ra8875.c": body}},
+        )
+        problems = orchestrator.definition_of_done(
+            task, output, preexisting=set()
+        )
+        assert any("missing from the project" in item for item in problems)
+        real = test_project / "hal" / "display"
+        real.mkdir(parents=True, exist_ok=True)
+        (real / "display_ra8875.c").write_text(body, encoding="utf-8")
+        assert orchestrator.definition_of_done(task, output, preexisting=set()) == []
+
+    def test_session_can_redeliver_file_it_created(
+        self, test_project: Path
+    ) -> None:
+        # The G20 trap: turn 1 declares the file (empty content — wrapper
+        # lands in docs/ only), turn 2 redelivers real content. Without the
+        # task-start snapshot the second delivery of a file that now exists
+        # was rejected as a pre-existing project file, forever.
+        class SessionDummy(LLMAgent):
+            AGENT_ID = "software_agent"
+            EDIT_SESSION_TURNS = 3
+
+        client = FakeLLMClient(
+            [
+                _answer(
+                    "TASK-002",
+                    "software_agent",
+                    documents={"newfile.txt": "   "},
+                ),
+                _answer(
+                    "TASK-002",
+                    "software_agent",
+                    documents={"newfile.txt": "int created(void) {\n    return 1;\n}\n"},
+                ),
+            ]
+        )
+        agent = SessionDummy(project_path=test_project, llm_client=client)
+        task = dict(agent.state_manager.get_task("TASK-002"))
+        task["expected_outputs"] = ["newfile.txt"]
+        output = agent.run(task)
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        real = test_project / "newfile.txt"
+        assert real.is_file()
+        assert "int created" in real.read_text(encoding="utf-8")
+        assert len(client.calls) == 2
+        turn2_prompt = client.calls[1]["messages"][0]["content"]
+        assert "missing from the project" in turn2_prompt
+        assert not any("exists in the project" in err for err in output.errors)
 
 
 # ---------------------------------------------------------------------------

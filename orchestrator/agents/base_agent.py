@@ -23,7 +23,7 @@ import re
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Collection, Dict, List, Optional, Set, Type
 
 from .. import config
 from ..context_monitor import payload_chars
@@ -65,10 +65,33 @@ def shares_meaningful_line(left: Path, right: Path) -> bool:
     return False
 
 
+def preexisting_expected(project_path: Path, task: Dict[str, Any]) -> Set[str]:
+    """Snapshot taken once per dispatch: which expected outputs already exist.
+
+    The set is threaded through every delivery check (edit session, materialize,
+    DoD) so files the task itself creates later are never mistaken for
+    pre-existing project files — otherwise re-delivering a file the session
+    just created turns into a permanent rejection loop.
+    """
+    project = Path(project_path)
+    snapshot: Set[str] = set()
+    for raw in task.get("expected_outputs") or []:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        name = raw.strip()
+        target = Path(name)
+        if not target.is_absolute():
+            target = project / name
+        if target.is_file():
+            snapshot.add(name)
+    return snapshot
+
+
 def delivery_problems(
     project_path: Path,
     task: Dict[str, Any],
     output: Optional["AgentOutput"] = None,
+    preexisting: Optional[Collection[str]] = None,
 ) -> List[str]:
     """Single source of truth for delivery checks (DoD + edit sessions).
 
@@ -77,10 +100,16 @@ def delivery_problems(
     - when the expected path already exists in the project (and is not a
       ``docs/``-relative target), the mirror must share real content with it
       — a summary/prose JSON wrapper shares no line and is rejected;
-    - carrying such a file through ``data.documents`` (which never touches
-      the real file) is rejected outright: existing files are changed only
-      with ``data.edits`` (or, for ``docs/`` targets, by full-body rewrite
-      of that same path).
+    - carrying a file that existed when the task started through
+      ``data.documents`` (which never modifies pre-existing real files) is
+      rejected outright: such files are changed only with ``data.edits``.
+    - a missing non-``docs/`` expected output is a problem: ``data.documents``
+      creates missing expected files at their real path, so by delivery time
+      the real file must exist — a ``docs/`` mirror alone is not a delivery.
+
+    ``preexisting`` is the task-start snapshot (see
+    :func:`preexisting_expected`); when ``None`` the current filesystem state
+    is used as the snapshot.
     """
     problems: List[str] = []
     expected = task.get("expected_outputs") or []
@@ -88,6 +117,7 @@ def delivery_problems(
         return problems
     project = Path(project_path)
     docs_dir = project / "docs"
+    preexisting_set = set(preexisting) if preexisting is not None else None
     data: Dict[str, Any] = {}
     if output is not None and isinstance(output.data, dict):
         data = output.data
@@ -115,15 +145,39 @@ def delivery_problems(
             inside = project_file.resolve().is_relative_to(project.resolve())
         except OSError:
             inside = False
-        if not inside or not project_file.is_file():
-            continue  # new file: no existing content to compare
+        if not inside:
+            continue
+        if not project_file.is_file():
+            # Dispatch-context checks (snapshot provided) require the real
+            # file whenever the output delivered real content for it — a
+            # docs/ mirror alone is not a delivery (the TASK-004 pattern).
+            # Outputs with no delivered content (rendered report artifacts)
+            # keep the legacy mirror-only acceptance.
+            if (
+                preexisting_set is not None
+                and name not in preexisting_set
+                and has_channel(name, filename)
+            ):
+                problems.append(
+                    f"expected output missing from the project: {name} — "
+                    "data.documents creates a missing expected file at its "
+                    "real path; a docs/ mirror alone does not deliver it"
+                )
+            continue
+        existed_before = (
+            name in preexisting_set
+            if preexisting_set is not None
+            else True
+        )
+        if not existed_before:
+            continue  # created by this task: documents may deliver/update it
         if has_channel(name, filename) and not (
             (name in edits or filename in edits or name in applied or filename in applied)
         ):
             problems.append(
-                f"{name} already exists — deliver it with data.edits; "
-                "data.documents may only create new files (documents never "
-                "touch the real file)"
+                f"{name} exists in the project — update it with data.edits; "
+                "data.documents never modifies files that existed when the "
+                "task started"
             )
             continue
         if not shares_meaningful_line(project_file, mirror):
@@ -287,6 +341,12 @@ class BaseAgent:
         "- Never echo whole input files back — overrunning the output token limit "
         "truncates the JSON and fails the task; use the smallest unique "
         "data.edits snippet instead.\n"
+        "- The payload's delivery_manifest entry states, per expected output, "
+        "whether the file exists and which channel is required: EXISTS -> "
+        "data.edits only; MISSING -> data.documents only. Follow it exactly.\n"
+        "- data.documents writes a MISSING expected file to its real project "
+        "path (and the docs/ mirror); it never modifies a file that existed "
+        "when the task started — use data.edits for those.\n"
         "- Never invent executed results: report test or verification statuses as "
         "NOT RUN unless the payload contains real execution output."
     )
@@ -344,7 +404,46 @@ class BaseAgent:
         requirements = self._requirements_for(task)
         if requirements:
             context["requirements"] = requirements
+        # G22: existence facts BEFORE generation — the model must never have
+        # to guess the delivery channel (that guessing failed repeatedly).
+        manifest = self._delivery_manifest(task)
+        if manifest:
+            context["delivery_manifest"] = manifest
         return context
+
+    def _delivery_manifest(self, task: Dict[str, Any]) -> str:
+        """Per-expected-output channel instruction, checked at payload build."""
+        lines: List[str] = []
+        project = self.project_path
+        for raw in task.get("expected_outputs") or []:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            name = raw.strip()
+            if name.split("/")[0] == "docs":
+                lines.append(
+                    f"- {name}: docs deliverable — write its full body with data.documents"
+                )
+                continue
+            target = Path(name)
+            if not target.is_absolute():
+                target = project / name
+            if target.is_file():
+                lines.append(
+                    f"- {name}: EXISTS — a real project file: update it with "
+                    "data.edits (delivery via data.documents will be rejected)"
+                )
+            else:
+                lines.append(
+                    f"- {name}: MISSING — create it with data.documents "
+                    "(full content under that exact key; it is written to "
+                    "the real path)"
+                )
+        if not lines:
+            return ""
+        return (
+            "Delivery manifest (filesystem checked now — follow exactly):\n"
+            + "\n".join(lines)
+        )
 
     def _decisions_affecting(self, task_id: str) -> str:
         """DECISIONS.md entries whose Affected Tasks include ``task_id``."""
@@ -454,6 +553,11 @@ class BaseAgent:
         task_id = str(task.get("id", "UNKNOWN")) if isinstance(task, dict) else "UNKNOWN"
         self._current_task_id = task_id
         self.last_payload_chars = 0
+        # G22: one task-start snapshot for all delivery checks of this attempt.
+        try:
+            self._delivery_snapshot = preexisting_expected(self.project_path, task)
+        except Exception:  # noqa: BLE001 — snapshot must never break a run
+            self._delivery_snapshot = set()
         try:
             payload = self.build_payload(task)
             self.last_payload_chars = payload_chars(payload)
@@ -610,28 +714,50 @@ class BaseAgent:
         documents = output.data.get("documents")
         documents = documents if isinstance(documents, dict) else {}
         docs_dir = self.docs_dir()
+        snapshot = getattr(self, "_delivery_snapshot", None)
+        if snapshot is None:
+            snapshot = preexisting_expected(self.project_path, task)
+        project_root = self.project_path.resolve()
         written: List[str] = []
         try:
             docs_dir.mkdir(parents=True, exist_ok=True)
             for raw_name in expected:
                 if not isinstance(raw_name, str) or not raw_name.strip():
                     continue
-                filename = Path(raw_name.strip()).name
+                name = raw_name.strip()
+                filename = Path(name).name
                 if filename in ("", ".", ".."):
                     continue
-                content = documents.get(raw_name)
+                content = documents.get(name)
                 if not isinstance(content, str) or not content.strip():
                     content = documents.get(filename)
                 if not isinstance(content, str) or not content.strip():
                     # Models sometimes flatten file bodies onto data itself
                     # instead of nesting them under data.documents.
-                    content = output.data.get(raw_name)
+                    content = output.data.get(name)
                 if not isinstance(content, str) or not content.strip():
                     content = output.data.get(filename)
-                if not isinstance(content, str) or not content.strip():
+                delivered = isinstance(content, str) and bool(content.strip())
+                if not delivered:
                     content = self.render_artifact(filename, task, output)
                 save_text_file(docs_dir / filename, content)
                 written.append(f"docs/{filename}")
+                # G22: documents is the create channel for files that were
+                # missing at task start — write the real path too, but only
+                # from actually-delivered content (never a rendered wrapper)
+                # and never for files that pre-existed (data.edits owns them).
+                if not delivered or name.split("/")[0] == "docs" or name in snapshot:
+                    continue
+                real_target = Path(name)
+                if real_target.is_absolute() or ".." in real_target.parts:
+                    continue
+                try:
+                    real_path = (project_root / real_target).resolve()
+                    if not real_path.is_relative_to(project_root):
+                        continue
+                    save_text_file(real_path, content)
+                except OSError:
+                    continue
         except OSError as exc:
             output.status = config.AGENT_STATUS_FAILED
             output.errors.append(f"Artifact emission failed: {exc}")
