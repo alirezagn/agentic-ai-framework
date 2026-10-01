@@ -159,7 +159,11 @@ class TestTaskGraphA2:
             }
         )
         assert created["id"] == "TASK-005"
-        assert created["status"] == config.TASK_TODO
+        # GAP-CRIT-05: status is derived from the dependency list. This spec
+        # declares ["TASK-002"] (which is not DONE in the fixture), so the task
+        # starts BLOCKED rather than TODO. Previously the spec's absence of a
+        # status key silently defaulted to TODO, which understated the wait.
+        assert created["status"] == config.TASK_BLOCKED
         assert created["execution"]["attempts_since_change"] == 0
 
         with pytest.raises(StateError):

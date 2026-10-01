@@ -18,7 +18,11 @@ import pytest
 import orchestrator
 from conftest import build_test_project
 from orchestrator import config
-from orchestrator.checkpoint_manager import CheckpointIntegrityError, CheckpointManager
+from orchestrator.checkpoint_manager import (
+    CheckpointIntegrityError,
+    CheckpointManager,
+    SigningVerdict,
+)
 from orchestrator.cli import main
 
 
@@ -148,10 +152,30 @@ class TestCheckpointSigning:
         with pytest.raises(CheckpointIntegrityError, match="signature"):
             signed_manager.verify_checkpoint("cp-signed")
 
-    def test_signature_survives_keyless_verification(
+    def test_signed_checkpoint_without_key_is_unverifiable(
         self, signed_manager: CheckpointManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("CHECKPOINT_SIGNING_KEY")
+        """GAP-CRIT-03: removing the key must NOT yield a passing verification.
+
+        This test previously asserted the opposite (``verify_checkpoint(...) is
+        True`` with the key deleted). That behaviour made key removal an
+        undetectable downgrade to checksum-only verification, which is the
+        essence of the vulnerability. A signed snapshot whose signature cannot
+        be checked is now reported ``UNVERIFIABLE`` and fails closed.
+        """
+        monkeypatch.delenv("CHECKPOINT_SIGNING_KEY", raising=False)
+        report = signed_manager.evaluate_integrity("cp-signed")
+        assert report.verdict is SigningVerdict.UNVERIFIABLE
+        assert not report.verdict.is_trusted
+        with pytest.raises(CheckpointIntegrityError, match="unverifiable"):
+            signed_manager.verify_checkpoint("cp-signed")
+
+    def test_keyless_verification_succeeds_only_via_explicit_opt_in(
+        self, signed_manager: CheckpointManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The escape hatch still exists, but must be asked for by name."""
+        monkeypatch.delenv("CHECKPOINT_SIGNING_KEY", raising=False)
+        monkeypatch.setenv("CHECKPOINT_ALLOW_UNSIGNED", "1")
         assert signed_manager.verify_checkpoint("cp-signed") is True
 
     def test_wrong_key_rejects_signature(
@@ -161,25 +185,65 @@ class TestCheckpointSigning:
         with pytest.raises(CheckpointIntegrityError, match="signature"):
             signed_manager.verify_checkpoint("cp-signed")
 
-    def test_unsigned_checkpoint_still_verifies(
+    def test_unsigned_checkpoint_is_unverifiable_while_key_is_active(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """GAP-CRIT-03: stripping the signature while a key is active is refused.
+
+        This test previously created a snapshot *with* a key (so it was signed),
+        deleted the signature to emulate a pre-signing checkpoint, and asserted
+        verification still passed. Deleting the signature is precisely the
+        bypass: the old field-presence gate skipped validation and returned
+        ``True``. The rewritten expectation is that an active key plus a
+        signature-less snapshot is ``UNVERIFIABLE`` and refused, and that it is
+        refused even under the unsigned escape hatch's *intent* — the honest
+        representation of "never signed" is ``signed: false``, not a missing
+        field.
+        """
         monkeypatch.setenv("CHECKPOINT_SIGNING_KEY", "test-signing-key")
+        monkeypatch.delenv("CHECKPOINT_ALLOW_UNSIGNED", raising=False)
         project = build_test_project(tmp_path / "unsigned-project")
         manager = CheckpointManager(project, checkpoints_root=tmp_path / "ck")
-        metadata = json.loads(
-            (manager.checkpoint_dir("cp-unsigned") / "metadata.json").read_text()
-            if (manager.checkpoint_dir("cp-unsigned") / "metadata.json").exists()
-            else "{}"
-        )
-        # create unsigned by signing at create time — key was set, so instead
-        # remove the signature to emulate a pre-signing checkpoint
         manager.create_checkpoint("cp-unsigned")
+
         target = manager.checkpoint_dir("cp-unsigned")
         metadata_path = target / "metadata.json"
         data = json.loads(metadata_path.read_text())
         data.pop("signature", None)
         data.pop("signature_algorithm", None)
         metadata_path.write_text(json.dumps(data, indent=2))
-        assert manager.verify_checkpoint("cp-unsigned") is True
-        assert metadata == {} or isinstance(metadata, dict)
+
+        report = manager.evaluate_integrity("cp-unsigned")
+        assert report.signed is True, "signed claim survives; only the proof was removed"
+        assert report.verdict is SigningVerdict.TAMPERED
+        with pytest.raises(CheckpointIntegrityError, match="tampered"):
+            manager.verify_checkpoint("cp-unsigned")
+
+    def test_genuinely_unsigned_checkpoint_verifies_when_no_key_is_active(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The supported legacy path: never signed, no key, opt-in fallback.
+
+        A snapshot written with no key configured declares ``signed: false``
+        explicitly, reports ``UNSIGNED``, and passes only when the operator has
+        opted in via ``CHECKPOINT_ALLOW_UNSIGNED``.
+        """
+        monkeypatch.delenv("CHECKPOINT_SIGNING_KEY", raising=False)
+        monkeypatch.delenv("CHECKPOINT_ALLOW_UNSIGNED", raising=False)
+        project = build_test_project(tmp_path / "legacy-project")
+        manager = CheckpointManager(project, checkpoints_root=tmp_path / "ck")
+        manager.create_checkpoint("cp-legacy")
+
+        metadata = json.loads(
+            (manager.checkpoint_dir("cp-legacy") / "metadata.json").read_text()
+        )
+        assert metadata["signed"] is False
+        assert metadata["signature"] is None
+
+        report = manager.evaluate_integrity("cp-legacy")
+        assert report.verdict is SigningVerdict.UNSIGNED
+        assert not report.verdict.is_trusted
+
+        # Row 4 passes on checksums: no key is configured and the snapshot
+        # honestly declares signed=false, so there is no claim to violate.
+        assert manager.verify_checkpoint("cp-legacy") is True
