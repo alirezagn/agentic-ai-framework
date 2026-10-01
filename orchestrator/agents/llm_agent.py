@@ -255,8 +255,10 @@ class LLMAgent(BaseAgent):
                 if turn >= max_turns:
                     return output
                 errs = list(output.errors) or ["edit application failed"]
-                feedback = "your edits could not be applied:\n" + "\n".join(
-                    f"- {err}" for err in errs[-4:]
+                feedback = (
+                    "your edits could not be applied:\n"
+                    + "\n".join(f"- {err}" for err in errs[-4:])
+                    + self._edits_current_content(output)
                 )
                 continue
 

@@ -40,6 +40,9 @@ AGENT_SPEC_FILES: Dict[str, str] = {
 
 DEFAULT_MEMORY_LIMIT = 24000
 DEFAULT_CONTEXT_FILE_LIMIT = 8000
+# Inlined expected outputs are pre-budgeted at load (32K/40K) — render must
+# not re-truncate them or the model again edits files blind.
+EXPECTED_RENDER_LIMIT = 44_000
 
 OUTPUT_FORMAT_INSTRUCTIONS = (
     "Respond with exactly ONE fenced ```json block and no other prose. "
@@ -147,7 +150,15 @@ def build_prompt(
         for name in sorted(context):
             value = context[name]
             text = value if isinstance(value, str) else str(value)
-            blocks.append(f"## {name}\n{truncate_middle(text, context_file_limit)}")
+            # Files the agent must EDIT need near-full bodies for exact
+            # search snippets (already budgeted at load time) — never
+            # middle-truncate them like passive reference files.
+            limit = (
+                EXPECTED_RENDER_LIMIT
+                if str(name).startswith("expected_output:")
+                else context_file_limit
+            )
+            blocks.append(f"## {name}\n{truncate_middle(text, limit)}")
         sections.append("# Task context files\n" + "\n\n".join(blocks))
 
     thresholds = payload.get("thresholds") or {}

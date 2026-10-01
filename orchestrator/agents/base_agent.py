@@ -35,6 +35,13 @@ from ..state_manager import StateManager, load_text_file, utc_now_iso
 # escaped before parsing.
 _INVALID_JSON_ESCAPE = re.compile(r'\\(?![\\"/bfnrt]|u[0-9a-fA-F]{4})')
 _CONTROL_ESCAPES = {"\n": "\\n", "\t": "\\t", "\r": "\\r"}
+# Existing expected outputs are inlined into the payload so the model can
+# quote exact search snippets (NUM_CTX=16384 tokens ≈ 60 KB): per-file and
+# total budgets keep the whole prompt inside the window.
+_EXPECTED_CONTEXT_CAP = 32_000
+_EXPECTED_TOTAL_CAP = 40_000
+# Current bodies injected into edit-session feedback after apply errors.
+_EDITS_FEEDBACK_CAP = 12_000
 
 
 def shares_meaningful_line(left: Path, right: Path) -> bool:
@@ -404,6 +411,37 @@ class BaseAgent:
         requirements = self._requirements_for(task)
         if requirements:
             context["requirements"] = requirements
+        # G22: existing expected outputs the agent must edit or verify —
+        # without their content the model writes blind search snippets and
+        # `data.edits` fails with "search matched 0 time(s)" (TASK-003).
+        budget = _EXPECTED_TOTAL_CAP
+        for raw in task.get("expected_outputs") or []:
+            if budget <= 0:
+                break
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            name = raw.strip()
+            if name in context or f"expected_output:{name}" in context:
+                continue
+            target = Path(name)
+            if not target.is_absolute():
+                target = self.project_path / name
+            if not target.is_file():
+                continue  # missing files: the manifest already says how to create them
+            try:
+                body = target.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            limit = min(_EXPECTED_CONTEXT_CAP, budget)
+            if len(body) > limit:
+                content = body[:limit] + (
+                    f"\n…[truncated at {limit} chars — quote an exact "
+                    "snippet from the shown portion]"
+                )
+            else:
+                content = body
+            budget -= len(content)
+            context[f"expected_output:{name}"] = content
         # G22: existence facts BEFORE generation — the model must never have
         # to guess the delivery channel (that guessing failed repeatedly).
         manifest = self._delivery_manifest(task)
@@ -628,6 +666,40 @@ class BaseAgent:
             lines += ["", "## Warnings", ""] + [f"- {item}" for item in output.warnings]
         lines.append("")
         return "\n".join(lines)
+
+    def _edits_current_content(self, output: AgentOutput) -> str:
+        """Feedback block: current body of every path ``data.edits`` targets.
+
+        Applied when an edit fails (e.g. "search matched 0 time(s)") so the
+        model can copy an exact snippet — it must never guess file content
+        it cannot see (target files outside ``expected_outputs`` are not in
+        the payload).
+        """
+        edits = output.data.get("edits")
+        if not isinstance(edits, dict) or not edits:
+            return ""
+        chunks: List[str] = []
+        for raw in edits:
+            rel = str(raw).strip()
+            target = Path(rel)
+            if not rel or target.is_absolute() or ".." in target.parts:
+                continue
+            real = self.project_path / rel
+            if not real.is_file():
+                continue
+            try:
+                body = real.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if len(body) > _EDITS_FEEDBACK_CAP:
+                body = body[:_EDITS_FEEDBACK_CAP] + "\n…[truncated]"
+            chunks.append(f"current content of {rel} (authoritative):\n{body}")
+        if not chunks:
+            return ""
+        return (
+            "\nCopy the exact search snippet from the current content below:\n"
+            + "\n\n".join(chunks)
+        )
 
     def _apply_edits(self, task: Dict[str, Any], output: AgentOutput) -> None:
         """Apply ``data.edits`` search/replace patches to real project files.

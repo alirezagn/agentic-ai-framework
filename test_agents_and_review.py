@@ -1364,6 +1364,100 @@ class TestDeliveryManifest:
         mirror = test_project / "docs" / "target.txt"
         assert mirror.read_text(encoding="utf-8") == "model claims new body\n"
 
+    def test_expected_outputs_load_into_context(self, test_project: Path) -> None:
+        (test_project / "main").mkdir(exist_ok=True)
+        source = test_project / "main" / "usb_hid_service.c"
+        source.write_text(
+            "int usb_hid_init(void) {\n    /* UNIQUE_MIDDLE_MARKER */\n    return 1;\n}\n",
+            encoding="utf-8",
+        )
+        agent = RequirementsAgent(project_path=test_project)
+        task = {
+            "id": "TASK-002",
+            "expected_outputs": ["main/usb_hid_service.c", "src/missing.c"],
+        }
+        context = agent.relevant_context(task)
+        body = context["expected_output:main/usb_hid_service.c"]
+        assert "UNIQUE_MIDDLE_MARKER" in body
+        assert "expected_output:src/missing.c" not in context
+
+    def test_expected_output_survives_prompt_rendering(
+        self, test_project: Path
+    ) -> None:
+        # An 8750-byte edit target used to be middle-truncated at render
+        # time (8000-char default) — a hidden window made exact search
+        # snippets impossible.
+        from orchestrator.prompt_builder import build_prompt
+
+        (test_project / "main").mkdir(exist_ok=True)
+        body = "\n".join(f"line {i:05d} filler content here" for i in range(400))
+        source = test_project / "main" / "usb_hid_service.c"
+        source.write_text(body, encoding="utf-8")
+        agent = RequirementsAgent(project_path=test_project)
+        task = {
+            "id": "TASK-002",
+            "expected_outputs": ["main/usb_hid_service.c"],
+            "acceptance_criteria": ["c1"],
+            "title": "T",
+            "owner": "software_agent",
+            "status": "READY",
+        }
+        payload = agent.build_payload(task)
+        prompt = build_prompt(payload, agent_spec="")
+        assert "line 00199 filler content here" in prompt  # middle survives
+        assert "expected_output:main/usb_hid_service.c" in prompt
+        assert "Delivery manifest" in prompt
+
+    def test_huge_expected_output_is_truncated_with_note(
+        self, test_project: Path
+    ) -> None:
+        big = test_project / "huge.c"
+        big.write_text("x" * 50_000, encoding="utf-8")
+        agent = RequirementsAgent(project_path=test_project)
+        task = {"id": "TASK-002", "expected_outputs": ["huge.c"]}
+        context = agent.relevant_context(task)
+        body = context["expected_output:huge.c"]
+        assert "[truncated at" in body
+        assert len(body) <= 32_000 + 200
+
+    def test_apply_error_feedback_includes_current_file_content(
+        self, test_project: Path
+    ) -> None:
+        # The TASK-003 pattern: the model guesses a search snippet for a
+        # file whose content it cannot see. The next turn's feedback must
+        # carry the authoritative current body.
+        target = test_project / "target.txt"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+
+        class SessionDummy(LLMAgent):
+            AGENT_ID = "software_agent"
+            EDIT_SESSION_TURNS = 3
+
+        client = FakeLLMClient(
+            [
+                _answer(
+                    "TASK-002",
+                    "software_agent",
+                    edits={"target.txt": {"search": "WRONG_GUESS", "replace": "X"}},
+                ),
+                _answer(
+                    "TASK-002",
+                    "software_agent",
+                    edits={"target.txt": {"search": "BETA", "replace": "BETA13"}},
+                ),
+            ]
+        )
+        agent = SessionDummy(project_path=test_project, llm_client=client)
+        task = dict(agent.state_manager.get_task("TASK-002"))
+        task["expected_outputs"] = ["target.txt"]
+        output = agent.run(task)
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert target.read_text(encoding="utf-8") == "alpha\nBETA13\ngamma\n"
+        turn2_prompt = client.calls[1]["messages"][0]["content"]
+        assert "search matched 0 time(s)" in turn2_prompt
+        assert "current content of target.txt (authoritative)" in turn2_prompt
+        assert "BETA" in turn2_prompt
+
     def test_dispatch_dod_requires_real_file(
         self, test_project: Path, checkpoints_root: Path
     ) -> None:

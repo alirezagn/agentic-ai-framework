@@ -233,7 +233,7 @@ is never written to a real file, and the DoD rejects content delivered only
 to `docs/` when the real file is missing (`expected output missing from the
 project`). Files the task itself created mid-session are therefore not
 mistaken for pre-existing project files — redelivery inside the session
-converges instead of looping.
+converges instead of looping. Two more facts reach the model up front: every existing expected output is inlined into the payload as `expected_output:<path>` (budgeted 32K per file / 40K total, rendered without middle-truncation) so `data.edits` search snippets are quoted, never guessed; and when an apply still fails, the edit-session feedback includes each target file's current body (`current content of <path> (authoritative)`).
 
 **Derived-state recompute** (`StateManager.recompute_derived_state`) runs after
 every status mutation and on `refresh_ready_states()`:
