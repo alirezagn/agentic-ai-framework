@@ -398,6 +398,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | `edits['…'] search matched 0 time(s)` | the model guessed a snippet — existing expected outputs are now inlined into the payload (`expected_output:<path>`), and the session feedback carries the file's current body; `retry TASK-00X` |
 | `expected output missing from the project: …` | the model delivered content only to `docs/` — `data.documents` writes the real path for files missing at task start; the `delivery_manifest` in the prompt now states the channel up front, so `retry TASK-00X` |
 | `… exists in the project — update it with data.edits` | the file pre-existed at task start; `data.documents` never modifies it — `retry TASK-00X` (the manifest tells the agent this before generation) |
+| run finished `HEALTHY` but the ESP32 shows no change | by design today: agents only AUTHOR files in the workspace — nothing is built or flashed and the source repo is not touched; close the loop yourself: sync the workspace, `source /media/alireza/PROJECTS/esp-idf-v6.1-beta1/export.sh && idf.py build && idf.py -p /dev/ttyACM0 flash` (the `data.deploy` channel is designed but NOT implemented yet) |
 | `docs/*.log` or docs "Verification Results" claim tests ran | agents cannot execute anything — claims are unverified until YOU run `ctest`; treat as claims |
 | `LLM backend unavailable` | set provider env vars (§8) |
 | state corrupted | `checkpoint restore cp-...` |
