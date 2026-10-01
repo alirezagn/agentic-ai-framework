@@ -13,7 +13,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -50,6 +50,68 @@ class TaskNotFoundError(StateError):
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def derive_initial_status(dependencies: Sequence[Any]) -> str:
+    """Status a freshly created task starts in, derived from its dependencies.
+
+    GAP-CRIT-05. A task's status on creation is a *fact about the graph*, not
+    something an author or a model may assert:
+
+    * no dependencies → ``TODO`` (pending). It has never run, so it cannot be
+      IN_PROGRESS or any terminal state. ``refresh_ready_states`` promotes it
+      to ``READY`` on the next pass.
+    * one or more dependencies → ``BLOCKED``. Those dependencies cannot be
+      satisfied yet by definition, so ``TODO`` would be a lie the ready-set
+      scan has to correct anyway.
+
+    Deliberately *not* derivable to ``READY``: an empty graph with no
+    dependency edges would then dispatch work the moment it was ingested,
+    which is the same "assert your way past the gate" problem one step later.
+    ``refresh_ready_states()`` owns the TODO/BLOCKED → READY promotion, so the
+    transition stays in exactly one place.
+
+    Accepts any iterable of anything (``Sequence[Any]``) because callers hold
+    dependency lists that have been normalised to strings at varying points in
+    the ingestion path; only emptiness matters here.
+    """
+    return config.TASK_BLOCKED if list(dependencies) else config.TASK_TODO
+
+
+#: Fields a model must never be able to set on a task it creates. ``status`` is
+#: derived by :func:`derive_initial_status`; ``execution`` holds loop/attempt
+#: counters that gate dispatch; ``review.status`` is written by the review flow.
+UNTRUSTED_TASK_FIELDS: Tuple[str, ...] = ("status", "execution", "review")
+
+
+def strip_untrusted_task_fields(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of ``spec`` with runtime-state fields removed.
+
+    Defence in depth for GAP-CRIT-05, applied at the ingestion boundary before
+    :meth:`StateManager.append_task` sees the payload. ``append_task`` derives
+    the status itself, so this is not the only thing standing between a planner
+    and a self-approved task — it exists so the sanitisation is explicit and
+    observable at the boundary where untrusted data enters, rather than implied
+    somewhere downstream.
+
+    ``review`` is handled rather than blanket-dropped: ``review.required`` is
+    legitimate planning input (it is in the planner's whitelist), while
+    ``review.status`` is review-flow output. So the key is rebuilt with only the
+    permitted sub-keys.
+    """
+    if not isinstance(spec, dict):
+        raise StateError("Task spec must be a mapping")
+    cleaned: Dict[str, Any] = {
+        key: value for key, value in spec.items() if key not in UNTRUSTED_TASK_FIELDS
+    }
+    review = spec.get("review")
+    if isinstance(review, dict):
+        permitted_review = {
+            key: value for key, value in review.items() if key == "required"
+        }
+        if permitted_review:
+            cleaned["review"] = permitted_review
+    return cleaned
 
 
 # Map of task owner -> PROJECT.yaml progress key (workstream).
@@ -720,7 +782,17 @@ class StateManager:
 
         ``spec`` is the normalized payload (title/owner/dependencies/...);
         missing ``id`` is auto-assigned as ``TASK-NNN``. Unknown owners or
-        dependencies, duplicate ids and invalid statuses raise StateError.
+        dependencies and duplicate ids raise StateError.
+
+        GAP-CRIT-05 — a newly created task's status is **derived, never
+        supplied**. ``status``, ``execution`` and ``review.status`` in the
+        incoming spec are discarded and the status is computed from the
+        dependency list (see :func:`derive_initial_status`). A planner that
+        replies ``{"status": "DONE"}`` therefore cannot self-approve a task and
+        bypass execution, review and the Definition of Done; nor can it
+        pre-load ``execution.attempt_count`` to trip the loop gate on a task
+        that has never run. Pass ``status`` only via the trusted seeding path
+        (:meth:`seed_starter_tasks`), which passes the same derived value.
         """
         if not isinstance(spec, dict):
             raise StateError("Task spec must be a mapping")
@@ -751,14 +823,6 @@ class StateManager:
                 f"Registered: {', '.join(sorted(agent_names()))}"
             )
 
-        status = str(task.get("status") or config.TASK_TODO)
-        if status not in config.TASK_STATUSES:
-            raise StateError(
-                f"Task '{task_id}' has invalid status '{status}'. "
-                f"Allowed: {', '.join(config.TASK_STATUSES)}"
-            )
-        task["status"] = status
-
         deps = [str(item) for item in (task.get("dependencies") or [])]
         known = existing_ids | {task_id}
         unknown = [dep for dep in deps if dep not in known]
@@ -767,10 +831,18 @@ class StateManager:
                 f"Task '{task_id}' references unknown dependencies: {', '.join(unknown)}"
             )
         task["dependencies"] = deps
+
+        # Derived status — the model never gets a say. Anything the spec
+        # supplied is removed first so a stale key cannot survive by alias.
+        task.pop("status", None)
+        task["status"] = derive_initial_status(deps)
+
         task["priority"] = str(task.get("priority") or "MEDIUM")
         task["expected_outputs"] = list(task.get("expected_outputs") or [])
         task["acceptance_criteria"] = list(task.get("acceptance_criteria") or [])
         task.setdefault("notes", "")
+        # Fresh execution counters: a spec cannot pre-load attempt/loop counts.
+        task["execution"] = {}
         execution = dict(task.get("execution") or {})
         execution.setdefault("attempt_count", 0)
         execution.setdefault("no_progress_cycles", 0)
@@ -782,7 +854,10 @@ class StateManager:
         task["execution"] = execution
         review = dict(task.get("review") or {})
         review.setdefault("required", False)
-        review.setdefault("status", "NOT_STARTED")
+        # Reset rather than setdefault: review.status is written by the review
+        # flow, never by a planner, so an injected value must not survive. A task
+        # that has never run cannot be past review.
+        review["status"] = "NOT_STARTED"
         task["review"] = review
 
         tasks.append(task)
@@ -1451,6 +1526,9 @@ __all__ = [
     "StateFileMissingError",
     "StateCorruptedError",
     "TaskNotFoundError",
+    "UNTRUSTED_TASK_FIELDS",
+    "derive_initial_status",
+    "strip_untrusted_task_fields",
     "atomic_write_text",
     "load_yaml_file",
     "save_yaml_file",
