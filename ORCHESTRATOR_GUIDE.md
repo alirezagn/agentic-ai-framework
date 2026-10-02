@@ -335,6 +335,16 @@ dispatch batch, `_run_pending_reviews()` routes them to `dispatch_review()`:
   project, its `docs/` mirror must share at least one meaningful line with the
   real file (summary/prose JSON wrappers rejected: deliver via `data.edits` or
   full file content)
+- **static import contract** — every file the task delivered is parsed and its
+  intra-project imports resolved (`orchestrator/import_contract.py`, via
+  `delivery_problems()`): a name the producer module does not define, an import
+  of a project module that does not exist, or a file that does not parse all
+  block delivery. Checked in both directions — the consumer side, and a
+  producer that dropped a still-imported name — and only against files this
+  task touched, so pre-existing breakage never fails an unrelated task. Pure
+  `ast` (no subprocess), so the suite stays hermetic, and the message names
+  the producer file plus the names it really defines, which is exactly what the
+  repair round feeds back to the model.
 - **ground truth for any claimed execution** — see below
 - review passed when required
 
@@ -767,7 +777,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1160 passed
+python3 -m pytest -q          # full suite — 1185 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ```

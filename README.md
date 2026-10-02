@@ -47,7 +47,7 @@ agentic-ai-framework/
 │   ├── GETTING_STARTED.md
 │   ├── WORKFLOW.md
 │   └── TROUBLESHOOTING.md
-└── test_*.py, tests/       # pytest suite (1160 passing)
+└── test_*.py, tests/       # pytest suite (1185 passing)
 ```
 
 > `projects/kid-robot-face/` ships the seven state files and a small worked
@@ -269,9 +269,11 @@ A task is DONE only when ALL applicable criteria pass:
 2. ✓ Implementation exists
 3. ✓ Testing/validation exists
 4. ✓ Acceptance criteria pass
-5. ✓ Independent review passes
-6. ✓ Documentation updated
-7. ✓ Project state updated
+5. ✓ Interfaces resolve — every intra-project import names a file that exists
+   and a name it really defines (static `ast` check, no code is executed)
+6. ✓ Independent review passes
+7. ✓ Documentation updated
+8. ✓ Project state updated
 
 Possible completion states:
 - `DONE` — All criteria met
@@ -313,7 +315,7 @@ See [meta/GETTING_STARTED.md](meta/GETTING_STARTED.md) for detailed walkthroughs
 **Last Updated:** 2026-10-02  
 **Framework Version:** 2.0.0  
 **Status:** STABLE — state engine + LLM-backed agent policy layer  
-**Test suite:** 1160 passing (`python3 -m pytest -q`), hermetic and offline
+**Test suite:** 1185 passing (`python3 -m pytest -q`), hermetic and offline
 
 ## Runtime at a glance
 

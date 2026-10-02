@@ -1,8 +1,9 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-02 night (architecture-redesign batch landed:
-> truncation recovery, PEP 668 deploys, goal-driven decomposition; suite now
-> **1160 collected, 1159 passed / 1 failed** — the failure is still OPEN-1)
+> Last updated: 2026-10-03 (static import contract batch: the DoD now parses
+> delivered Python and rejects imports naming a producer name that does not
+> exist; suite now **1185 collected, 1184 passed / 1 failed** — the failure is
+> still OPEN-1)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -18,28 +19,33 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1160 collected, 1159 passed / 1 failed** — `python3 -m pytest -q`,
-  188 s, 2026-10-02 night. The single failure is **OPEN-1** below (local
+- **Suite: 1185 collected, 1184 passed / 1 failed** — `python3 -m pytest -q`,
+  211 s, 2026-10-03. The single failure is **OPEN-1** below (local
   `checkpoints/` state, not a code regression). The number the four docs assert
-  is the *collected* count (1160) and is current.
+  is the *collected* count (1185) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
   deliberately exercising one.
 - **Repo state:** branch `main`, **in sync with `origin/main`** (0 ahead / 0
-  behind) at commit `0fbc665`. Working tree is **dirty as I write this**:
-  `projects/sys_mon/{PROJECT,TASKS}.yaml`, `CHANGELOG.md`, `CURRENT_STATE.md`
-  moved after the commit (TASKS summary is now `DONE: 4`), the still-tracked
-  `projects/sys_mon/__pycache__/test_sys_mon.cpython-312-pytest-9.1.1.pyc`
-  changed (`713b3ce` untracked only the *other* pyc), and a stray **0-byte file
-  named `=`** sits in the repo root. Do not describe the tree as clean until
-  that is resolved, and do not sweep those files into an unrelated commit.
+  behind) at commit `e7f3fd6` (run --all stop reasons). Working tree is **dirty
+  as I write this** with the import-contract batch (4 docs,
+  `orchestrator/agents/base_agent.py`, new `orchestrator/import_contract.py` +
+  `tests/test_import_contract.py`), plus the pre-existing intentional dirt:
+  `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`, the
+  still-tracked `projects/sys_mon/__pycache__/test_sys_mon…pyc`, and a stray
+  **0-byte file named `=`** in the repo root. Do not describe the tree as clean
+  until that is resolved, and do not sweep those files into an unrelated commit.
 - **Commits since the audit pass** (all 2026-10-02): `1ee05ae` HIGH-01..04,
   `2c55657` dependency automation, `2cd1fed` completed `sys_mon` sample,
   `69a55d1` CLI init nesting fix, `2408d42` materializer no-op edit,
   `762df40` advisory-lock fd release, `117ff10` cross-component data
   contracts, `59de074` doc count sync, `85c26b5` entrypoint + interface
   alignment, `0fbc665` UI fidelity + pre-implementation signature checks.
+  Then (2026-10-02 night → 10-03): `ae8a721` truncation recovery + PEP 668
+  deploys + goal-driven decomposition, `173dc75` docs (1155), `6c1feb8`
+  `run_until_done.sh`, `802ce20` `run --all`, `b44ea3e` docs (1160), `e7f3fd6`
+  `run --all` stop reasons, `25be3eb` static import contract (1185).
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -129,17 +135,19 @@ kept as the record of what was wrong, not as current state.
      the lock — a crash (or a hand `rm -rf`) between the two leaves exactly this
      dangling entry. No test in the suite deletes local checkpoints, so this was
      external.
-  3. The test reads **gitignored, mutable** `checkpoints/` — it is not hermetic,
-     so the whole suite can go red on local state alone. The other 1159 pass.
-  Choices, none taken yet: repair the index entry (restores green, hides the
-   bug), make the delete transactional, or have the test assert "dangling index
-   entry" clearly instead of throwing. **Do not write "1160 all passing" until
-   one of them lands.**
+   3. The test reads **gitignored, mutable** `checkpoints/` — it is not hermetic,
+      so the whole suite can go red on local state alone. The other 1184 pass.
+   Choices, none taken yet: repair the index entry (restores green, hides the
+    bug), make the delete transactional, or have the test assert "dangling index
+    entry" clearly instead of throwing. **Do not write "1185 all passing" until
+    one of them lands.**
+
 - **OPEN-2 — stale count prose (partly fixed this pass).** The four
   consistency-checked docs (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`,
   `README.md`, `review_gaps.md`) are asserted against `pytest --collect-only`
-  and are currently at **1160** (1103 before `tests/test_architecture_redesign.py`
-  added 52; 1160 after `run --all` added 5 more), so
+  and are currently at **1185** (1103 before `tests/test_architecture_redesign.py`
+  added 52; 1160 after `run --all` added 5; 1185 after
+  `tests/test_import_contract.py` added 25), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched). The "passed" phrasing in
@@ -193,7 +201,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~190 s, 1160 tests).
+- Run full pytest after every change: `python3 -m pytest -q` (~210 s, 1185 tests).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
   evidence — see OPEN-1.
@@ -350,8 +358,31 @@ kept as the record of what was wrong, not as current state.
      `HUMAN_DECISION_REQUIRED` (exit 4), on BLOCKED/STALLED health, on a loop
      limit, and on "no READY and not finished" (exit 3), and it refuses
      `--all --task` (exit 2). Exit codes match a single `run`, so wrappers
-     cannot tell the difference. `scripts/run_until_done.sh` is now a thin
-     wrapper (validate path, `exec … run --all`) — the loop lives in one place.
+      cannot tell the difference. `scripts/run_until_done.sh` is now a thin
+      wrapper (validate path, `exec … run --all`) — the loop lives in one place.
+  5. **Static import contract** (2026-10-03) — new stdlib-only
+     `orchestrator/import_contract.py`: `import_contract_problems(project,
+     delivered)` parses the project's Python with `ast` (no subprocess) and
+     reports, for files this task delivered **or** that import a module this
+     task delivered: an intra-project `from X import Y` where `X` does not
+     define `Y`, an `import a.b` whose module is missing from the project, a
+     relative import with no module at that path, and a delivered file that
+     does not parse. Scope is deliberately symmetric with responsibility — a
+     file is judged only when the task touched it or it consumes a touched
+     producer — so pre-existing breakage never fails an unrelated task;
+     third-party/stdlib imports are skipped by first-component lookup;
+     `from x import *` and modules defining `__getattr__` (PEP 562) are never
+     guessed at; `if TYPE_CHECKING:`/`try`-wrapped definitions count as defined.
+     Wired into `delivery_problems()` (before the expected-outputs loop), so
+     both the edit session and `definition_of_done` see it and the one
+     auto-repair round feeds the message back. `INTERFACE_ALIGNMENT_CONTRACT`
+     now says imports are statically verified. Why: a consumer in
+     `sys_mon_full` imported `get_metrics_snapshot` while the producer defines
+     `get_system_metrics`, and prompt text alone ("read the producer first")
+     did not stop it — the app was broken at the operator's first launch with
+     the task already DONE. Message names the producer file and the names it
+     really defines. Tests: `tests/test_import_contract.py` (25).
+
 
 ---
 
@@ -379,6 +410,7 @@ suites added during remediation:
 | `tests/test_dependency_automation.py` | dependency contract — declaration, install ordering, honest refusal, `sys_mon` regression |
 | `tests/test_final_high_gaps.py` | audit HIGH-01..04 — pinned-agent isolation, checkpoint trigger evaluation, off-lock DoD repair, deep validation + reachability |
 | `tests/test_architecture_redesign.py` | 52 tests — truncation/chunked-JSON recovery, PEP 668 `--break-system-packages` + satisfied-install skip, skip-vs-DoD evidence, decomposition scope/chains/starter seeding |
+| `tests/test_import_contract.py` | 25 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, DoD wiring, prompt promise |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
 `checkpoints_root`, `FakeLLMClient`, `_task`, `FakeDeployRunner` (+ the
