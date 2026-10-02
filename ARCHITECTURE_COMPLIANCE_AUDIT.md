@@ -5,7 +5,7 @@
 **Baseline commit:** `29b920c` (== `origin/main`, tree clean)
 **Specification set audited:** `ORCHESTRATOR_GUIDE.md` (v2.0, 521 ln), `framework/00–10` + `framework/AGENT_PROMPTS/*` + `framework/TEMPLATES/*`, `framework/20_DEFAULT_PROJECT_START_PROMPT.md`, `review_gaps.md`, `HOW_TO_USE.md`, `README.md`, `meta/*`, `project-templates/*`, `GAP_ANALYSIS.md`, `IMPLEMENTATION_ROADMAP.md`, `QUICK_REFERENCE.md`, `DEPLOYMENT_SUMMARY.md`, `memory.md`
 **Implementation audited:** `orchestrator/` (12 modules, 7 586 LOC incl. `agents/`), `conftest.py`, 18 `test_*.py` files, `bin/orchestrator`, `pyproject.toml`, `.env`/`.env.example`, `.gitignore`
-**Verification (at time of writing):** `python3 -m pytest -q` → **721 passed** in 173 s, offline, `git status` clean after run (no writes to `projects/kid-robot-face/`). *The suite has since grown to 721 tests as the Critical/High gaps were remediated; the counts below are the audit-time baseline and the finding IDs are unchanged.*
+**Verification (at time of writing):** `python3 -m pytest -q` → **814 passed** in 173 s, offline, `git status` clean after run (no writes to `projects/kid-robot-face/`). *The suite has since grown to 814 tests as the Critical/High gaps were remediated; the counts below are the audit-time baseline and the finding IDs are unchanged.*
 
 ---
 

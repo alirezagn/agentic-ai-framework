@@ -1,95 +1,236 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-09-30 (review_gaps A1–E2 remediation + task-graph automation G1–G8 — see `review_gaps.md`)
+> Last updated: 2026-10-02 (audit + Critical/High/Medium remediation pass)
+>
+> **Authority:** this file records *verified* state, not intended state. Every
+> "open" entry below was re-checked against the code before writing. If an entry
+> here disagrees with `ARCHITECTURE_COMPLIANCE_AUDIT.md`, the audit is the
+> finding of record and this file is the status of record; they are not the same
+> document on purpose.
+
+---
 
 ## Where the project stands
 
-- `GAP_ANALYSIS.md` remediation list **T1–T20 is fully complete** (milestones M1–M7); the file is now annotated as the historical baseline.
-- **`review_gaps.md` (20 gaps A1–A8, B1–B7, C1–C3, D1–D3, E1–E2) is now fully remediated** — every section carries a ✅/🔶 status line; only A3 remains "mostly closed" (unnecessary-blocking heuristic approximated by the stale-block detector), A7 integration/release triggers ride `cp-phase-RELEASE`, B5 diagnosis is on-demand (`health --diagnose`), B3 keeps review/docs structural.
-- New tests: `test_gap_remediation.py` (**41 tests**, one class per gap) + `test_auto_plan.py` (**39 tests**, G1–G7). Full suite: `python3 -m pytest -q` → **314 passed** (234 + 41 + 39). Test isolation: suite passes with `projects/` read-only.
-- **Task-graph automation (G1–G8) landed 2026-09-30, uncommitted:** `init` now auto-generates `TASKS.yaml` (LLM plan via `MasterOrchestrator.build_plan()` when `LLMClient.is_available()`, else 5-task starter skeleton; `--no-plan` forces the skeleton), new `plan [--goal --force --max-tasks]` subcommand, `run` auto-plans an empty graph (hint-only without a backend), `StateManager.seed_starter_tasks()`, planning contract in `data.tasks` (0-based dep indices, owner normalization via keyword map → the 10 registered agents), docs updated (GUIDE CLI table, HOW_TO_USE §2–3, framework/05 + AGENT_PROMPTS/05 output contracts). E2E verified on `/tmp/esp32-os-gap` (plan fills adopted project) and `/tmp/esp32-os-e2e` (one-shot `init --goal` on pristine copy → 6-task goal-derived graph).
-- Runtime v2.0: state engine + LLM-backed specialist policy layer.
-- **Pushed to GitHub** on `origin/main` (`https://github.com/alirezagn/agentic-ai-framework`) through **`5dc41fc`** (history: `e9d3e79` T1–T20, `fec96b5` memory, `7079012` Ollama `.env`, `f29ee79` review_gaps+adoption, `cb1bab3` A1–E2 remediation, `0e84a2b` memory, `b05cf31`/`5dc41fc` opencode notes). The G1–G8 work above is **not yet committed** — ask before committing.
-- Docs set: `GAP_ANALYSIS.md` (historical), `review_gaps.md` (current — with remediation statuses + 314-test count), `ORCHESTRATOR_GUIDE.md` (v2.0 reference, CLI table incl. `plan`/`phase`/`waive`/`health --diagnose`), `HOW_TO_USE.md` (walkthrough — init scaffold, auto task graph, `plan`, `requirement_ids`, `phase set`, compaction, 314-test count), README quick-start + Day-1 init (fixed), `framework/`, `meta/`, `project-templates/`.
+- **Runtime is v2.0.0** (`pyproject.toml`, `cli.py --version`). `ORCHESTRATOR_GUIDE.md`
+  is the technical reference; `HOW_TO_USE.md` is the operator walkthrough.
+- **Suite: 721 tests, all passing, hermetic** (`python3 -m pytest -q`).
+  Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
+  so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
+  substitutes for the real runner, so no test spawns a process unless it is
+  deliberately exercising one.
+- **Repo state:** branch `main`, **in sync with `origin/main`** (0 ahead / 0
+  behind) at commit `fb52bed`. **4 doc files are uncommitted** — a test-count
+  sync in `ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `review_gaps.md`,
+  `ARCHITECTURE_COMPLIANCE_AUDIT.md`. No source file is uncommitted.
+- **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
+  9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
+  status table below is the remediation state against it.
+
+### Remediation status (verified 2026-10-02)
+
+| Gap | Severity | State |
+|---|---|---|
+| CRIT-01 | Critical | **Fixed** — `data.deploy` execution channel, DoD evidence gate |
+| CRIT-02 | Critical | **Fixed** — `path_policy.py`; restore path traversal refused |
+| CRIT-03 | Critical | **Fixed** — explicit `signed` flag, 4-verdict integrity model |
+| CRIT-04 | Critical | **OPEN** — review path still discards DoD problems |
+| CRIT-05 | Critical | **Fixed** — model-supplied task `status`/`execution` stripped |
+| CRIT-06 | Critical | **Fixed** — cross-process locks on index + id allocation |
+| CRIT-07 | Critical | **OPEN** — `./.env` auto-loaded from CWD (prompt-exfiltration) |
+| CRIT-08 | Critical | **Fixed** — base `SYSTEM_RULES` no longer shadowed by subclasses |
+| CRIT-09 | Critical | **OPEN** — `AGENT_PROMPTS/*` document a discarded `documents[]` shape |
+| HIGH-01..04 | High | **OPEN** — see "Open findings" below |
+| HIGH-12, LOW-01, MED-01..03, LOW-10, HIGH-14 | High/Med/Low | **Fixed** |
+
+**2 of 9 Criticals and 4+ Highs remain open.** Do not report this as a clean
+baseline.
+
+### Open findings (all re-verified against the code)
+
+- **CRIT-04** — `orchestrator.py:343` takes the `review_block.get("required")`
+  branch *before* `elif dod_problems:` (`:350`), and `complete_review`
+  (`:1501`) calls `definition_of_done(prospective)` with `preexisting=None`, so
+  the G22 delivery guarantee is inert on the review path. `review.required: true`
+  is the **default** (`project-templates/TASKS.yaml`, 3 of 4 tasks in
+  `projects/kid-robot-face/`). Proven: a fabricated test task reaches `DONE`.
+- **CRIT-07** — `config.py:157` still resolves `./.env` from `Path.cwd()`, and
+  `cli.py` calls `maybe_load_env_file()` before `parse_args`. Running inside an
+  untrusted repo silently redirects every prompt to a host that repo chooses.
+  No redaction layer exists anywhere.
+- **CRIT-09 / HIGH-13** — all **11** `framework/AGENT_PROMPTS/*.md` still
+  specify a top-level `"documents": [{"name", "content"}]` array, which the
+  runtime discards (it reads `data.documents` as a dict). **0 of 11** mention
+  `data.edits` or `acceptance_results` — i.e. the contract that decides whether
+  a task delivers or fails is undocumented outside `base_agent.py`.
+- **HIGH-01** — `orchestrator.py:201` returns a pinned singleton even when
+  `fresh=True`, contradicting the documented "safe for `--max-concurrent > 1`".
+- **HIGH-02** — `orchestrator.py:440-442` still `or`-short-circuits the
+  checkpoint trigger chain, so `check_milestones()` is skipped when compaction
+  also fires.
+- **HIGH-03** — `orchestrator.py:329` still runs `agent.repair_delivery()` (a
+  full LLM round trip) *inside* the finalize `_state_lock`.
+- **HIGH-04** — `validate()` still does not check `phase.current ∈ config.PHASES`
+  and is still called from `cmd_init` only, not from `status`.
+
+### Known documentation drift
+
+- `memory.md` previously claimed 314 tests and "uncommitted work" while the
+  suite was at 401+; that is the class of rot that made this file unreliable.
+  Test counts are now **derived from `pytest --collect-only`** and asserted across
+  all four user-facing docs (`TestCountsConsistentAcrossDocs`), so a stale number
+  fails the suite rather than being discovered by a reader.
+- `README.md` was materially false until this pass: v1.0/Production Ready,
+  `REQ-001..REQ-020` (actual 015), `30+ tasks` (actual 4), a `docs/` +
+  `implementation/` example tree that does not exist, and a phantom
+  `Failure Risk` health state. All corrected.
+- Still stale elsewhere: `framework/AGENT_PROMPTS/`, `framework/TEMPLATES/`
+  (7 of 16 architecture sections; `DRAFT` is not a valid requirement status),
+  `meta/GETTING_STARTED.md` (teaches a manual copy path and a checkpoint layout
+  `CheckpointManager` cannot read), `IMPLEMENTATION_ROADMAP.md` /
+  `QUICK_REFERENCE.md` / `DEPLOYMENT_SUMMARY.md` / `GITHUB_PUSH_INSTRUCTIONS.md`
+  (pre-implementation, instruct commands that cannot succeed), and
+  `AGENT_PROMPTS/00-01` (claim `framework/00`/`01` are auto-appended; they are
+  not — those ids are unreachable).
+
+---
 
 ## Guardrails (always keep)
 
-- **Never dispatch the CLI against `projects/kid-robot-face/`** (a smoke run once corrupted it). Tests only *read* it; use `build_test_project(tmp_path)` copies for anything that executes.
-- Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is **committed as-is** (lowercase `name: kid-robot-face`, TASK-002 READY, blockers set) — do not "restore" it to older HEAD content; tests depend on it.
-- Run full pytest after every change: `python3 -m pytest -q`.
+- **Never dispatch the CLI against `projects/kid-robot-face/`** (a smoke run once
+  corrupted it). Tests only *read* it; use `build_test_project(tmp_path)` copies
+  for anything that executes.
+- Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
+  **committed as-is** — do not "restore" it to older HEAD content; tests depend
+  on it.
+- Run full pytest after every change: `python3 -m pytest -q` (~170 s, 721 tests).
 - YOLO mode: no approval prompts, no TODO stubs, relative paths, autonomous execution.
-- LLM backend is stdlib-only; tests inject `FakeLLMClient` / `transport` — suite must stay offline-safe.
+- LLM backend is stdlib-only; tests inject `FakeLLMClient` / `transport`.
+  **The suite must stay offline-safe** — do not add a test that dials out.
+- `checkpoints/` and `projects/*` are gitignored (except `kid-robot-face/`).
+  Probes that construct `MasterOrchestrator` with a default root will write
+  there; pass `checkpoints_root=` explicitly.
+- **Standing rule (user, 2026-09-30):** after every batch, update git
+  (commit + push) and keep docs in sync — no need to re-ask first.
 
-## T15–T20 — what landed most recently
-
-- **T15 loop detection:** `state_oscillation` (status-only fingerprints via `StateManager.state_fingerprint()`, alternating A↔B over ≥4 compressed entries, checked FIRST in dispatch phase1), `repeated_output` (`last_output_hash`), `strategy_changed` → `alternatives_exhausted`; `LoopThresholds.identical_output_max_repeats=3`; `LoopLimitExceededError.loop` carried on results; CLI exit code 3.
-- **T16 CLI:** `init NAME [--dest|--goal|--force]` scaffolds a project that passes `validate()`; `tasks` prints dependency graph + ready set + critical path (path may be `str` **or** `list`); executable `bin/orchestrator`; `pyproject.toml` exposes `orchestrator = "orchestrator.cli:main"`.
-- **T17 derived state:** `StateManager.recompute_derived_state()` — TASKS.yaml `summary`/`parallel_groups` (pruned)/`critical_path.path` (longest chain), PROJECT.yaml `progress` % / `agents` status / `next_tasks`; writes only on change; called from `refresh_ready_states()`, dispatch phase3, and review success.
-- **T18 docs:** `ORCHESTRATOR_GUIDE.md` rewritten for v2.0; created `framework/20_DEFAULT_PROJECT_START_PROMPT.md`, `framework/AGENT_PROMPTS/` (11), `framework/TEMPLATES/` (6), the 7 `project-templates/` state files, `meta/WORKFLOW.md`, `meta/TROUBLESHOOTING.md`, `agents/` + `references/` content; README quick-start uses `./bin/orchestrator init`.
-- **T19 cleanup:** deleted `orchestrator/{checkpoint,project_manager,task_executor}.py` + stray `"__init__.py "`; exports removed from `orchestrator/__init__.py`; `orchestrator/requirements.txt` → `pyyaml` + `pytest` only; logging wired (`-v`/`-q`/`ORCHESTRATOR_LOG_LEVEL`, `config.LOG_FORMAT`, loggers in dispatch/supervisor/checkpoints); `CHECKPOINT_SIGNING_KEY` now HMAC-SHA256-signs checkpoint metadata and `verify_checkpoint()` enforces it.
-- **T20 tests:** split `test_orchestrator_pipeline.py` → `test_state_manager.py` (+StateLoading), `test_supervisor.py`, `test_orchestrator.py`, `test_cli_commands.py` (TestCLI), `test_agents_and_review.py` (RequirementsAgent); deleted empty `test_agent.py`; added 9 structured-output parsing tests (`BaseAgent.parse_structured_output` edge cases).
+---
 
 ## Key architecture facts (for future edits)
 
-- Dispatch = 3 phases under `self._state_lock` (RLock): gate (locked) → `agent.run` (unlocked, thread pool when `max_concurrent>1`) → finalize (locked: context util, proposed-change, status, risks, loop signals, fingerprint, DoD, derived recompute, checkpoint).
-- Phase machine: `config.PHASES`/`PHASE_OWNERS` + `StateManager.derive_phase()`; forward-only advance in `recompute_derived_state()` mirrors to nested `project["project"]["status"]` (top-level `status` does NOT exist); unknown/empty owners → IMPLEMENTATION/skip. CLI `phase show|set`.
-- Task graph API: `append_task()` (auto `TASK-NNN`, validates owner/deps/status), `relax_dependency()` (CLI `waive`); dispatch phase-3 `_ingest_output_tasks()` converts planner/reviewer `proposed_tasks` output into tasks (STATE errors → warnings). Goal-driven generation: `StateManager.seed_starter_tasks(goal)` (5-task skeleton, idempotent) and `MasterOrchestrator.build_plan(goal, max_tasks, force)` — synthetic `PLAN-001` task → `planning_agent.run(materialize=False)` → `_normalize_plan_specs` (assigns `TASK-NNN`, resolves 0-based index/title deps, strips `status`/`execution`/`id`, owner keyword-map → registry, drops forward/unknown deps) → ingest → `refresh_ready_states`; force replaces the graph only AFTER a successful plan. CLI: `init [--no-plan]`, `plan`, `run` auto-plan.
-- Checkpoint triggers: milestones, `cp-phase-<name>` on phase advance (dispatch/review), `cp-risk-<id>` on failure risk (gated on `auto_checkpoint`), `cp-000-init` from `cmd_init`, compaction checkpoint. **Id priority evaluates ALL triggers** (milestones → phase) — never `or`-short-circuit the chain or milestones get skipped.
-- Context accounting is **cumulative**: `_update_context_utilization` accumulates `cumulative_tokens`; `set_context_utilization` syncs `cumulative = window×pct/100`; compaction calls `compact_memory()` (head 60% + tail 25% + marker) then `reset_context_tokens()`.
-- Loop response: `execution.attempts_since_change` (reset only on `strategy_changed`), `recovering` flag (set on strategy change, cleared on terminal OR when `attempts_since_change >= same_strategy_max_attempts` — clearing lives in `update_task_execution`); `classify_state` returns RECOVERY first when `recovering and loops`; `execution.last_loop` persists the latest `LoopLimitExceededError`.
-- WAITING lifecycle: `PROPOSED_CHANGE` record → affected tasks `WAITING`; `approve_decision` → READY (deps ok) else BLOCKED; `get_ready_tasks` also releases `WAITING` with satisfied deps so gate refusals still surface.
-- Escalations: `category` (`loop|deadlock|context|starvation|decision_conflict|stale_block`) + `blocking`; only blocking forces HUMAN_DECISION_REQUIRED; persisted as `"[category] task: reason"`.
-- DoD: requirement traceability checked ONLY when task has `requirement_ids`; `acceptance_results` non-passing entries → problem; SYSTEM_RULES rule 6 requires agents to emit `acceptance_results`.
-- Worker payload auto-injects `decisions_affecting_task` + `requirements` slices (`BaseAgent.relevant_context`).
-- `SupervisorAgent.diagnose(use_llm=True)` + CLI `health --diagnose` — on-demand, never auto-called from `check_health()` (cost).
-- Loop kinds (`config.LOOP_KINDS`): `same_strategy`, `no_progress`, `alternatives_exhausted`, `state_oscillation`, `repeated_output`, `no_new_evidence` (evidence stall, `evidence_stall_max=3`).
-- Review flow: `_run_pending_reviews()` before READY dispatch; reviewer always `review_agent`, `materialize=False`, writes `docs/REVIEW-<task>.md`; PASS → DONE, PASS WITH ACTIONS → `DONE WITH ACCEPTED LIMITATION` + follow-ups, FAIL → FAILED + follow-ups.
-- `PROPOSED_CHANGE` in DECISIONS.md blocks affected tasks (`_enforce_decision_gate`) until `orch.approve_decision(id, approved)`.
-- Agent registry: 10 ids (`requirements|research|architecture|planning|hardware|software|firmware|test|review|documentation_agent`); `register_agent()` pins singletons (thread-safe), `agent_resolver(owner, state)` gives per-thread instances.
-- LLM env: `ORCHESTRATOR_LLM_PROVIDER/MODEL`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_BASE_URL`, `ORCHESTRATOR_CONTEXT_WINDOW_TOKENS` (128000), `ORCHESTRATOR_LOG_LEVEL`, `CHECKPOINT_SIGNING_KEY`, `ORCHESTRATOR_CHECKPOINTS_DIR`, `MEMORY_COMPACT_MAX_CHARS` (60000), plus (added during the 2026-09-30 live PoC) `ORCHESTRATOR_LLM_MAX_TOKENS` (output budget; default 4096, `.env` 8192), `ORCHESTRATOR_LLM_NUM_CTX` (ollama `options.num_ctx`; default 16384, `.env` 16384), `ORCHESTRATOR_LLM_TIMEOUT` (seconds; default 120, `.env` 300).
-- LLM client gotchas (found via G8 live runs): ollama native `/api/chat` sends `think: false` (thinking models like gemma4:12b otherwise burn the whole `num_predict` budget on the `thinking` field and return EMPTY content; old servers reject the field → one retry without it). `LLMAgent.output_from_parsed` FORCE-sets `task_id` to the executed task (a model-invented task_id can never pass `validate_output`, honoring it only poisoned good output) — same for `agent_id`.
-- Shared fixtures in `conftest.py`: `build_test_project`, `test_project`, `checkpoints_root`, `FakeLLMClient`, `_task` (optional `milestone`), autouse `_redirect_default_checkpoints`.
+- **Dispatch** = 3 phases under `self._state_lock` (RLock): gate (locked) →
+  `agent.run` **and** `data.deploy` (both unlocked) → finalize (locked).
+  The deploy runner is deliberately in phase 2 so a 5-minute build cannot stall
+  other workers' state turns.
+- **Task status is derived, never supplied** (`GAP-CRIT-05`):
+  `derive_initial_status(deps)` → `TODO` with no deps, `BLOCKED` with any.
+  `refresh_ready_states()` owns `TODO/BLOCKED → READY`, so the transition lives
+  in one place. `append_task` strips `status`/`execution`/`review.status` and
+  refuses a spec that would *join* a dependency cycle (scoped deliberately: an
+  unrelated pre-existing cycle must not block new work).
+- **Cycle detection** is `StateManager.find_dependency_cycles()` — iterative
+  three-colour DFS (a plan can be thousands of tasks deep; the recursive form
+  raised `RecursionError`). It is called from `validate()` and `append_task`.
+- **Execution / evidence (`data.deploy`)** — off by default. Needs *both*
+  `ORCHESTRATOR_DEPLOY_ENABLED=1` and a non-empty
+  `ORCHESTRATOR_DEPLOY_ALLOWLIST` (basenames; enabling alone stays inert).
+  `orchestrator/deploy_runner.py` is the **only** module that spawns a process,
+  which is what makes it auditable via `grep -rn subprocess orchestrator/`.
+  `shell=False` + list `argv`; forced project-root cwd; scrubbed child env (API
+  and signing keys are **not** visible to the child); bounded output (tail kept,
+  truncation flagged) and timeout; `executed: false` is a first-class outcome.
+  Transcripts → `docs/evidence/<task>/NN-<command>.json`.
+- **DoD evidence rule** — fires when the output declares `data.deploy`, *or* the
+  summary/artifacts claim execution (`config.claims_execution`), *or* an expected
+  output looks like a build/test artifact. Then either an `executed: true`
+  record must exist (real exit code authoritative, incl. non-zero), or the agent
+  must set `data.test_status = "NOT RUN"`. Otherwise `FAILED`, with the note
+  carrying the *missing evidence*, never the claim. This is what makes
+  "I could not run this" a legitimate outcome and "42/42 tests passed" a
+  rejected one.
+- **State IO is locked and atomic.** `atomic_dump_yaml()` serializes *before*
+  touching disk (a failed dump leaves the file byte-identical), writes to a temp
+  file, `fsync`s, `os.replace`s, then `fsync`s the parent directory. Locks are
+  taken on a **sibling `.lock` file**, not the target — `os.replace` swaps the
+  inode, so a lock on the target is released by the very rename it was meant to
+  cover. `_file_lock` is **reentrant** (`RLock` + depth counter); a plain `Lock`
+  self-deadlocked `append_decision`. Lock files persist by design and are not
+  litter.
+- **Read-modify-write needs the whole cycle under one lock** (`_document_lock`).
+  `DEC-NNN` / `RISK-NNN` / `cp-auto-NNN` allocation is only collision-free
+  because read → allocate → write happen together; `cp-auto` also *reserves* the
+  number in the index, or the allocation is still advisory. Append-only logs
+  (`CURRENT_STATE.md`, `CHANGELOG.md`) use `O_APPEND` under the lock, not
+  read-concatenate-rewrite.
+- **Derived state parses `TASKS.yaml` once** per `recompute_derived_state()`
+  (was 4×; ~11× faster at 400 tasks). `get_ready_tasks(tasks=…)`,
+  `status_breakdown(tasks=…)` and `_tasks_from_document()` exist so a caller
+  that already parsed can reuse it. Pass a preloaded list, not a re-read.
+- **Checkpoint integrity** — `evaluate_integrity()` returns one of
+  `VERIFIED` / `UNSIGNED` / `TAMPERED` / `UNVERIFIABLE`, driven by the persisted
+  `signed` flag and *never* by field presence (that inversion was CRIT-03). The
+  MAC binds `checkpoint_id`, `key_id`, `created_at` and per-file digests.
+  `CHECKPOINT_ALLOW_UNSIGNED=1` downgrades only `UNVERIFIABLE`.
+  `resume_from_checkpoint` silently drops `registered_agents` — re-register
+  custom agents after a restore.
+- **Context accounting is cumulative**, reset only at compaction. A compaction
+  is a *state-changing* event and is now recorded in `CHANGELOG.md`,
+  `CURRENT_STATE.md` and a queryable index row
+  (`checkpoints.compaction_events()`) — all written *before* the memory fold, so
+  the trail survives its own side effects.
+- **Telemetry is off by default** (`ORCHESTRATOR_TELEMETRY_DIR` / `_FILE`). When
+  on, one-line JSON with a stable field set; credentials are redacted by key
+  name *and* value shape, recursively. `main()` returns 2 (not 1) for an
+  unhandled error and 130 for Ctrl-C.
+- **Phase machine** is forward-only; `INTEGRATION`/`VALIDATION`/`RELEASE` are
+  unreachable in the derived path (empty `PHASE_OWNERS`), and a
+  documentation/review-only endgame **regresses the phase to `REQUIREMENTS`**
+  because those owners are in no tuple.
+- **Agent registry**: 10 ids. `GLOBAL_SYSTEM_RULES` is read only by
+  `system_rules()` and is therefore unreachable by a subclass that replaces
+  `SYSTEM_RULES` (all 10 do) — that separation is load-bearing, do not merge the
+  two blocks. `firmware_agent` is a deliberate second registration of
+  `SoftwareAgent`.
+- **Checkpoint id kinds**: `cp-000-init`, `cp-phase-<name>`, `cp-milestone-<slug>`,
+  `cp-risk-<id>`, `cp-auto-<NNN>`. Lowercase phase names (`cp-phase-release`).
 
-## Live gap-analysis PoC run (2026-09-30, `/tmp/esp32-os-gap`)
+---
 
-- Ran the esp32-os gap analysis end-to-end on an rsync copy (`/tmp/esp32-os-gap`): 7-task plan + planner-proposed `TASK-008` → all 8 tasks DONE; `docs/GAP_ANALYSIS.md` materialized and copied to `/tmp/esp32-os-gap/gap_analysis.md` AND `/media/alireza/microos/projects/esp32-os/gap_analysis.md`. Suite now **323 passed** (327 after G9).
-- **Truncation root cause:** the ollama server default `num_ctx` is 4096 — prompt (≈4017) + completion (79) hit it exactly, cutting JSON mid-object. `LLMClient` now sends `num_ctx`/`num_predict`; `extract_json_block` raises `agent output looks truncated` when the outer object never closes (previously it silently parsed a balanced INNER fragment → bogus dict → misleading "Output summary must not be empty").
-- **JSON salvage:** `_repair_json_candidate()` (base_agent) repairs invalid backslash escapes (`docs\config.md`, broken `\uXXXX`) and bare control chars (raw newlines) inside strings — gemma4:12b emits trailing `\` line-continuations in markdown tables inside JSON.
-- **Stale payload fix:** dispatch phase1 reloads the task after `update_task_status`/`record_attempt` — agents previously received the pre-update dict and saw `READY`; the review_agent used that to refuse work as "not executed".
-- **Model refusals (gemma4:12b, temp 0):** intermittently returns `status: failed` with fabricated text ("connection timeout", "REQUIREMENTS empty, preventing gap analysis") — no such strings exist in the code. Mitigation that worked: put instructions in the task `notes` ("weak/empty inputs are GAPS to report, never a reason to refuse"), remove the fixation-triggering file from `input_files`, and clear `notes`/`last_error`/output-hash echoes before retrying (they leak into the payload and get parroted).
-- `RequirementsAgent` is a deterministic `REQ-###` parser — 0 findings on esp32-os is VALID (the absence of formal requirements is itself a major gap); `docs/REQUIREMENTS.md` was rewritten as a coverage-analysis finding instead of a void.
-- Loop-counter resets for justified retries: `update_task_execution(task, strategy_changed=True)` (resets `attempts_since_change`) or `set_values` to zero `no_progress_cycles`/`evidence_stall_count`/`repeated_output_count`/`last_output_hash`/`last_loop`; `update_task_status` accepts any transition (FAILED→READY works). `attempts`/`status` from plan edits: edit TASKS.yaml directly (plan strips `input_files` — set it there).
-- Long CLI runs must be detached (double-fork + `setsid`, output to a log): the bash tool kills the whole process group at its timeout. One runner process at a time against a project (state file is read-modify-write across processes).
-- **G9 (2026-09-30): planned tasks now carry `input_files`/`notes`.** `_normalize_plan_specs` whitelists both (input_files: strings, ≤12; notes: str ≤600); `build_plan` validates paths via `_validated_input_files` (existing plain files, project-relative only, no absolute/`..`) and falls back to `_plan_context_files(limit=4)` when nothing valid remains; `_plan_source_index()` lists ~60 real source paths in the PLAN-001 notes so the model can cite genuine files (`kernel/kernel.c`). Root cause it fixes: regenerated plans had `input_files: None` → context-starved agents refused with fabricated "missing input data / connection timeout" and went BLOCKED (research_agent ×2). Contract text + `PlanningAgent.SYSTEM_RULES` + `framework/05` + `AGENT_PROMPTS/05` + HOW_TO_USE task example updated; 4 tests in `test_auto_plan.py::TestPlanInputFiles`; suite **327 passed**.
-- Follow-up refinements still needed after a plan: a review/synthesis task must have its predecessor's artifact added to `input_files` manually (e.g. `docs/GAP_ANALYSIS.md` doesn't exist at plan time → reviewer refuses), and missing cross-deps (`review → report task`) must be wired by editing TASKS.yaml.
-- Second full PoC run (fresh `init --force` + rsync copy, 2026-09-30 14:42): 6/6 tasks DONE first try except the two refinements above; `gap_analysis.md` delivered to `/tmp/esp32-os-gap/` and `/media/alireza/microos/projects/esp32-os/`.
-- **G10 — anti-refusal rules + recovery UX (2026-09-30 15:0x).** hardware_agent refused 3× with fabricated "missing physical access / no datasheet" → `same_strategy` 3/3 → HUMAN_DECISION_REQUIRED, and a shell `for` loop then re-refused every cycle, dumping the full health report each time. Fixes: (a) `BaseAgent.OFFLINE_EXECUTION_RULE` is appended to **every** agent's `system_rules()` — missing evidence/inputs/files are FINDINGS (UNKNOWN/TBD), never a reason for blocked/failed; only a pending DECISIONS.md decision justifies blocking. HardwareAgent also gained an explicit "you never have physical access to boards or datasheets" bullet. (b) New CLI **`retry TASK [--reason TEXT]`**: resets `attempts_since_change`/`strategy_changes`/`no_progress_cycles`/`evidence_stall_count`/`repeated_output_count`/`last_output_hash`/`last_error`, promotes READY/FAILED/IN_PROGRESS → READY, then `refresh_ready_states()` (BLOCKED promotes only when deps are met), appends CHANGELOG.md; exit 2 for unknown/terminal tasks. Dispatch gate is **live** off execution counters (`should_block_dispatch → detect_loops`), so a counter reset is sufficient — the persisted task `loops:` block is audit-only. (c) `run` prints `hint: fix the task inputs/strategy, then run \`orchestrator retry <id>\`` on loop refusals (both cycle and `--task` paths; `--task` still exits 3 early). (d) Idle cycles now print a 2-line summary (`No READY tasks available.` + `Health: X`) instead of the full report — stop run loops with `|| break` (exit 3 = loop, 4 = HUMAN_DECISION). Docs: GUIDE CLI table + loop-recovery step, HOW_TO_USE troubleshooting row; 7 new tests (`TestRetryCommand` ×6 + offline-rule ×1) → **334 passed**.
-- Third PoC run (user's stuck graph, 2026-09-30 15:20): `retry TASK-003 --reason ...` → 4 cycles → **6/6 DONE, RELEASE/HEALTHY**; report re-delivered to both roots. Proven runbook: `for i in $(seq 1 11); do ./bin/orchestrator --project <p> run --max-tasks 8 || break; done`.
-- **G11 — plan producer wiring + fresh init baseline (2026-09-30, from the user's 4th run).** Two defects their log exposed: (a) `init --force` over a reused workspace warned `init checkpoint not created` and left the PREVIOUS run's `cp-000-init` (stale baseline) — `cmd_init` now `delete_checkpoint("cp-000-init")` before creating; (b) the model emitted the final `review_agent` task with `dependencies: []` while its `input_files` named `docs/GAP_ANALYSIS.md` (TASK-005's `expected_outputs`) → review ran in wave 1 and "validated" the STALE report from the previous run (rsync without `--delete` leaves old artifacts!). Fix: `MasterOrchestrator._wire_plan_producer_deps()` runs right after `_normalize_plan_specs` — on the model's **requested** input_files (before existence filtering, which would drop exactly those not-yet-created artifacts) it adds producer edges (cycle-guarded via `depends_on`) and `_topo_sorted_plan()` re-sorts, because `append_task` raises on forward references. Contract + framework/05 document the rule. Tests: `TestPlanProducerWiring` ×3, `test_init_force_refreshes_baseline_checkpoint` → **338 passed**. Legacy contract kept: raw model forward-deps are still dropped (`test_build_plan_drops_forward_dependencies`) — only verified producer edges may reorder the graph.
-- Runbook gotcha: rsync WITHOUT `--delete` keeps previous runs' artifacts (`docs/GAP_ANALYSIS.md`, audits) which then feed agents as stale context — always `rm -rf <workspace>` before re-copying for a pristine PoC.
-- **G12 — review_status contract + tolerant repair (2026-09-30, user's 5th run).** TASK-005 (review_agent) FAILED with `must return data.review_status of PASS / PASS WITH ACTIONS / FAIL`. Root causes: `ReviewAgent.SYSTEM_RULES` never stated the output contract; `_normalize_review_outcome` accepted only a few spellings; candidates used `or` (first truthy won even when invalid) with a useless `output.status` fallback. Fixes: rules now spell out the contract; `output_from_parsed` tries `review_status`/`outcome`/`verdict`/`decision`/`review.status`/`review.outcome`/`status` in order through a widened synonym map (LGTM/PASSED/APPROVED→PASS; CONDITIONAL PASS/APPROVED WITH COMMENTS/PASS WITH FINDINGS→PASS WITH ACTIONS; CHANGES REQUESTED/NEEDS WORK/NOT APPROVED→FAIL); the error includes the received values. `LLMAgent.execute` now converts `AgentOutputError` → `failed()` with the raw model snippet (was: traceback through dispatch). `run`'s retry hint now covers ALL failed results, not just loop refusals. Tests: `TestReviewOutcomeRepair` ×14, `test_failed_task_run_prints_retry_hint` → suite **353 passed**.
-- **G13 — uninitialized-workspace hint (2026-09-30, user's 6th run).** After `rm -rf` + rsync the user skipped the `init` step: `run` failed with bare `ERROR: State file not found: /tmp/esp32-os-gap/TASKS.yaml`. `main()` now catches `StateFileMissingError` first and prints the exact recovery line (`orchestrator init <name> --dest <parent> --force --goal "<your goal>"`), plus a HOW_TO_USE troubleshooting row; test `test_uninitialized_workspace_prints_init_hint`. PoC runbook: always chain steps 1+2 with `&&` (`rm -rf … && rsync … && init …`) so state can never be wiped without re-init.
-- **G14 — deliverable pitfalls in PoC run 7 (2026-09-30).** Fresh init regenerated a *different* plan (model variance): TASK-006 declared `gap_analysis.md` (root) but the agent actually wrote `docs/gap_analysis.md` as a task wrapper (header + JSON block); the real report text lived JSON-escaped under `data.gap_analysis_report`. Two consequences: (a) the root file that satisfied DoD was the **stale 18:53 copy rsync'd back from the source repo** (my earlier delivery to the source root got re-imported) — DoD only checks existence, so a pre-existing deliverable falsely passes; (b) runbook `cp docs/GAP_ANALYSIS.md …` fails because the report path varies per plan. Fixes: deliverables extracted to clean markdown at both roots (md5 `3b6d2a29…`, 1630 B); runbook rsync now uses `--exclude gap_analysis.md` (documented in HOW_TO_USE "Test on a copy"); always locate the report via the last task's `expected_outputs` (`orchestrator tasks`) before copying. Suite **354 passed** (added `test_uninitialized_workspace_prints_init_hint`).
-- **G16 — authoring contract + `data.edits` (2026-09-30, gap-1 E2E run).** First "resolve gap #1 via agentic-ai" run finished 6/6 DONE but every implementation deliverable was a **fallback wrapper** (JSON summaries): agents were never told how to deliver file content, DoD passed on file existence, and a cabling doc was clobbered by a wrapper (restored from source). Fix: `AUTHORING_CONTRACT` appended to every agent's `system_rules()` (full body via `data.documents["<path>"]`; surgical patch via `data.edits["<path>"] = {search, replace}` or a LIST of steps applied in order; summary-only ≠ delivered; never fabricate executed results); `_apply_edits` patches real project files in place with safety (project-relative, exactly-once match, atomic write, precise failure errors) and mirrors post-edit content into `data.documents` so DoD sees the real body; materialization also accepts file bodies flattened onto `data` (models ignore nesting). Tests: `TestEditsAuthoring` ×8 + flat-key test → 51 in-file.
-- **G16 E2E results (same date):** tool-driven resolution of gap #1 (GPIO4→GPIO13 SD CS re-map) — `plan --force` generated analysis→implement→docs→test→gap-update→review; rework cycles needed: flip DONE→READY in TASKS.yaml with exact recipes in `notes` (retry refuses terminal DONE); requirements_agent is a **deterministic parser — structurally incapable of authoring** (T5 owner switched to documentation_agent); supervisor loop guards fired correctly twice (`same_strategy`/`repeated_output` 3/3 on identical parse outputs and identical review verdicts → escalation + `retry` hint); final: review **PASS**, root `gap_analysis.md` marks gap #1 RESOLVED, `#define SD_CS 13` landed in `main/storage_service.c`, agent-authored `test_sd_pin_map.c` builds under `-Wall -Wextra -Werror -Wpedantic`, **ctest 17/17** in workspace AND source; all artifacts delivered to `projects/esp32-os` (source repo not committed — dirty pre-existing state). Gotcha: my `-DCMAKE_BUILD_TYPE=Release` (-DNDEBUG strips asserts) fake-flagged pre-existing `test_hid_parser.c` → TASK-007 appended then **CANCELLED** (invalid premise; default build type is green). Manual graph ops: DONE→READY via TASKS.yaml edit, `retry` for counter resets, `append_task` for new work, `CANCELLED` for invalid tasks.
-- **G17 — truncation-repair (2026-09-30, screensaver-issue run).** TASK-003 (software_agent) failed with "not parseable JSON / outer JSON object never closed" — gemma4:12b echoed whole input files into `data.documents` and blew the 8192-token cap, truncating the JSON mid-string (risk RISK-001 + phase checkpoint recorded correctly; starvation escalation pushed health to HUMAN_DECISION_REQUIRED as designed). Fix: `LLMAgent._repair_truncated_output` — on any parse failure, ONE follow-up call resends the prompt + `REPAIR_NOTE` (compact JSON under 500 tokens, edits-only, no file bodies, head of failed attempt for intent); success → completed with warning `output recovered via truncation-repair`, failure → original error detail + `truncation-repair attempt also failed`. AUTHORING_CONTRACT gained "Never echo whole input files back…". Tests `TestTruncationRepair` ×3 → 54 in-file. Recovery recipe for affected runs: `retry TASK-003` then `run`.
-- **G18 — DoD content plausibility (2026-10-01, screensaver-issue run).** TASK-003 went DONE with **zero real edits**: the model returned only prose metadata (719 tokens, no `edits`/`documents` keys — `implementation_scope`, `files_changed` list…), materialized as wrapper mirrors in `docs/input_service.c` etc.; existence-only DoD passed while `diff` vs source showed identical files (fabricated `docs/test_results.log` + "10-minute UI run" claims in SCREENSAVER_FIX.md rode along). Fix: `definition_of_done` now compares each existing project file against its `docs/` mirror — must share ≥1 line of ≥12 chars (`_shares_meaningful_line`); skipped for `docs/`-relative expected outputs (self-compare), new files (no project file), and path escapes. `data.edits` mirrors post-edit content → passes; prose JSON wrappers → `DoD unmet: … shares no line … use data.edits`. Tests `TestDefinitionOfDone` ×2 → 56 in-file, suite **372**. Recovery recipe: flip `status: READY` on TASK-003, `retry`, rerun.
-- **G19 — failure-feedback loop + DoD auto-repair (2026-10-01, architecture review after 4 failed T3 attempts).** Root cause of repeated failures: `retry --reason` wrote ONLY to CHANGELOG while `cmd_retry` **cleared `last_error`** → every attempt dispatched blind; the model repeated the identical prose-metadata mistake (attempts 2 and 4); DoD rejections also stored the claiming summary as `notes`. Fixes: (1) `cmd_retry` stores feedback as `execution.retry_reason` (reason + carried previous error, or error alone), surfaced by `relevant_context` as `recovery_feedback_from_previous_attempt` and rendered with the task JSON in every prompt; cleared by `update_task_execution(reset_error=True)` on success; schema default in `append_task`. (2) `BaseAgent.repair_delivery` (default None) / `LLMAgent.repair_delivery`: after a DoD rejection, dispatch makes ONE repair call with `DOD_REPAIR_NOTE` + the problem list, re-applies `_apply_edits` + materializes, re-runs DoD — symmetric to G17 parse repair; best-effort (`except Exception → None` keeps old failure path). (3) DoD-FAILED branch stores `error_text` as the note, not the summary. DoD helper hardened: tiny files (no ≥12-char line) fall back to any-shared-line so post-edit short files pass. Tests: `TestDoDAutoRepair` ×6 (incl. dispatch integration with `resolve_agent` monkeypatched) + `TestRetryCommand` ×2 → suite **380**. Review noted as known limits: no compiler in the loop (attempt-3 broken C passed structural DoD — human `ctest`/`idf.py build` is the gate), fabricated execution claims in T5 remain advisory.
-- **G20 — multi-turn edit-session delivery (2026-10-01, "update architecture in a different way").** The batch architecture (one giant JSON must be parseable + contain real edits + be semantically right, then structural DoD judges it) caused every T3 failure (truncation, prose metadata, blind retries, documents-bypass hole where a full-body `data.documents` for an existing file passes content checks while the real file stays untouched). Redesign: (1) `LLMAgent.EDIT_SESSION_TURNS = 3` on `SoftwareAgent` → `_execute_edit_session`: bounded multi-turn loop — each turn asks ONLY for the next change set (small JSON, appended `EDIT_SESSION_INSTRUCTION` after the big output format), deterministic `_apply_edits` + materialize between turns, `delivery_problems()` verifies the **workspace**, and apply errors / remaining DoD problems become the next turn's feedback; successful change sets recorded as `data.edits_applied` and `edits` popped so `run()` never re-applies; last failing turn → `failed` with problems; per-turn `logger.info`. (2) **Single source of delivery truth**: `shares_meaningful_line` + `delivery_problems(project, task, output)` moved to `base_agent.py`; `definition_of_done` delegates (existence + content overlap + NEW documents-bypass rule: existing non-docs file delivered only via `data.documents` → `already exists — deliver it with data.edits`). (3) Prompt-level `EDIT_SESSION_INSTRUCTION` with turn/feedback; truncation repair still available inside the loop. Tests `TestEditSession` ×6 (converge-with-feedback, apply-error feedback, max-turns give-up, documents-bypass DoD, single-shot boundary, dispatch end-to-end) → suite **386**. Docs: GUIDE "Edit session (G20)" + framework/07 contract. Session NOT yet enabled for test/documentation agents (new-file wrappers for .md/.c still pass — known future work).
-- **G21 — `reopen` subcommand (2026-10-01).** User question "why we need sed?": sed is only ever needed for terminal statuses (`retry` already handles FAILED/READY/IN_PROGRESS), and hand-editing TASKS.yaml by line number is fragile (lines shift on rewrite). New `orchestrator reopen TASK --reason TEXT`: overturns DONE / DONE WITH ACCEPTED LIMITATION / CANCELLED → READY, resets loop counters, stores the required reason as `execution.retry_reason` (feeds the next prompt via the G19 feedback loop), records `reopen TASK-00X from DONE: …` in CHANGELOG; refused with guidance for non-terminal statuses (→ `retry`) and missing reason. `retry`'s terminal error now points at `reopen`. Shared `_recovery_feedback(task, reason)` helper extracted for retry+reopen. Tests `TestReopenCommand` ×4 → suite **390**; GUIDE subcommand list+row, HOW_TO_USE troubleshooting row. Follow-up: empty `--reason` (flag with no value) died in argparse (`expected one argument`) — `nargs="?"` on retry/reopen/waive `--reason` now routes to the friendly handler errors; test `test_reopen_empty_reason_shows_friendly_error_not_argparse` → 391.
-- **G22 — delivery manifest + real-file creation (2026-10-01, user: "this pattern failed more than 3 times — change the implementation").** Three-repetition failure chain diagnosed on esp32-os-gap2: TASK-003's expected outputs (`main/usb_hid_service.c`, `hal/input/hid_parser_minimal.c`) pre-existed in the source repo but NOTHING told the model — it delivered via `data.documents`, the G20 bypass rejected it, and the 3-turn session burned out on an error it was never given the fact to avoid; TASK-004 was marked DONE having created only `docs/display_ra8875.c` because the real `hal/display/display_ra8875.c` never existed — the root cause: `data.documents` only ever wrote `docs/` mirrors and `data.edits` refuses missing targets, so **no channel could create a new real file** and DoD never required one. Redesign (post-hoc errors → pre-flight facts): (1) `delivery_manifest` in `relevant_context()` classifies every expected output EXISTS→`data.edits` / MISSING→`data.documents` / docs deliverable before generation; (2) `preexisting_expected()` task-start snapshot threaded through `_execute_edit_session`, `_materialize_artifacts` and dispatch-time `definition_of_done(..., preexisting=…)` — files the task creates mid-session are never mistaken for repo files (redelivery converges); (3) `data.documents` now writes the real path for missing expected files (never a pre-existing one, never the rendered wrapper fallback); (4) dispatch DoD rejects content delivered only to `docs/` when the real file is missing (`expected output missing from the project`) — but only when content was actually delivered (rendered report artifacts like requirements-agent output keep legacy mirror-only acceptance); bypass message reworded to `exists in the project — update it with data.edits`. AUTHORING_CONTRACT documents both channels. Tests `TestDeliveryManifest` ×6 (manifest content, contract mention, real creation, preexisting untouched, TASK-004 pattern rejected, session redelivery converges) → suite **397**. Docs: GUIDE "Delivery manifest (G22)", HOW_TO_USE 2 troubleshooting row. Same run exposed the NEXT gap: TASK-003 failed with `search matched 0 time(s)` because the edit target (`main/usb_hid_service.c`, not in `input_files`) was never in the payload — the model edits blind. Addendum: existing expected outputs are now inlined as `expected_output:<path>` in `relevant_context` (32K/file, 40K total budget; `prompt_builder.EXPECTED_RENDER_LIMIT=44000` so the 8000-char middle-truncation never hides a snippet window), and `_edits_current_content` injects each failed target's authoritative body into the session's apply-error feedback. TASK-004 verified fixed for real: `hal/display/display_ra8875.c` (1872 B) created by documents (G22 creation end-to-end). Tests +4 -> **401**.rows. NOTE: `solve` one-command + `data.deploy` flash channel (user's prior request) still pending next.
-- **G23 — gap2 end-state + the missing last mile (2026-10-01, DOCS-ONLY by user directive: "do not change anything — update documents and github").** State after `0d04d8f` (401 tests): TASK-001..005 DONE, **TASK-006 (Update Documentation and Gap Analysis) still READY** — the graph was not run to completion. Honest per-task outcome of the gap-2 run in `/tmp/esp32-os-gap2`: TASK-003 = **no-op delivery** (`main/usb_hid_service.c` is byte-identical to the source repo — that code pre-existed from the user's own Sep-19 work; the agent verified it and refreshed the `docs/` mirrors, no code changed); TASK-004 = genuinely created `hal/display/display_ra8875.c/.h` via the G22 documents-creation channel, but they are **mocks** (`Mock SPI functions for offline execution/testing`; own warning: "requires integration with ESP-IDF spi_master driver") — they will not drive real hardware as-is; TASK-005 = integration test suite authored under `docs/` and explicitly marked **NOT RUN** (agents cannot execute anything — offline by design). **The pipeline ends at "files updated in a workspace copy"**: `/tmp/esp32-os-gap2` changed, the original `/media/alireza/microos/projects/esp32-os` was never touched, nothing was built, nothing was flashed — which is exactly why the connected ESP32 shows no change (user-observed, 2026-10-01). The final mile (`idf.py build` → `idf.py -p /dev/ttyACM0 flash`) requires the designed-but-**NOT-implemented** `data.deploy` channel (agent emits allowlisted build/flash commands → orchestrator executes → output feeds back to the agent). Feasibility pre-checked: device `/dev/ttyACM0` present, user in `dialout`, ESP-IDF v6.1 at `/media/alireza/PROJECTS/esp-idf-v6.1-beta1`, `esptool.py` installed, prior `build/esp32_os.bin` exists. **User paused implementation after repeated failures: docs-only updates until further notice.** Manual way to close the loop today: sync the workspace back to the source repo, `source /media/alireza/PROJECTS/esp-idf-v6.1-beta1/export.sh`, `idf.py build`, `idf.py -p /dev/ttyACM0 flash monitor`.
-- **G15 — goal echo + placeholder warning (2026-09-30, run 8).** The user copied my runbook placeholder `--goal "…"` verbatim; the literal `…` persisted in `PROJECT_MEMORY.md` and the planner (no goal signal) built a generic "demo the project" graph → `docs/DEMO_GUIDE.md`, no gap analysis. Also confirmed: `firmware_agent` is a **dual registration** of the software agent class (`@register_agent("firmware_agent")` + `@register_agent("software_agent")`, `AGENT_ID = "software_agent"`) so `tasks` shows plan owner while the dispatch log showed the class id — log now includes `(owner: …)`; not a bug. Fixes: `_echo_goal()` prints `Goal: …` (160-char truncation) in `cmd_init` and `cmd_plan` (plan falls back to the `## Goal` section of stored PROJECT_MEMORY.md, mirroring `build_plan`) and warns on placeholder goals (`…`, `...`, `<your goal>`, `TBD*`) to stderr; tests `test_init_echoes_real_goal_without_warning`, `test_init_warns_on_placeholder_goal`, `TestPlanCommand` ×2; HOW_TO_USE `--goal` row + troubleshooting row. Live re-run with the real goal: `Goal:` echo visible, 6 tasks TASK-001..006.
+## Test layout
 
-## Known leftovers (tracked in `review_gaps.md`)
+Root-level `test_*.py` (T1–T20 + gap-remediation + parallel + supervisor +
+derived-state + docs-consistency) plus `tests/` for the security and regression
+suites added during remediation:
 
-- Status: A1–A8, B1–B7, C1–C3, D1–D3, E1–E2 all remediated (see the per-section ✅/🔶 status lines). Nuances: A3 partial (stale-block detector approximates `blocked_by ⊄ task.dependencies`), A7 integration/release ride `cp-phase-RELEASE`, B5 on-demand, B3 review/docs checks remain structural.
-- Hygiene: `.gitignore` now ignores `projects/*` except `projects/kid-robot-face/` (E2) and all of `checkpoints/` (E1); example scaffolds created by HOW_TO_USE/README quick starts stay untracked. An untracked `projects/my-project/` created earlier by docs examples was removed during the 2026-09-30 review.
-- Repo synced on `origin/main` as of `5dc41fc`. **Standing rule (user, 2026-09-30): after every batch of updates, update git (commit + push) and keep the docs in sync with the code changes** — no need to re-ask first.
+| File | Covers |
+|---|---|
+| `tests/test_hmac_verification.py` | CRIT-03 — signing truth table, tampering, key rotation |
+| `tests/test_deploy_ground_truth.py` | CRIT-01 — runner refusals, live execution, DoD evidence |
+| `tests/test_task_status_injection.py` | CRIT-05 — status/execution injection |
+| `tests/test_state_io_and_contracts.py` | HIGH-01/02/03/04 — atomic writes, single-parse derived state, deploy contract |
+| `tests/test_concurrent_appends.py` | CRIT-06 — concurrent append + id allocation |
+| `tests/test_medium_gaps.py` | MED-01/02/03, HIGH-14, LOW-10 — telemetry, cycles, compaction, README, counts |
 
-## Project LLM backend config
+Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
+`checkpoints_root`, `FakeLLMClient`, `_task`, `FakeDeployRunner` (+ the
+`fake_deploy_runner` / `disabled_deploy_runner` / `failing_deploy_runner`
+variants), and two autouse fixtures: `_redirect_default_checkpoints` and
+`block_external_network`.
 
-- **Repo-root `.env` (gitignored, 2026-09-30):** sets `ORCHESTRATOR_LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://192.168.0.200:11434`, `ORCHESTRATOR_LLM_MODEL=gemma4:12b`. The CLI auto-loads it via `config.maybe_load_env_file()` (setdefault; skipped when `PYTEST_CURRENT_TEST` is set so tests stay offline). `.env.example` is committed. Verified: `main([])` outside pytest → provider `ollama`, model `gemma4:12b`.
-- Caveat: as of 2026-09-30 the host `192.168.0.200` answers `/api/tags` (gemma4:12b, phi4, qwen2.5-coder:14b, gemma4:26b, deepseek-coder present) — earlier note that port 11434 was closed is stale; it is serving now.
+---
 
-> opencode's own config (`~/.config/opencode/`) is tooling setup, **not** project state — keep it out of this file and out of the repo docs.
+## Docs map (what to trust for what)
+
+| Need | Read |
+|---|---|
+| Runtime behaviour, env vars, DoD, integrity model | `ORCHESTRATOR_GUIDE.md` |
+| Operator walkthrough, troubleshooting table | `HOW_TO_USE.md` |
+| Findings of record (62 gaps) | `ARCHITECTURE_COMPLIANCE_AUDIT.md` |
+| Env defaults + how to generate keys | `.env.example` |
+| Findings-vs-status for A1–E2 (older pass) | `review_gaps.md` |
+| Framework spec (agent contracts) | `framework/00–10` — **see drift note above** |
+| Runbook for a PoC against a real project | `HOW_TO_USE.md` "Test on a copy" |
+
+---
+
+> opencode's own config (`~/.config/opencode/`) is tooling setup, **not** project
+> state — keep it out of this file and out of the repo docs.
