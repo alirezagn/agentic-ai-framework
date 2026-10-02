@@ -26,6 +26,7 @@ from typing import List, Optional
 from . import config
 from .agents.base_agent import agent_names
 from .checkpoint_manager import CheckpointError
+from .path_policy import PathPolicyError, validate_relative_name
 from .orchestrator import (
     LoopLimitExceededError,
     MasterOrchestrator,
@@ -104,13 +105,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument(
         "name",
-        help="Project name (created at <dest>/<name>, default dest: projects)",
+        help=(
+            "Project name (created at <dest>/<name>, default dest: projects). "
+            "When --dest already ends with this name, it is used directly "
+            "instead of nesting a second copy"
+        ),
     )
     init_parser.add_argument(
         "--dest",
         dest="dest",
         default="projects",
-        help="Parent directory for the new project (default: projects)",
+        help=(
+            "Parent directory for the new project (default: projects). If its "
+            "final component equals the project name, it is used as the "
+            "project directory itself"
+        ),
     )
     init_parser.add_argument(
         "--goal",
@@ -338,13 +347,54 @@ def _echo_goal(goal: str) -> None:
         )
 
 
+def resolve_init_target(dest: Optional[str], name: str) -> Path:
+    """Directory ``init`` will scaffold ``name`` into.
+
+    ``init`` joins ``<dest>/<name>``, which is right when ``--dest`` is a
+    *parent* directory but wrong when the user has already named the output
+    folder themselves::
+
+        init my_app --dest /tmp      ->  /tmp/my_app          (parent given)
+        init my_app --dest /tmp/my_app -> /tmp/my_app         (folder given)
+
+    The second form used to produce ``/tmp/my_app/my_app``. That is not a
+    cosmetic difference: the project then lives one level below where the user
+    pointed, so the path they pass to every later ``--project`` is wrong, and the
+    duplicated directory is what they see when they go looking for it.
+
+    So when the last component of ``--dest`` already *is* the project name, the
+    destination is used as-is. Compared on the final component only, which keeps
+    a parent that merely happens to share the suffix (``--dest /srv/my_appiles``)
+    nesting correctly.
+
+    The match is exact. A case-differing name (``--dest /tmp/My_App`` with
+    ``init my_app``) still nests, deliberately: guessing at case-insensitive
+    filesystems would silently reinterpret the user's path, whereas an extra
+    level is visible and reversible.
+    """
+    parent = Path(dest) if dest else Path("projects")
+    if parent.name and parent.name == name:
+        return parent
+    return parent / name
+
+
 def cmd_init(args: argparse.Namespace) -> int:
-    name = getattr(args, "name", None)
+    name = str(getattr(args, "name", None) or "").strip()
     if not name:
         print("error: project name is required", file=sys.stderr)
         return 2
-    dest = getattr(args, "dest", None) or "projects"
-    target = Path(dest) / name
+    # The name becomes a directory component, so it must be a safe *relative*
+    # path, not merely non-empty. Without this check `init "../../tmp/evil"
+    # --dest /some/where` resolves outside --dest and scaffolds a complete
+    # project wherever the traversal lands; it was previously blocked only by
+    # accident, when the destination happened to exist and tripped the --force
+    # guard.
+    try:
+        name = validate_relative_name(name, context="project name")
+    except PathPolicyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    target = resolve_init_target(getattr(args, "dest", None), name)
     force = bool(getattr(args, "force", False))
     if target.exists() and not force:
         print(

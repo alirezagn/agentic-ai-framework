@@ -50,10 +50,15 @@ documentation) is written so the project is runnable immediately. Options:
 
 | Flag | Effect |
 |---|---|
-| `--dest DIR` | Parent directory (default `projects/`) |
+| `--dest DIR` | Parent directory (default `projects/`). If `DIR` already *ends with the project name*, it is used as the project directory itself rather than nesting a second copy — `init my-app --dest /srv/my-app` creates `/srv/my-app`, not `/srv/my-app/my-app`. Only the final path component is compared, so `--dest /srv/my-apps` still creates `/srv/my-apps/my-app` |
 | `--goal TEXT` | One-sentence goal written into `PROJECT_MEMORY.md` and used for planning; `init`/`plan` echo it as `Goal:` and warn if it looks like a placeholder (`…`) |
 | `--force` | Overwrite state files of an existing directory |
 | `--no-plan` | Skip LLM planning; write the starter skeleton tasks instead |
+
+The project name becomes a directory name, so it is validated: it is trimmed of
+surrounding whitespace, and an empty or traversing name (`..`, `../evil`,
+`/etc/evil`, `a/b/../../c`) is refused with exit code 2 rather than scaffolding a
+project outside `--dest`.
 
 Alternative: copy the 7 templates from `project-templates/` by hand
 (see `project-templates/NEW_PROJECT_CHECKLIST.md`).
@@ -503,5 +508,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 895 passed
+python3 -m pytest -q      # 927 passed
 ```
