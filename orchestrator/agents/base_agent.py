@@ -27,6 +27,7 @@ from typing import Any, Callable, Collection, Dict, List, Optional, Set, Type
 
 from .. import config
 from ..context_monitor import payload_chars
+from ..import_contract import import_contract_problems
 from ..prompt_builder import (
     DATA_CONTRACT_INSTRUCTIONS,
     DEPENDENCY_AUTOMATION_INSTRUCTIONS,
@@ -156,17 +157,19 @@ def delivery_problems(
       creates missing expected files at their real path, so by delivery time
       the real file must exist — a ``docs/`` mirror alone is not a delivery.
 
+    Independently of ``expected_outputs``, every file this task delivered is
+    also run through :func:`orchestrator.import_contract.import_contract_problems`:
+    an import that names a producer function the producer does not define, or
+    a file that does not parse, blocks the delivery too — the static half of
+    ``INTERFACE_ALIGNMENT_CONTRACT``, so a guessed interface fails here with
+    the exact statement instead of failing in the operator's terminal.
+
     ``preexisting`` is the task-start snapshot (see
     :func:`preexisting_expected`); when ``None`` the current filesystem state
     is used as the snapshot.
     """
     problems: List[str] = []
-    expected = task.get("expected_outputs") or []
-    if not isinstance(expected, list):
-        return problems
     project = Path(project_path)
-    docs_dir = project / "docs"
-    preexisting_set = set(preexisting) if preexisting is not None else None
     data: Dict[str, Any] = {}
     if output is not None and isinstance(output.data, dict):
         data = output.data
@@ -174,6 +177,13 @@ def delivery_problems(
     edits = data.get("edits") if isinstance(data.get("edits"), dict) else {}
     applied = data.get("edits_applied") if isinstance(data.get("edits_applied"), list) else []
     delivered = set(documents) | set(edits) | set(applied)
+    problems.extend(import_contract_problems(project, delivered))
+
+    expected = task.get("expected_outputs") or []
+    if not isinstance(expected, list):
+        return problems
+    docs_dir = project / "docs"
+    preexisting_set = set(preexisting) if preexisting is not None else None
 
     def has_channel(name: str, filename: str) -> bool:
         return name in delivered or filename in delivered
@@ -444,7 +454,13 @@ INTERFACE_ALIGNMENT_CONTRACT = (
     "the file again or report it as a finding -- do not guess quietly.\n"
     "- When the producer and the consumer cannot both change, adapt once, in "
     "one named conversion function, and say in the code comment which producer "
-    "field maps to which consumer field."
+    "field maps to which consumer field.\n"
+    "- Every import you deliver is statically verified at delivery time: the "
+    "checker parses your files and confirms each intra-project name exists in "
+    "the module that exports it, and that the file parses at all. A guessed "
+    "name fails the Definition of Done with the exact import statement and the "
+    "names the producer really defines — that failure comes back to you as one "
+    "repair round, so read the file instead of inferring from the domain."
 )
 
 
