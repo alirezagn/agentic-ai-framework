@@ -232,6 +232,150 @@ DATA_CONTRACT_INSTRUCTIONS = (
 )
 
 
+#: Per-module interface specification injected into software_agent prompts only.
+#:
+#: DATA_CONTRACT_INSTRUCTIONS states the general obligation to everyone.
+#: DATA_CONTRACT_SPEC is the concrete, fill-in-the-blanks form for the one agent
+#: that writes the crossing, and it is injected only for that agent: a
+#: requirements agent has no modules to declare, and a contract it cannot use is
+#: prompt budget spent on text the model must ignore.
+#:
+#: Two shapes are offered deliberately, because the failure in
+#: ``projects/sys_mon_gui`` was a producer returning a nested mapping that a
+#: widget consumer indexed as a float. Either declare the true shape and convert,
+#: or declare a scalar accessor -- but make the choice explicit, in the module
+#: that owns the boundary.
+#: Obligation for agents that build runnable applications, especially GUIs.
+#:
+#: The failure this prevents is *low fidelity*, not a crash: a delivered Tkinter
+#: app that runs, but is a default-styled single progress bar on a grey
+#: background with no telemetry, no chart axes, and nothing to interact with. It
+#: satisfies the letter of a task like "add a progress bar" and is not the
+#: dashboard that was asked for. Every one of those omissions is invisible to a
+#: test that only checks the app starts.
+#:
+#: It is paired with a data contract because the two failures share a cause: an
+#: agent optimises for the smallest thing that satisfies the sentence in front of
+#: it. See :data:`DATA_CONTRACT_INSTRUCTIONS` for the shape half.
+UI_CONTRACT_INSTRUCTIONS = (
+    "Application contract — deliver a runnable application, not a fragment:\n"
+    "- ENTRY POINT IS MANDATORY. For an application project (anything with a UI, "
+    "a server, a loop, or a CLI), you MUST deliver an executable `main.py` at the "
+    "PROJECT ROOT. It constructs every dependency, wires the modules together, and "
+    "runs the main loop or dispatches the CLI. A library plus a README is not a "
+    "delivered application: nobody can start it, so nothing downstream can be "
+    "verified against it. If the task did not list main.py in expected_outputs, add "
+    "it.\n"
+    "- SCHEMA MATCH IS MANDATORY. Every structure a backend collector returns must "
+    "match what its consumer actually reads, exactly: a TypedDict/Pydantic model "
+    "declared once and imported by both sides, or a scalar accessor when the "
+    "consumer only needs one number. A consumer written against a different shape "
+    "than the producer emits is the single most common integration defect, and it "
+    "is free to prevent by declaring the shape rather than inferring it.\n"
+    "- VERIFY SIGNATURES BEFORE YOU IMPLEMENT. Before writing any code that calls "
+    "another module, read that module and copy its signature verbatim: name, "
+    "capitalisation, every parameter in order, keyword-only arguments, and the "
+    "return type. Do not reconstruct a signature from domain vocabulary, and do "
+    "not write a call site first and fit the definition to it afterwards. A "
+    "signature you have not read is an assumption, and assumptions at the seam are "
+    "what break the integration.\n"
+    "- A GUI MUST NOT BE A BARE WIDGET. Shipping a lone default-styled progress bar "
+    "understates the task and reads as a placeholder, whatever the task text says. "
+    "A dashboard task means a composed layout. See the UI fidelity spec for the "
+    "required elements; they are not optional decoration.\n"
+    "- Fidelity is checkable, so check it. Run the app through data.deploy and "
+    "confirm the interface actually renders; a `data.test_status` of PASS with no "
+    "executed record for the entrypoint is a fabrication."
+)
+
+#: Concrete UI requirements, injected into software_agent prompts only.
+#:
+#: Kept separate from :data:`UI_CONTRACT_INSTRUCTIONS` because the palette and
+#: widget list are only meaningful to the agent writing the view layer, while the
+#: obligation above applies to everyone. Same split as
+#: :data:`DATA_CONTRACT_SPEC`.
+UI_FIDELITY_SPEC = (
+    "UI fidelity spec — a dashboard means all of the following, not a subset:\n"
+    "- LAYOUT: a composed structure, not one widget on a root window. A header, a "
+    "row of metric cards, and a chart region, laid out with pack/grid so the "
+    "window is resizable without overlap or clipping.\n"
+    "- DARK MODE PALETTE: use the concrete values rather than inventing them. "
+    "Window/canvas background `#0f172a`, card and chart surface `#1e293b`, bar "
+    "track `#334155`, primary text `#f8fafc`, secondary/axis text `#94a3b8`, and "
+    "distinct accents per series (e.g. `#38bdf8` CPU, `#a855f7` RAM, `#34d399` "
+    "disk). Consistent colour is what makes a set of numbers read as one system.\n"
+    "- STATUS INDICATOR: show live state (normal/degraded/error) with a visible "
+    "colour or label change. A dashboard that looks identical when the data has "
+    "stopped arriving is misleading, not merely plain.\n"
+    "- METRIC TELEMETRY CARDS: one card per metric, each with a label, the current "
+    "value formatted to a fixed precision (e.g. `12.3%`), and a filled bar.\n"
+    "- CUSTOM CANVAS CHART: plot history on a Canvas rather than relying on a "
+    "single bar — with gridlines, AXES AND LABELS, a visible legend for each "
+    "series, and a time axis. An unlabelled line on a blank canvas is not a chart "
+    "a reader can interpret.\n"
+    "- INTERACTIVE CONTROLS: at least one real control the user can operate — a "
+    "slider (interval or history length), a start/pause or refresh button, or a "
+    "selector — wired to actually change behaviour. Decorative controls that do "
+    "nothing are worse than none.\n"
+    "- GUARD THE UPDATE LOOP: the periodic callback must tolerate a short, missing "
+    "or malformed reading and keep the UI responsive, and every widget call must "
+    "use a real option name (`padx`/`pady`, never `px`/`py`) — an invalid option "
+    "raises TclError at construction, before anything is visible."
+)
+
+
+DATA_CONTRACT_SPEC = (
+    "Module interface spec — declare the cross-module surface EXACTLY, for "
+    "every module you create or consume:\n"
+    "For each public method or function that crosses a module boundary, state:\n"
+    "  1. NAME, verbatim, including capitalisation, exactly as defined in the "
+    "file you read.\n"
+    "  2. PARAMETERS: every positional argument in order, with types; then "
+    "keyword-only arguments by name. Never invent a parameter.\n"
+    "  3. RETURN TYPE, at one of two levels of precision:\n"
+    "     (a) a TypedDict / Pydantic model, when the payload is structured "
+    "(---\n"
+    "         class RamStats(TypedDict):\n"
+    "             total_gb: float\n"
+    "             available_gb: float\n"
+    "             percent_used: float\n"
+    "         class Metrics(TypedDict):\n"
+    "             cpu_percent: float\n"
+    "             ram: RamStats\n"
+    "             disk: RamStats\n"
+    "     ), or\n"
+    "     (b) a SCALAR return value (float/int/str), when the consumer only "
+    "needs one number --\n"
+    "         def ram_percent_used() -> float: ...\n"
+    "     Choosing (b) at the producer, or an explicit "
+    "`ram[\"percent_used\"]` accessor, is what prevents a widget receiving a "
+    "dict where it needs a float.\n"
+    "  4. RAISES: what it throws when the dependency is unavailable, and what "
+    "the caller must do about it.\n"
+    "Non-negotiable while implementing:\n"
+    "- Read the producer file before you call it. Match the signature you find; "
+    "do not reconstruct it from the domain vocabulary.\n"
+    "- Never index a nested mapping as though it were a scalar, and never hand a "
+    "scalar to code that indexes keys. Convert in one named function at the "
+    "crossing.\n"
+    "- No defensive `.get(a, .get(b, 0.0))` chains. An uncertain key is a "
+    "reason to re-read the file or report a finding, not to guess: a fallback "
+    "renders as 0.0 and hides the mismatch permanently.\n"
+    "- Keep main.py at the project root importing every module, so the declared "
+    "interfaces are actually exercised together.\n"
+    "- The error path returns the SAME declared shape (an `error: Optional[str]` "
+    "field or a documented Union), never a bare {\"error\": str} that matches "
+    "nothing else."
+)
+
+#: Agents whose prompts receive :data:`DATA_CONTRACT_SPEC` in addition to the
+#: global contract. software_agent is the agent that writes and crosses module
+#: boundaries; firmware_agent is deliberately excluded for now -- it shares the
+#: 07_SOFTWARE_FIRMWARE spec file, so adding it here is a one-word change once
+#: firmware tasks actually carry module boundaries.
+DATA_CONTRACT_SPEC_AGENTS = frozenset({"software_agent"})
+
+
 class PromptBuilderError(RuntimeError):
     """Raised when a prompt cannot be assembled from the supplied payload."""
 
@@ -364,6 +508,16 @@ def build_prompt(
         "# Dependency obligation\n" + DEPENDENCY_AUTOMATION_INSTRUCTIONS
     )
     sections.append("# Data contract obligation\n" + DATA_CONTRACT_INSTRUCTIONS)
+    # Per-agent interface spec. Keyed off payload["agent_id"], which build_payload
+    # sets from self.AGENT_ID, so the strictest form lands on the agent that
+    # actually writes module boundaries -- and on nobody else.
+    # Not base_agent.normalize_agent_name: that module imports this one, so
+    # importing it back would be circular. It is exactly strip().lower().
+    agent_id = str(payload.get("agent_id") or "").strip().lower()
+    if agent_id in DATA_CONTRACT_SPEC_AGENTS:
+        sections.append(
+            f"# Module interface spec ({agent_id})\n" + DATA_CONTRACT_SPEC
+        )
     return "\n\n".join(sections)
 
 
@@ -377,6 +531,10 @@ __all__ = [
     "OUTPUT_FORMAT_INSTRUCTIONS",
     "DEPENDENCY_AUTOMATION_INSTRUCTIONS",
     "DATA_CONTRACT_INSTRUCTIONS",
+    "UI_CONTRACT_INSTRUCTIONS",
+    "UI_FIDELITY_SPEC",
+    "DATA_CONTRACT_SPEC",
+    "DATA_CONTRACT_SPEC_AGENTS",
     "DEFAULT_MEMORY_LIMIT",
     "DEFAULT_CONTEXT_FILE_LIMIT",
     "framework_specs_dir",

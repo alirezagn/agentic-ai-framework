@@ -48,6 +48,7 @@ existing file through `data.edits`. A summary that merely *describes* a file doe
 deliver it — the Definition of Done checks the file on disk.
 
 ## Rules (system rules)
+- Specify each cross-module method's exact signature and return type in `docs/ARCHITECTURE.md`, so a consumer is written against a declaration rather than a sample
 - Define every cross-module value's exact type in `docs/ARCHITECTURE.md` as a `TypedDict` or Pydantic model
 - Cover every section the spec requires — mark the ones you cannot fill TBD rather than omitting them
 - Create `ARCHITECTURE.md` with `data.documents`; patch an existing one with `data.edits`
@@ -61,6 +62,14 @@ deliver it — the Definition of Done checks the file on disk.
 - **Keep the error path in the schema** — an error result satisfies the same declared shape (`error: Optional[str]`, or a documented Union), never a different shape such as a bare `{"error": str}`. The failure path is the one nobody writes the consumer for
 - **Wire an entrypoint** — deliver a runnable `main.py` at the project root that imports and runs the components end to end through the conversion wrappers
 - **Test the crossing** — a test feeding real producer output into the real consumer, including the error path. Per-component green plus a broken integration is the failure this prevents
+
+## Entry point and interface alignment (non-optional)
+- **Deliver a root `main.py`** whenever a task produces runnable components — a GUI, a CLI, a service, a loop. It imports every module the task delivers, wires dependencies in order, converts shapes at the crossing, and enters the run loop (`root.mainloop()`, CLI dispatch, serve loop)
+- Keep side effects inside `main()` guarded by `if __name__ == "__main__":` so importing `main.py` in a test neither opens a window nor blocks
+- Add `main.py` to `expected_outputs` so the Definition of Done verifies it exists and runs
+- Deliver it even when every module already exists — that is exactly the state in which a project is unrunnable
+- **Read the producer before writing the consumer.** Before generating a module that imports another, read those files and match the method name, positional argument order, keyword names and return structure **verbatim**. Never call a method you have not seen defined
+- **No defensive guess chains.** `.get("percent_used", .get("percent", 0.0))` converts a loud `TypeError` into a silent wrong value that displays as `0.0` forever. Re-read the file, or report a finding — do not guess
 
 ## Definition of Done
 The architecture document is materialized with every mandated section present.

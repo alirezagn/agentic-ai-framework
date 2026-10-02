@@ -383,6 +383,70 @@ DATA_DEPLOY_CONTRACT = (
 )
 
 
+#: Mandatory entry point for any runnable application (GAP: unrunnable projects).
+#:
+#: Observed in ``projects/sys_mon_gui``: three modules, each internally correct
+#: and each individually green under test, and no way to run them. The only
+#: thing that made the application real was a ``main.py`` written by hand
+#: afterwards, importing every module, adapting shapes and starting the loop.
+#:
+#: The gap is structural, not stylistic: nothing in a per-task deliverable list
+#: says "and something has to tie these together", so a multi-module project
+#: arrives as modules. Every task can pass its own Definition of Done and the
+#: result still cannot be started.
+ENTRYPOINT_CONTRACT = (
+    "Entry point contract — a project with an application must be runnable:\n"
+    "- If the task delivers runnable components (a GUI, a CLI, a service, a "
+    "long-running loop), you MUST also deliver a main.py at the PROJECT ROOT. "
+    "It is not optional polish: without it the delivered modules cannot be "
+    "started, and a reviewer has no way to observe the thing you built.\n"
+    "- main.py must import EVERY module the task delivers, instantiate their "
+    "dependencies in the correct order, convert shapes at the crossing, and "
+    "enter the run loop (root.mainloop(), the CLI dispatch, the serve loop).\n"
+    "- Handle argv minimally but honestly (a --help path or an explicit "
+    "entrypoint function), and keep all side effects inside a main() guarded by "
+    "if __name__ == \"__main__\": so importing main.py in a test does not start a "
+    "window or block the process.\n"
+    "- Add main.py to expected_outputs so the Definition of Done checks it "
+    "exists and actually runs, rather than being assumed.\n"
+    "- Deliver it even when every module already exists and looks complete. "
+    "That is precisely the state where a project is unrunnable."
+)
+
+#: Interface discipline when writing a consumer against an existing producer.
+#:
+#: The companion failure to a missing entry point: a consumer written without
+#: reading the code it calls. In ``sys_mon_gui`` the adapter had to guess between
+#: `ram["percent_used"]` and `ram["percent"]` and paper over it with
+#: ``.get("percent_used", .get("percent", 0.0))`` -- a fallback chain that hides
+#: the mismatch instead of resolving it, and that silently yields 0.0 forever if
+#: the real key ever changes. Guessing is what turns a type error into a wrong
+#: number displayed on screen.
+INTERFACE_ALIGNMENT_CONTRACT = (
+    "Interface alignment contract — read the producer before writing the "
+    "consumer:\n"
+    "- Before generating ANY module that imports another, you MUST read the "
+    "existing file(s) it will call, in the payload context or on disk, and match "
+    "what you call VERBATIM: the method name and its capitalisation, the "
+    "positional argument order, the keyword names, and the exact structure of "
+    "the return value.\n"
+    "- Never call a method you have not seen defined in a file you have read, "
+    "and never invent a parameter name. An assumed signature is a TypeError at "
+    "best and wrong data at worst.\n"
+    "- Match the producer's actual return SHAPE, including nesting and field "
+    "names -- a nested \"ram\": {\"percent_used\": 50}} consumed as a flat float, "
+    "or a flat metrics[\"ram\"] read as a mapping, is the error. Read the "
+    "keys; do not infer them from the domain.\n"
+    "- Do NOT wrap an uncertain call in a defensive fallback chain such as "
+    "`.get(a, .get(b, 0.0))`. That converts a loud TypeError into a silent wrong "
+    "value that renders as 0.0 forever. If a shape is genuinely ambiguous, read "
+    "the file again or report it as a finding -- do not guess quietly.\n"
+    "- When the producer and the consumer cannot both change, adapt once, in "
+    "one named conversion function, and say in the code comment which producer "
+    "field maps to which consumer field."
+)
+
+
 class BaseAgent:
     AGENT_ID = "base_agent"
 
@@ -472,6 +536,11 @@ class BaseAgent:
         # what every agent's system_rules() delivers, so it is the only place
         # the obligation reaches a model at all.
         + DATA_CONTRACT_INSTRUCTIONS
+        # Mandatory entry point and interface discipline. Both live here, in the
+        # block every agent's system_rules() actually delivers, because a
+        # deliverable-list-shaped task never asks for either one.
+        + ENTRYPOINT_CONTRACT
+        + INTERFACE_ALIGNMENT_CONTRACT
     )
 
     def __init__(
