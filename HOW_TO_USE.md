@@ -380,7 +380,11 @@ ORCHESTRATOR_DEPLOY_ENABLED=1
 ORCHESTRATOR_DEPLOY_ALLOWLIST=ctest,cmake,python3
 ```
 
-Both are required — enabling with an empty allowlist stays inert.
+Both are required — enabling with an empty allowlist stays inert. A literal
+`*` entry means "any executable" (`ORCHESTRATOR_DEPLOY_ALLOWLIST=*`); the
+sandbox (`shell=False`, project cwd, scrubbed environment, timeout,
+transcript) still applies. Writing `*` used to be read as the basename `*`,
+so every command was refused while the channel looked enabled.
 
 **How an agent uses it.** The agent proposes what to run in `data.deploy`; the
 runner decides whether it ran and reports the real exit code:
@@ -536,6 +540,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | `… exists in the project — update it with data.edits` | the file pre-existed at task start; `data.documents` never modifies it — `retry TASK-00X` (the manifest tells the agent this before generation) |
 | run finished `HEALTHY` but the ESP32 shows no change | the execution channel is **off by default** — nothing is built or flashed. Enable it (§8b) and let the task request `data.deploy`, or close the loop yourself: `source /media/alireza/PROJECTS/esp-idf-v6.1-beta1/export.sh && idf.py build && idf.py -p /dev/ttyACM0 flash` |
 | `docs/*.log` or docs "Verification Results" claim tests ran | with the channel **off** an agent cannot execute, so any such claim is unverified — the DoD now rejects it and the task is `FAILED` rather than silently `DONE`. Enable the channel (§8b) so the claim can be backed by a transcript, or have the agent report `NOT RUN` |
+| `DoD unmet: output claims an executed verification … report test_status=NOT RUN` | the task produced a test-like report without saying what ran. `data.test_status = "NOT RUN"` (or a summary that plainly says `NOT RUN`) satisfies it — the one repair round now shows the model exactly that JSON instead of the old "deliver file content" text; `retry TASK-00X` if the reply predates the fix |
 | `task declared data.deploy but nothing was executed` | the executable is not on `ORCHESTRATOR_DEPLOY_ALLOWLIST`, or `ORCHESTRATOR_DEPLOY_ENABLED` is unset. The refusal reason is in the task note; add the basename to the allowlist and `retry TASK-00X` |
 | deploy record shows `status: skipped` with reason `requirements already satisfied: …` | the interpreter is PEP 668 externally managed and the packages are already installed — pip was never spawned, so nothing ran. An all-skip result passes only when the task claims nothing and has no test-like outputs; a claim of passing tests over skipped records alone is still rejected (`NOT RUN` or a real run) |
 | `error: externally-managed-environment` from pip | the runner appends `--break-system-packages` only when pip targets the orchestrator's own environment — for `--target`/`--root` installs or another interpreter, use a project virtualenv instead |
@@ -547,5 +552,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1191 passed
+python3 -m pytest -q      # 1209 passed
 ```

@@ -1,8 +1,8 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (checkpoint-overwrite batch: a stale `cp-risk-*`
-> directory can no longer fail a dispatch; suite now **1191 collected, 1190
-> passed / 1 failed** — the failure is still OPEN-1)
+> Last updated: 2026-10-03 (evidence-repair batch: the DoD repair note is now
+> problem-aware, prose `NOT RUN` counts, `*` allowlist; suite now **1209
+> collected, 1208 passed / 1 failed** — the failure is still OPEN-1)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -18,10 +18,10 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1191 collected, 1190 passed / 1 failed** — `python3 -m pytest -q`,
-  211 s, 2026-10-03. The single failure is **OPEN-1** below (local
+- **Suite: 1209 collected, 1208 passed / 1 failed** — `python3 -m pytest -q`,
+  189 s, 2026-10-03. The single failure is **OPEN-1** below (local
   `checkpoints/` state, not a code regression). The number the four docs assert
-  is the *collected* count (1191) and is current.
+  is the *collected* count (1209) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -135,18 +135,19 @@ kept as the record of what was wrong, not as current state.
      dangling entry. No test in the suite deletes local checkpoints, so this was
      external.
    3. The test reads **gitignored, mutable** `checkpoints/` — it is not hermetic,
-      so the whole suite can go red on local state alone. The other 1190 pass.
+      so the whole suite can go red on local state alone. The other 1208 pass.
    Choices, none taken yet: repair the index entry (restores green, hides the
     bug), make the delete transactional, or have the test assert "dangling index
-    entry" clearly instead of throwing. **Do not write "1191 all passing" until
+    entry" clearly instead of throwing. **Do not write "1209 all passing" until
     one of them lands.**
 
 - **OPEN-2 — stale count prose (partly fixed this pass).** The four
   consistency-checked docs (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`,
   `README.md`, `review_gaps.md`) are asserted against `pytest --collect-only`
-  and are currently at **1191** (1103 before `tests/test_architecture_redesign.py`
+  and are currently at **1209** (1103 before `tests/test_architecture_redesign.py`
   added 52; 1160 after `run --all` added 5; 1185 after the import contract
-  added 25; 1191 after `tests/test_checkpoint_overwrite.py` added 6), so
+  added 25; 1191 after `tests/test_checkpoint_overwrite.py` added 6; 1209 after
+  `tests/test_repair_remedies.py` added 15 and 3 allowlist cases), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched). The "passed" phrasing in
@@ -200,7 +201,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~210 s, 1191 tests).
+- Run full pytest after every change: `python3 -m pytest -q` (~190 s, 1209 tests).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
   evidence — see OPEN-1.
@@ -400,6 +401,40 @@ kept as the record of what was wrong, not as current state.
      reproduced sequence (failing dispatch → RISKS.md reset → re-dispatch
      keeps the task's own `connection refused` error and one refreshed index
      row).
+  7. **Evidence rejections are now answerable** (2026-10-03, live failure on
+     `sys_mon_full` TASK-006) — the single hardcoded `DOD_REPAIR_NOTE` claimed
+     *every* DoD rejection was "valid JSON but did not deliver real file
+     content" and ordered file edits, so for an evidence rejection
+     (`report test_status=NOT RUN`) the model re-delivered files, never set
+     the field, and a legitimate NOT RUN task failed twice.
+     `repair_remedies(problems)` (`orchestrator/agents/llm_agent.py`) picks
+     the remedy block from the problem markers: evidence → the exact
+     `{"data": {"test_status": "NOT RUN"}}` JSON and "do not re-deliver";
+     import → "patch the consumer with data.edits"; content → the original
+     file guidance; unclassified → generic. Second, independent escape:
+     `_reports_not_run()` (`orchestrator/orchestrator.py`) accepts `NOT RUN`
+     stated in the **summary** when the same output does not also claim
+     execution — a fabricated "NOT RUN" only loses information, while a
+     fabricated pass still needs a ground-truth record.
+  8. **`ORCHESTRATOR_DEPLOY_ALLOWLIST=*` means any executable** — it used to
+     be compared as the literal basename `*`, so an operator who enabled the
+     channel with `*` got "enabled" plus a refusal for *every* command
+     (`pip`, `python` refusals in a live run). `_resolve_executable` now
+     treats a `*` entry as allow-all; `shell=False`, project cwd, scrubbed
+     env, timeout and transcript still apply, and the project-directory
+     confinement for relative paths is unchanged.
+  9. **Operator project `projects/sys_mon_full` repaired by hand** (not
+     framework): `src/gui_controller.py` renamed its guessed
+     `get_metrics_snapshot` → `get_system_metrics` (the drift the import
+     contract now blocks at DoD), the CPU card denominator was
+     `disk_total` instead of `100.0` (the bar rendered ~0.1%), a
+     `ttk.Progressbar(bootcolor=…)` option that does not exist crashed the
+     window at construction (now a per-card `ttk.Style`), and
+     `tests/test_monitor.py` patched/asserted `…get_metrics_snapshot` and
+     `cpu_card_label`, names the app never had. Verified: their suite 4/4
+     green and `python3 main.py` runs the window for 6 s without an
+     exception (`timeout 6`, exit 124). Entry point is **`main.py`** —
+     `python3 src/gui_controller.py` can never work with a relative import.
 
 
 ---
@@ -413,7 +448,7 @@ suites added during remediation:
 | File | Covers |
 |---|---|
 | `tests/test_hmac_verification.py` | CRIT-03 — signing truth table, tampering, key rotation; **OPEN-1 lives in its `TestLegacyMetadata` real-on-disk test** |
-| `tests/test_deploy_ground_truth.py` | CRIT-01 — runner refusals, live execution, DoD evidence |
+| `tests/test_deploy_ground_truth.py` | CRIT-01 — runner refusals, live execution, DoD evidence (+ the `*` allowlist: any executable, disabled channel still inert, traversal still confined) |
 | `tests/test_task_status_injection.py` | CRIT-05 — status/execution injection |
 | `tests/test_state_io_and_contracts.py` | atomic writes, single-parse derived state, deploy contract (its "HIGH-01..04" labels are the *state I/O* batch, not audit IDs) |
 | `tests/test_concurrent_appends.py` | CRIT-06 — concurrent append + id allocation |
@@ -430,6 +465,7 @@ suites added during remediation:
 | `tests/test_architecture_redesign.py` | 52 tests — truncation/chunked-JSON recovery, PEP 668 `--break-system-packages` + satisfied-install skip, skip-vs-DoD evidence, decomposition scope/chains/starter seeding |
 | `tests/test_import_contract.py` | 25 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, DoD wiring, prompt promise |
 | `tests/test_checkpoint_overwrite.py` | 6 tests — `cp-risk-*` collision replaces instead of raising; strict default kept; source validated before delete; dispatch keeps its own error and best-effort snapshotting |
+| `tests/test_repair_remedies.py` | 15 tests — problem-aware repair note (evidence/import/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
 `checkpoints_root`, `FakeLLMClient`, `_task`, `FakeDeployRunner` (+ the

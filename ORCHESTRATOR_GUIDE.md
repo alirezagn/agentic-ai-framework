@@ -351,8 +351,15 @@ dispatch batch, `_run_pending_reviews()` routes them to `dispatch_review()`:
 Unmet → task `FAILED` with `DoD unmet: …`. Before failing cold, dispatch makes
 **one auto-repair round**: the DoD problems are sent back to the agent
 (`repair_delivery`), which may re-materialize a real delivery; LLM agents
-re-ask the model, deterministic agents skip. The DoD rejection is stored as the
-task note (not the claiming summary) so the next attempt sees honest context.
+re-ask the model, deterministic agents skip. The note is **problem-aware**
+(`repair_remedies`, `orchestrator/agents/llm_agent.py`): an evidence rejection
+gets the exact JSON that sets `data.test_status`, an import rejection gets
+"patch the consumer with `data.edits`", a content rejection gets the original
+file-content guidance — one hardcoded "it did not deliver real file content"
+note used to answer *every* rejection, so a model told to fix evidence with
+file edits re-delivered files, never set the field, and a legitimate `NOT RUN`
+task failed. The DoD rejection is stored as the task note (not the claiming
+summary) so the next attempt sees honest context.
 
 #### Why an unevidenced claim becomes `NOT RUN`
 
@@ -379,8 +386,13 @@ When it fires, one of two things must be true:
   report accomplishes. A declared `expect` that disagrees with the real exit
   code also blocks.
 - **The agent reports `data.test_status = "NOT RUN"`.** An honest negative is
-  accepted and the task proceeds on its other merits. "I could not run this" is
-  a legitimate outcome; inventing a pass is not.
+  accepted and the task proceeds on its other merits. "I could not run this" is a
+  legitimate outcome; inventing a pass is not. A `NOT RUN` stated in the
+  **summary** instead of the field is accepted too (`_reports_not_run`) — the
+  substance is the same honest negative, and a model that will not move it into
+  the field would otherwise turn a legitimate outcome into a failed task. It is
+  honoured only when the same output does not *also* claim execution, so a
+  contradictory "NOT RUN … 42/42 passed" still needs ground truth.
 
 With neither, the task is `FAILED` and the note states the missing evidence —
 never the claim. The asymmetry is deliberate: refusing an unevidenced claim is
@@ -647,7 +659,7 @@ also auto-loads `./.env`, e.g. the repo's Ollama preset in `.env.example`):
 | `ORCHESTRATOR_CHECKPOINT_KEY_ID` | Identifies the signing key (default `default`). Bound into the signature, so a rotated secret reports `UNVERIFIABLE` rather than `TAMPERED` |
 | `CHECKPOINT_ALLOW_UNSIGNED` | `1` lets a snapshot whose signature cannot currently be checked fall back to checksums with a warning. Never allows a tampered snapshot to pass |
 | `ORCHESTRATOR_DEPLOY_ENABLED` | `1` enables the execution channel (`data.deploy`). **Default `0`** — the runtime is offline by design |
-| `ORCHESTRATOR_DEPLOY_ALLOWLIST` | Comma-separated executable **basenames** permitted to be spawned (e.g. `ctest,cmake,python3`). Entries are reduced to a basename, so a path cannot smuggle a different binary in. Empty means nothing can run |
+| `ORCHESTRATOR_DEPLOY_ALLOWLIST` | Comma-separated executable **basenames** permitted to be spawned (e.g. `ctest,cmake,python3`). Entries are reduced to a basename, so a path cannot smuggle a different binary in. A literal `*` entry means **any executable** (the sandbox — `shell=False`, project cwd, scrubbed env, timeout, transcript — still applies). Empty means nothing can run |
 | `ORCHESTRATOR_DEPLOY_TIMEOUT` | Per-invocation wall-clock seconds (default `300`; accepted range 1–3600) |
 | `ORCHESTRATOR_DEPLOY_MAX_OUTPUT` | Byte cap per captured stream (default `65536`; minimum 1024). The **tail** is kept, and truncation is reported explicitly |
 | `ORCHESTRATOR_DEPLOY_EVIDENCE_DIR` | Where transcripts are written, project-relative (default `docs/evidence`) |
@@ -791,7 +803,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1191 passed
+python3 -m pytest -q          # full suite — 1209 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ```
