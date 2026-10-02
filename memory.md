@@ -1,9 +1,8 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (static import contract batch: the DoD now parses
-> delivered Python and rejects imports naming a producer name that does not
-> exist; suite now **1185 collected, 1184 passed / 1 failed** — the failure is
-> still OPEN-1)
+> Last updated: 2026-10-03 (checkpoint-overwrite batch: a stale `cp-risk-*`
+> directory can no longer fail a dispatch; suite now **1191 collected, 1190
+> passed / 1 failed** — the failure is still OPEN-1)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -19,23 +18,22 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1185 collected, 1184 passed / 1 failed** — `python3 -m pytest -q`,
+- **Suite: 1191 collected, 1190 passed / 1 failed** — `python3 -m pytest -q`,
   211 s, 2026-10-03. The single failure is **OPEN-1** below (local
   `checkpoints/` state, not a code regression). The number the four docs assert
-  is the *collected* count (1185) and is current.
+  is the *collected* count (1191) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
   deliberately exercising one.
-- **Repo state:** branch `main`, **in sync with `origin/main`** (0 ahead / 0
-  behind) at commit `e7f3fd6` (run --all stop reasons). Working tree is **dirty
-  as I write this** with the import-contract batch (4 docs,
-  `orchestrator/agents/base_agent.py`, new `orchestrator/import_contract.py` +
-  `tests/test_import_contract.py`), plus the pre-existing intentional dirt:
-  `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`, the
-  still-tracked `projects/sys_mon/__pycache__/test_sys_mon…pyc`, and a stray
-  **0-byte file named `=`** in the repo root. Do not describe the tree as clean
-  until that is resolved, and do not sweep those files into an unrelated commit.
+- **Repo state:** branch `main`, **in sync with `origin/main`** after this
+  batch's push (hashes in the commits list below; last is `b678aa5` + its docs
+  commit). The only remaining tree dirt is the **pre-existing intentional**
+  dirt: `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`,
+  the still-tracked `projects/sys_mon/__pycache__/test_sys_mon…pyc`, and a
+  stray **0-byte file named `=`** in the repo root. Do not describe the tree as
+  clean until that is resolved, and do not sweep those files into an unrelated
+  commit.
 - **Commits since the audit pass** (all 2026-10-02): `1ee05ae` HIGH-01..04,
   `2c55657` dependency automation, `2cd1fed` completed `sys_mon` sample,
   `69a55d1` CLI init nesting fix, `2408d42` materializer no-op edit,
@@ -45,7 +43,8 @@
   Then (2026-10-02 night → 10-03): `ae8a721` truncation recovery + PEP 668
   deploys + goal-driven decomposition, `173dc75` docs (1155), `6c1feb8`
   `run_until_done.sh`, `802ce20` `run --all`, `b44ea3e` docs (1160), `e7f3fd6`
-  `run --all` stop reasons, `25be3eb` static import contract (1185).
+  `run --all` stop reasons, `25be3eb` static import contract (1185), `e623a70`
+  docs (1185), `b678aa5` checkpoint overwrite + best-effort snapshots (1191).
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -136,18 +135,18 @@ kept as the record of what was wrong, not as current state.
      dangling entry. No test in the suite deletes local checkpoints, so this was
      external.
    3. The test reads **gitignored, mutable** `checkpoints/` — it is not hermetic,
-      so the whole suite can go red on local state alone. The other 1184 pass.
+      so the whole suite can go red on local state alone. The other 1190 pass.
    Choices, none taken yet: repair the index entry (restores green, hides the
     bug), make the delete transactional, or have the test assert "dangling index
-    entry" clearly instead of throwing. **Do not write "1185 all passing" until
+    entry" clearly instead of throwing. **Do not write "1191 all passing" until
     one of them lands.**
 
 - **OPEN-2 — stale count prose (partly fixed this pass).** The four
   consistency-checked docs (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`,
   `README.md`, `review_gaps.md`) are asserted against `pytest --collect-only`
-  and are currently at **1185** (1103 before `tests/test_architecture_redesign.py`
-  added 52; 1160 after `run --all` added 5; 1185 after
-  `tests/test_import_contract.py` added 25), so
+  and are currently at **1191** (1103 before `tests/test_architecture_redesign.py`
+  added 52; 1160 after `run --all` added 5; 1185 after the import contract
+  added 25; 1191 after `tests/test_checkpoint_overwrite.py` added 6), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched). The "passed" phrasing in
@@ -201,7 +200,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~210 s, 1185 tests).
+- Run full pytest after every change: `python3 -m pytest -q` (~210 s, 1191 tests).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
   evidence — see OPEN-1.
@@ -382,6 +381,25 @@ kept as the record of what was wrong, not as current state.
      did not stop it — the app was broken at the operator's first launch with
      the task already DONE. Message names the producer file and the names it
      really defines. Tests: `tests/test_import_contract.py` (25).
+  6. **Checkpoint collisions never fail a dispatch** (2026-10-03, user-reported
+     live stall) — `orchestrator create_checkpoint` now saves with
+     `overwrite=True`: an existing directory for the same id is replaced
+     (source validated *first*, so a failed overwrite cannot destroy the old
+     snapshot) instead of raising. `CheckpointManager.create_checkpoint` keeps
+     `overwrite: bool = False` as its default, so direct/CLI callers that mean
+     "id must be new" still get `CheckpointExistsError`. The real stall: a
+     fresh plan rewrote `RISKS.md`, the next failing task re-allocated
+     `RISK-001`, and the stale `checkpoints/<proj>/cp-risk-RISK-001` directory
+     made `create_checkpoint` raise *inside dispatch finalize* — the task
+     failed with "Checkpoint … already exists" instead of its own error and
+     `run --all` stopped with 6/7 DONE. Additionally every finalize-path
+     snapshot (`cp-risk-*`, `cp-phase-*`, `cp-milestone-*`, `cp-auto-*`) runs
+     through `MasterOrchestrator._safe_auto_checkpoint()`, which logs and
+     returns `None` on error: a snapshot may be lost, the dispatch may not.
+     Tests: `tests/test_checkpoint_overwrite.py` (6), including the exact
+     reproduced sequence (failing dispatch → RISKS.md reset → re-dispatch
+     keeps the task's own `connection refused` error and one refreshed index
+     row).
 
 
 ---
@@ -411,6 +429,7 @@ suites added during remediation:
 | `tests/test_final_high_gaps.py` | audit HIGH-01..04 — pinned-agent isolation, checkpoint trigger evaluation, off-lock DoD repair, deep validation + reachability |
 | `tests/test_architecture_redesign.py` | 52 tests — truncation/chunked-JSON recovery, PEP 668 `--break-system-packages` + satisfied-install skip, skip-vs-DoD evidence, decomposition scope/chains/starter seeding |
 | `tests/test_import_contract.py` | 25 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, DoD wiring, prompt promise |
+| `tests/test_checkpoint_overwrite.py` | 6 tests — `cp-risk-*` collision replaces instead of raising; strict default kept; source validated before delete; dispatch keeps its own error and best-effort snapshotting |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
 `checkpoints_root`, `FakeLLMClient`, `_task`, `FakeDeployRunner` (+ the

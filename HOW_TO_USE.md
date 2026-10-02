@@ -305,6 +305,11 @@ design risks manually in the same format.
   (`cp-phase-<name>`), on recorded failure risks (`cp-risk-NNN`), and at
   context compaction (`cp-auto-NNN`); `orchestrator init` writes the
   `cp-000-init` baseline.
+- Saving an id that already exists **replaces** it, and every automatic
+  snapshot is best-effort: a checkpoint problem is logged, never returned as
+  a task error. (Before this, a stale `cp-risk-RISK-001` directory left by an
+  earlier plan made the *next* failing task fail with `Checkpoint … already
+  exists` instead of its own error, and `run --all` stopped short.)
 - Restore validates in three ordered stages: filenames in the snapshot manifest
   must be allowlisted project state files (so `../escape.txt` and absolute paths
   are refused before anything is opened), then SHA-256 checksums, then the
@@ -524,6 +529,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
 | `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings — the first rejection triggers **one automatic repair call**; if it still fails, `retry TASK-003 --reason "use data.edits on <file>"` (the reason reaches the next prompt) |
 | `DoD unmet: delivered docs/X shares no line with existing Y` | the model returned prose metadata instead of editing — the auto-repair call already fed this back once; retry with a more specific `--reason` if it repeated |
+| `Checkpoint 'cp-risk-RISK-001' already exists at …` | a stale snapshot from an earlier plan (its `RISKS.md` entry was rewritten away). Saving now **replaces** the directory and auto-checkpoints are best-effort, so this cannot fail a task anymore; on a project that failed before the fix, just `retry TASK-00X` |
 | `src/gui.py imports get_metrics_snapshot from .metrics_collector, which does not define it` | the consumer guessed the producer's name — the DoD parses both files with `ast` (nothing is executed) and the message lists what the producer really defines. The one repair round already fed this back; `retry TASK-00X` if it repeated. The same check catches a producer that removed a name an older file still imports, and a delivered file that does not parse |
 | `edits['…'] search matched 0 time(s)` | the model guessed a snippet — existing expected outputs are now inlined into the payload (`expected_output:<path>`), and the session feedback carries the file's current body; `retry TASK-00X` |
 | `expected output missing from the project: …` | the model delivered content only to `docs/` — `data.documents` writes the real path for files missing at task start; the `delivery_manifest` in the prompt now states the channel up front, so `retry TASK-00X` |
@@ -541,5 +547,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1185 passed
+python3 -m pytest -q      # 1191 passed
 ```

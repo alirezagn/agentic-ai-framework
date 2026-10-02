@@ -719,6 +719,20 @@ checkpoints/
 - **Milestone:** `cp-milestone-<slug>` once every task of a milestone is
   terminal; `cp-milestone-complete` when the whole graph is terminal
 - **Manual:** `orchestrator checkpoint save cp-001 --notes "…"`
+- **Id reuse replaces, it never aborts:** the orchestrator saves with
+  `overwrite=True`, so an existing directory for the same id is refreshed
+  instead of raising. These are bookkeeping snapshots: a fresh plan rewrites
+  `RISKS.md` and re-allocates `RISK-001` while the old `cp-risk-RISK-001`
+  directory is still on disk, and that collision used to fail the task with an
+  error *about the checkpoint*, hiding the task's own error and stopping
+  `run --all`. `CheckpointManager.create_checkpoint` stays strict unless
+  `overwrite=True` is passed explicitly, and the snapshot source is validated
+  **before** the old directory is removed.
+- **Auto-checkpoints are best-effort:** every snapshot in the dispatch
+  finalize path (`cp-risk-*`, `cp-phase-*`, `cp-milestone-*`, `cp-auto-*`)
+  runs through `_safe_auto_checkpoint()`, which logs and returns `None` on
+  error — the task's work is already persisted, so an I/O failure may cost
+  the snapshot, never the dispatch.
 - **Resume:** `resume_from_checkpoint()` restores files, reloads state, clears
   loop/oscillation history
 
@@ -777,7 +791,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1185 passed
+python3 -m pytest -q          # full suite — 1191 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ```
