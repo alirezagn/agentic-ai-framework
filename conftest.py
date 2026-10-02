@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import socket
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 import yaml
 
 from orchestrator.llm_client import LLMResult
+from orchestrator.state_manager import release_file_locks
 
 
 class FakeLLMClient:
@@ -394,3 +396,71 @@ def block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
 # Scoped to docs/ rather than a broad norecursedirs so a genuine test directory
 # is never hidden by accident.
 collect_ignore_glob = ["*/docs/*", "*/docs/**/*"]
+
+
+# ---------------------------------------------------------------------------
+# Descriptor hygiene
+# ---------------------------------------------------------------------------
+#
+# ``state_manager._file_lock`` caches one descriptor per lock file for the
+# lifetime of the process (that cache is what makes a nested document lock
+# re-entrant and cheap). A long-lived orchestrator working on one project never
+# notices: there are a handful of lock files. A test suite is the pathological
+# case -- every ``tmp_path`` produces fresh ``.TASKS.yaml.lock``-style files, so
+# each test permanently added three descriptors and one ``_LOCK_STATES`` entry.
+#
+# Measured: 3 descriptors per project, exhausting a low ``RLIMIT_NOFILE``
+# part-way through a full run with
+# ``OSError: [Errno 24] Too many open files``. ``gc.collect()`` cannot fix it --
+# the registry holds a strong reference to every handle, so they are reachable
+# objects rather than garbage. They have to be closed explicitly.
+_LAST_MODULE: str | None = None
+
+
+@pytest.fixture(autouse=True)
+def _release_state_file_locks():
+    """Close the advisory-lock descriptors a test accumulated.
+
+    Autouse and function-scoped so no test can leak, regardless of ordering or
+    of which module it lives in. Released both before and after: the pre-call
+    clears anything a previously collected module left behind, so the cost of a
+    leaked handle is one test rather than the rest of the run.
+
+    Deliberately does not run ``gc.collect()`` per test. This fixture is the
+    one that must be cheap, because it runs hundreds of times; the collection
+    pass below runs once per module, where its cost is amortised.
+    """
+    release_file_locks()
+    try:
+        yield
+    finally:
+        release_file_locks()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _collect_between_modules(request):
+    """Free reference-cycle garbage between test modules.
+
+    Complements :func:`_release_state_file_locks`, and addresses a genuinely
+    different problem: ``tmp_path`` objects and the state managers built from
+    them form cycles that the refcount alone cannot reclaim, so they linger until
+    a generational collection happens to run. Once per module is enough to bound
+    the growth and keeps the per-test path free of a full collection.
+    """
+    yield
+    global _LAST_MODULE
+    module = request.node.fspath.dirname
+    if module != _LAST_MODULE:
+        _LAST_MODULE = module
+        gc.collect()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Final sweep, so the process exits without holding lock descriptors.
+
+    A leaked descriptor here survives into whatever runs the suite next (an
+    editor's LSP, a coverage report, a subsequent test process in the same
+    shell), where it is invisible and unattributable.
+    """
+    release_file_locks()
+    gc.collect()

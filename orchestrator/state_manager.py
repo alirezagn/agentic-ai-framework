@@ -446,6 +446,54 @@ def _lock_state(lock_path: Path) -> _LockState:
     return state
 
 
+def release_file_locks() -> int:
+    """Close every cached advisory-lock handle and forget its state.
+
+    Returns the number of handles closed.
+
+    :func:`_file_lock` deliberately caches one descriptor per lock file for the
+    lifetime of the process -- that cache is what makes a nested
+    :func:`_document_lock` free instead of self-deadlocking. The cost is that
+    the descriptor is never closed, because the holder is assumed to be a
+    long-lived process working on a single project.
+
+    That assumption does not hold for a process that touches many distinct
+    lock paths, and a test suite is the pathological case: every ``tmp_path``
+    yields fresh ``.TASKS.yaml.lock``-style files, so each test permanently adds
+    entries to :data:`_LOCK_STATES` and open descriptors. Measured at three
+    descriptors per project, which is enough to exhaust a low
+    ``RLIMIT_NOFILE`` part-way through a full run::
+
+        OSError: [Errno 24] Too many open files: .../.PROJECT.yaml.xxxx.tmp
+
+    :func:`gc.collect` cannot help: :data:`_LOCK_STATES` holds a strong
+    reference to each handle, so they are reachable objects, not garbage.
+
+    Only entries whose depth is zero are released. A lock still held by this
+    process is left completely alone -- closing its handle would drop the lock
+    early and let a concurrent writer in.
+    """
+    released = 0
+    for key, state in list(_LOCK_STATES.items()):
+        if state.depth > 0:
+            continue
+        handle = state.handle
+        if handle is not None and not getattr(handle, "closed", True):
+            if fcntl is not None:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                handle.close()
+                released += 1
+            except OSError:
+                pass
+        state.handle = None
+        _LOCK_STATES.pop(key, None)
+    return released
+
+
 def atomic_dump_yaml(path: Path, data: Dict[str, Any]) -> None:
     """Serialize ``data`` to YAML and write it atomically under a file lock.
 
@@ -2195,6 +2243,7 @@ __all__ = [
     "strip_untrusted_task_fields",
     "atomic_write_text",
     "load_yaml_file",
+    "release_file_locks",
     "save_yaml_file",
     "load_text_file",
     "save_text_file",

@@ -455,3 +455,133 @@ class TestDeployContractReachesAgents:
             for problem in problems
             if "ground-truth" in problem or "verification" in problem
         ]
+
+
+# ===========================================================================
+# Descriptor hygiene — GAP: exhausted file descriptors over a full run
+# ===========================================================================
+
+
+def _open_fd_count() -> int:
+    """Descriptors held by this process (Linux only; skipped elsewhere)."""
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.is_dir():
+        pytest.skip("no /proc/self/fd on this platform")
+    return len(list(fd_dir.iterdir()))
+
+
+def _touch_project(root: Path, index: int) -> None:
+    """Exercise every state write path, so each lock file gets used."""
+    project = root / f"p{index}"
+    project.mkdir()
+    sm.save_yaml_file(project / "PROJECT.yaml", {"project": {"name": "p"}})
+    manager = sm.StateManager(project)
+    manager.save_tasks_document(
+        {"tasks": [{"id": "T-1", "title": "t", "owner": "planning_agent",
+                    "dependencies": []}]}
+    )
+    manager.load_project()
+    manager.append_current_state("touched")
+
+
+class TestLockDescriptorHygiene:
+    """``_file_lock`` caches one descriptor per lock file, forever.
+
+    Re-entrancy is why the cache exists, so it is not removed -- but a process
+    that touches many distinct lock paths must be able to release it. Each test
+    uses a fresh ``tmp_path``, so the suite is the worst case by construction.
+    """
+
+    def test_lock_states_do_not_grow_without_bound(self, tmp_path: Path) -> None:
+        """Many projects, releasing between each: no accumulation."""
+        for index in range(12):
+            _touch_project(tmp_path, index)
+            sm.release_file_locks()
+
+        assert len(sm._LOCK_STATES) == 0
+
+    def test_release_is_idempotent(self, tmp_path: Path) -> None:
+        _touch_project(tmp_path, 0)
+        first = sm.release_file_locks()
+        second = sm.release_file_locks()
+
+        assert first > 0
+        assert second == 0
+        assert len(sm._LOCK_STATES) == 0
+
+    def test_release_closes_the_descriptors(self, tmp_path: Path) -> None:
+        """Closed is the whole point -- the count must actually drop."""
+        before = _open_fd_count()
+        for index in range(8):
+            _touch_project(tmp_path, index)
+
+        leaked = _open_fd_count() - before
+        assert leaked > 0, "expected the unlocked run to hold descriptors"
+
+        closed = sm.release_file_locks()
+
+        assert closed >= leaked
+        assert _open_fd_count() - before < leaked
+
+    def test_gc_cannot_do_this(self, tmp_path: Path) -> None:
+        """Documents why the fixture closes handles instead of collecting.
+
+        ``_LOCK_STATES`` references every handle, so the handles are reachable
+        and a collection pass leaves them open. A regression here would mean
+        someone reintroduced the leak and reverted to ``gc.collect()`` as the
+        "fix".
+        """
+        import gc
+
+        _touch_project(tmp_path, 0)
+        before = _open_fd_count()
+        _touch_project(tmp_path, 1)
+        gc.collect()
+
+        assert _open_fd_count() > before, "handles became collectable; re-check the cache"
+
+        sm.release_file_locks()
+
+    def test_a_held_lock_is_not_closed(self, tmp_path: Path) -> None:
+        """Releasing must not drop a lock this process is still using."""
+        project = tmp_path / "held"
+        project.mkdir()
+        sm.save_yaml_file(project / "STATE.yaml", {"a": 1})
+        target = project / "STATE.yaml"
+
+        with sm._file_lock(target):
+            held = [
+                state
+                for state in sm._LOCK_STATES.values()
+                if state.depth > 0
+            ]
+            assert held, "expected a held lock while inside the context"
+            assert sm.release_file_locks() == 0
+            assert all(
+                state.handle is None or not state.handle.closed for state in held
+            )
+
+        # Once released, the descriptor goes away.
+        sm.release_file_locks()
+        assert not [s for s in sm._LOCK_STATES.values() if s.depth > 0]
+
+    def test_locking_still_works_after_release(self, tmp_path: Path) -> None:
+        """Releasing must not break the next acquisition."""
+        project = tmp_path / "reuse"
+        project.mkdir()
+        target = project / "STATE.yaml"
+        sm.save_yaml_file(target, {"round": 1})
+
+        for _ in range(3):
+            with sm._file_lock(target):
+                pass
+            sm.release_file_locks()
+            sm.save_yaml_file(target, {"round": 2})
+
+        assert target.read_text(encoding="utf-8")
+
+        # The last save legitimately re-acquires a lock, so release once more:
+        # the point is that re-acquisition works, not that the registry is empty
+        # while a write is in flight.
+        sm.release_file_locks()
+        assert len(sm._LOCK_STATES) == 0
