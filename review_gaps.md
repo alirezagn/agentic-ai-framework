@@ -441,7 +441,7 @@ the runtime (checkpoints are the persistence mechanism).
 ## G. Verification after remediation
 
 ```bash
-python3 -m pytest -q                    # 659 passed
+python3 -m pytest -q                    # 721 passed
 grep -n "PHASES\|phase_index" orchestrator/config.py      # A1
 grep -n "append_task\|relax_dependency" orchestrator/state_manager.py   # A2/A6
 grep -n "detect_decision_conflicts\|detect_stale_blocks" orchestrator/supervisor.py  # A3
