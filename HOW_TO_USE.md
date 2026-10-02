@@ -196,8 +196,13 @@ Critical path: TASK-001 -> TASK-002 -> TASK-003
 # one bounded cycle (all READY tasks, sequential)
 ./bin/orchestrator --project projects/my-project run --max-tasks 10
 
-# run until it stops making progress; `|| break` exits on the first
-# problem (3 = loop limit, 4 = human decision required)
+# everything: keep dispatching wave after wave until every task is terminal
+#   exit 0 finished · 3 blocked/stalled/loop limit/nothing READY · 4 decision
+./bin/orchestrator --project projects/my-project run --all --max-concurrent 3
+
+# the same thing spelled out as a loop (one `run` is one wave — tasks
+# unblocked by a wave only dispatch on the next call); `|| break` exits on
+# the first problem (3 = loop limit, 4 = human decision required)
 for i in $(seq 1 11); do
   ./bin/orchestrator --project projects/my-project run --max-tasks 10 || break
 done
@@ -485,6 +490,11 @@ orch.register_agent(MyAgent(state_manager=orch.state))   # pinned singleton
 $EDITOR projects/my-project/TASKS.yaml              # define work
 # start LLM session with framework/20_DEFAULT_PROJECT_START_PROMPT.md
 
+# hands-off: every wave until every task is terminal, then it stops for you
+# (exit 0 finished · 3 blocked/stalled/loop or nothing READY · 4 decision)
+./bin/orchestrator --project projects/my-project run --all --max-concurrent 3
+
+# or wave by wave, with health/checkpoint steps in between:
 ./bin/orchestrator --project projects/my-project run --max-concurrent 3
 ./bin/orchestrator --project projects/my-project health   # fix what it flags
 ./bin/orchestrator --project projects/my-project checkpoint save cp-auto
@@ -505,6 +515,8 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | task stuck in `WAITING` | a pending `PROPOSED_CHANGE` affects it — approve/reject the decision |
 | phase looks wrong | `phase show` (stored vs derived); `phase set <NAME>` to override |
 | `LOOP LIMIT` (exit 3) | fix the task's inputs, then `retry TASK-003 --reason "..."` to reset its loop counters; `run` prints the exact command in its hint |
+| `run --all` exits 4 with `a human decision is required` | a pending `PROPOSED_CHANGE` (or structural problem) blocks progress — approve/reject it, then rerun `run --all`; it stops rather than dispatching around the decision |
+| `run --all` exits 3 with `No READY tasks available` | the project is unfinished but nothing left can reach READY — `status` shows the reason (FAILED task needing `retry`, unmet/unknown dependency); fix it, then rerun `run --all` |
 | `retry … is DONE; retry applies to active tasks only` | for finished tasks use `reopen TASK-003 --reason "..."` — never `sed` TASKS.yaml (line numbers shift when the orchestrator rewrites it); `FAILED` tasks need only `retry` (no sed) |
 | task `FAILED` (agent/validation error) | read the printed error, fix the inputs or model output, then `retry TASK-005 --reason "..."` — the same hint appears in `run` output |
 | `agent output looks truncated` / reply cut mid-stream | local recovery runs first: a reassembled reply continues with a `recovered from a truncated payload` warning, a cut inside a file body returns `blocked` with a partial `data.edit_buffers` (nothing written to disk), and only an unsalvageable reply falls through to the one repair re-ask. Raise `ORCHESTRATOR_LLM_MAX_TOKENS` (§8) for data-heavy replies, then `retry TASK-00X` |
@@ -528,5 +540,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1155 passed
+python3 -m pytest -q      # 1160 passed
 ```

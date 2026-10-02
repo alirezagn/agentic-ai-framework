@@ -97,7 +97,7 @@ orchestrator [--project PATH] [--version] <command>
 | `init NAME [--dest DIR] [--goal TEXT] [--force] [--no-plan]` | Scaffold a valid project under `projects/` (default); writes (or refreshes, on re-init/`--force`) the `cp-000-init` baseline checkpoint, empty `constraints`/`budget`/`resources` blocks, and generates the task graph (LLM planning agent when a backend is configured, deterministic starter skeleton otherwise; `--no-plan` forces the skeleton) |
 | `status` | Print project/task summary + health recommendations |
 | `tasks` | Dependency-graph table (id, status, owner, deps, readiness) + critical path |
-| `run [--task ID] [--max-tasks N] [--max-concurrent N]` | Dispatch READY tasks (or one task); an empty graph is generated on the fly when an LLM backend is configured |
+| `run [--task ID] [--max-tasks N] [--max-concurrent N] [--all]` | Dispatch READY tasks (or one task); an empty graph is generated on the fly when an LLM backend is configured. One call is one **wave** — tasks unblocked by it are dispatched on the next call. `--all` is that loop built in: it keeps dispatching waves until every task is terminal (exit `0`), stops on a loop limit/blocked/stalled state or when nothing can reach READY (exit `3`), and hands back on `HUMAN_DECISION_REQUIRED` (exit `4`). `--all` and `--task` are mutually exclusive |
 | `plan [--goal TEXT] [--force] [--max-tasks N]` | Generate the task graph from the goal via the planning agent; without an LLM backend writes the starter skeleton (or errors when the graph already has tasks); `--force` replaces an existing graph only after a successful plan |
 | `health [--diagnose]` | Supervisor health check (writes `PROJECT.yaml` health block); `--diagnose` adds an LLM diagnosis when a provider is configured, rules-only otherwise |
 | `phase show\|set [PHASE]` | Show the current/derived lifecycle phase, or set it explicitly (validated against the phase vocabulary; forward moves checkpoint as `cp-phase-<name>`) |
@@ -767,7 +767,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1155 passed
+python3 -m pytest -q          # full suite — 1160 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ```

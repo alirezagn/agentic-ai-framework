@@ -2,7 +2,7 @@
 
 > Last updated: 2026-10-02 night (architecture-redesign batch landed:
 > truncation recovery, PEP 668 deploys, goal-driven decomposition; suite now
-> **1155 collected, 1154 passed / 1 failed** — the failure is still OPEN-1)
+> **1160 collected, 1159 passed / 1 failed** — the failure is still OPEN-1)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -18,10 +18,10 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1155 collected, 1154 passed / 1 failed** — `python3 -m pytest -q`,
+- **Suite: 1160 collected, 1159 passed / 1 failed** — `python3 -m pytest -q`,
   188 s, 2026-10-02 night. The single failure is **OPEN-1** below (local
   `checkpoints/` state, not a code regression). The number the four docs assert
-  is the *collected* count (1155) and is current.
+  is the *collected* count (1160) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -130,16 +130,17 @@ kept as the record of what was wrong, not as current state.
      dangling entry. No test in the suite deletes local checkpoints, so this was
      external.
   3. The test reads **gitignored, mutable** `checkpoints/` — it is not hermetic,
-     so the whole suite can go red on local state alone. The other 1154 pass.
+     so the whole suite can go red on local state alone. The other 1159 pass.
   Choices, none taken yet: repair the index entry (restores green, hides the
    bug), make the delete transactional, or have the test assert "dangling index
-   entry" clearly instead of throwing. **Do not write "1155 all passing" until
+   entry" clearly instead of throwing. **Do not write "1160 all passing" until
    one of them lands.**
 - **OPEN-2 — stale count prose (partly fixed this pass).** The four
   consistency-checked docs (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`,
-  `README.md`, `review_gaps.md`) were bumped 1103 → **1155** when
-  `tests/test_architecture_redesign.py` (52 tests) landed, so
-  `TestCountsConsistentAcrossDocs` is green again. Still stale:
+  `README.md`, `review_gaps.md`) are asserted against `pytest --collect-only`
+  and are currently at **1160** (1103 before `tests/test_architecture_redesign.py`
+  added 52; 1160 after `run --all` added 5 more), so
+  `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched). The "passed" phrasing in
   those four docs is the *collected* count and is false while OPEN-1 stands.
@@ -192,7 +193,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~190 s, 1155 tests).
+- Run full pytest after every change: `python3 -m pytest -q` (~190 s, 1160 tests).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
   evidence — see OPEN-1.
@@ -340,6 +341,17 @@ kept as the record of what was wrong, not as current state.
      joins every later task to `implementation_join_index()` (last
      `software_agent`, fallback index 2), so starter seeds grow 4 → 7 for a
      GUI goal. Expansion may exceed `max_tasks` by up to 2 — atomicity wins.
+  4. **`orchestrator run --all`** (later same session) — one `run` is one
+     *wave* (tasks unblocked by it dispatch on the next call), so "run
+     everything" is a loop. `_run_all()` in `orchestrator/cli.py` is that loop:
+     success is decided from `summary_counts()` having no non-terminal status
+     (**not** from `phase.current`, which is stored and forward-only and can
+     read RELEASE with work still on the graph), it stops on
+     `HUMAN_DECISION_REQUIRED` (exit 4), on BLOCKED/STALLED health, on a loop
+     limit, and on "no READY and not finished" (exit 3), and it refuses
+     `--all --task` (exit 2). Exit codes match a single `run`, so wrappers
+     cannot tell the difference. `scripts/run_until_done.sh` is now a thin
+     wrapper (validate path, `exec … run --all`) — the loop lives in one place.
 
 ---
 
