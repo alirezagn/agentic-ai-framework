@@ -50,12 +50,14 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from . import config
 from .path_policy import (
@@ -65,7 +67,7 @@ from .path_policy import (
     validate_snapshot_id,
     validate_state_file_name,
 )
-from .state_manager import StateError, atomic_write_text, utc_now_iso
+from .state_manager import StateError, _file_lock, atomic_write_text, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +337,7 @@ class CheckpointManager:
     # ------------------------------------------------------------------
 
     def _load_index(self) -> Dict[str, Any]:
+        """Read the index. Callers that mutate it must use :meth:`_update_index`."""
         if not self.index_path.exists():
             return {"project": self.project_name, "checkpoints": []}
         try:
@@ -350,6 +353,73 @@ class CheckpointManager:
 
     def _save_index(self, index: Dict[str, Any]) -> None:
         atomic_write_text(self.index_path, json.dumps(index, indent=2, sort_keys=False) + "\n")
+
+    @contextmanager
+    def _index_lock(self) -> Iterator[Dict[str, Any]]:
+        """Read-modify-write the index inside one lock (GAP-CRIT-06).
+
+        Yields the current index; whatever the caller assigns to ``index_out``
+        is persisted on a clean exit. The read, the mutation and the write all
+        happen under the same lock, so two processes saving a checkpoint at the
+        same time cannot both read the same entry list and have the second write
+        silently discard the first one's checkpoint record.
+
+        Previously this was a bare load/modify/save with no lock, and the
+        consequence was worse than a lost entry: ``check_milestones`` keeps a
+        dedupe set built from the index, so a lost record makes it re-create an
+        existing ``cp-milestone-*`` directory — or conclude the graph is
+        incomplete forever.
+        """
+        with _file_lock(self.index_path):
+            index = self._load_index()
+            box: Dict[str, Any] = {}
+            yield box
+            if "index" in box:
+                self._save_index(box["index"])
+
+    def _next_checkpoint_id(self, prefix: str = "cp-auto") -> str:
+        """Allocate and **reserve** the next free ``<prefix>-NNN`` id (GAP-CRIT-06).
+
+        Reading the index and recording the reservation happen in one critical
+        section, so two processes cannot both choose ``cp-auto-007``. The
+        reservation is written to the index immediately — without that, the
+        allocation would still race, because both writers would read the same
+        high-water mark.
+
+        The reservation is a placeholder entry marked ``"reserved": true``;
+        :meth:`create_checkpoint` replaces it with the real record (it filters
+        by id before appending). A reservation whose creation then fails leaves a
+        harmless gap in the sequence rather than a reused id.
+        """
+        with self._index_lock() as box:
+            index = self._load_index()
+            used = {
+                str(entry.get("id"))
+                for entry in index.get("checkpoints", [])
+                if isinstance(entry, dict)
+            }
+            numbers = [
+                int(match.group(1))
+                for match in (
+                    re.match(rf"{re.escape(prefix)}-(\d+)$", item) for item in used
+                )
+                if match
+            ]
+            candidate = max(numbers) + 1 if numbers else 1
+            while f"{prefix}-{candidate:03d}" in used:
+                candidate += 1
+            new_id = f"{prefix}-{candidate:03d}"
+            index["checkpoints"] = list(index.get("checkpoints", [])) + [
+                {
+                    "id": new_id,
+                    "created_at": utc_now_iso(),
+                    "phase": "RESERVED",
+                    "notes": "id reserved by _next_checkpoint_id",
+                    "reserved": True,
+                }
+            ]
+            box["index"] = index
+            return new_id
 
     def checkpoint_dir(self, checkpoint_id: str) -> Path:
         """Directory holding ``checkpoint_id``.
@@ -504,21 +574,29 @@ class CheckpointManager:
 
         checkpoint = Checkpoint.from_metadata(metadata, target_dir)
 
-        index = self._load_index()
-        entries = [entry for entry in index.get("checkpoints", []) if entry.get("id") != checkpoint_id]
-        entries.append(
-            {
-                "id": checkpoint_id,
-                "created_at": metadata["created_at"],
-                "phase": metadata["phase"],
-                "notes": notes,
-                "checksum": checksum,
-                "file_count": len(copied_files),
-            }
-        )
-        entries.sort(key=lambda entry: str(entry.get("created_at", "")))
-        index["checkpoints"] = entries
-        self._save_index(index)
+        # GAP-CRIT-06: read, filter and write under one lock so a concurrent
+        # save cannot drop this record.
+        with self._index_lock() as box:
+            index = self._load_index()
+            # Replaces any reservation placeholder for this id.
+            entries = [
+                entry
+                for entry in index.get("checkpoints", [])
+                if entry.get("id") != checkpoint_id
+            ]
+            entries.append(
+                {
+                    "id": checkpoint_id,
+                    "created_at": metadata["created_at"],
+                    "phase": metadata["phase"],
+                    "notes": notes,
+                    "checksum": checksum,
+                    "file_count": len(copied_files),
+                }
+            )
+            entries.sort(key=lambda entry: str(entry.get("created_at", "")))
+            index["checkpoints"] = entries
+            box["index"] = index
         return checkpoint
 
     def _compute_checksum(self, files: Dict[str, str]) -> str:
@@ -937,14 +1015,23 @@ class CheckpointManager:
             return handle.read()
 
     def delete_checkpoint(self, checkpoint_id: str) -> None:
+        """Remove a snapshot directory and its index entry.
+
+        GAP-CRIT-06: the index is filtered under the lock, so a concurrent
+        ``create_checkpoint`` cannot have its record erased by a delete that read
+        the index a moment earlier.
+        """
         target_dir = self.checkpoint_dir(checkpoint_id)
         if target_dir.exists():
             shutil.rmtree(target_dir)
-        index = self._load_index()
-        index["checkpoints"] = [
-            entry for entry in index.get("checkpoints", []) if entry.get("id") != checkpoint_id
-        ]
-        self._save_index(index)
+        with self._index_lock() as box:
+            index = self._load_index()
+            index["checkpoints"] = [
+                entry
+                for entry in index.get("checkpoints", [])
+                if entry.get("id") != checkpoint_id
+            ]
+            box["index"] = index
 
     # ------------------------------------------------------------------
     # Directory backup

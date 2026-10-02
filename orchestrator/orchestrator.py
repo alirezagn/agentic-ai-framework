@@ -1989,13 +1989,18 @@ class MasterOrchestrator:
         return created
 
     def compact_context(self, reason: str = "context compaction") -> str:
-        """Checkpoint + memory note + memory fold at the compaction threshold."""
-        self._checkpoint_counter += 1
-        checkpoint_id = f"cp-auto-{self._checkpoint_counter:03d}"
-        existing = {entry.get("id") for entry in self.checkpoints.list_checkpoints()}
-        while checkpoint_id in existing:
+        """Checkpoint + memory note + memory fold at the compaction threshold.
+
+        GAP-CRIT-06: the id is allocated by the checkpoint index under its own
+        lock, replacing a per-instance counter plus a list-then-check probe. The
+        old shape raced two processes into the same ``cp-auto-NNN`` (and, since
+        the probe read a stale index, into an already-existing directory).
+        """
+        checkpoint_id = self.checkpoints._next_checkpoint_id("cp-auto")
+        try:
+            self._checkpoint_counter = int(str(checkpoint_id).rsplit("-", 1)[-1])
+        except (TypeError, ValueError):
             self._checkpoint_counter += 1
-            checkpoint_id = f"cp-auto-{self._checkpoint_counter:03d}"
         notes = f"Automatic checkpoint: {reason}"
         self.state.record_checkpoint(checkpoint_id)
         self.checkpoints.create_checkpoint(checkpoint_id, notes=notes)
