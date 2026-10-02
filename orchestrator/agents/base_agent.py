@@ -27,6 +27,7 @@ from typing import Any, Callable, Collection, Dict, List, Optional, Set, Type
 
 from .. import config
 from ..context_monitor import payload_chars
+from ..prompt_builder import DEPENDENCY_AUTOMATION_INSTRUCTIONS
 from ..state_manager import StateManager, load_text_file, utc_now_iso
 
 import os
@@ -456,6 +457,12 @@ class BaseAgent:
         "- Never invent executed results: report test or verification statuses as "
         "NOT RUN unless the payload contains real execution output.\n"
         + DATA_DEPLOY_CONTRACT
+        # Single source of truth: the same constant the prompt templates embed
+        # and that tests/test_dependency_automation.py asserts on. Restated
+        # here because this contract is what every agent's system_rules()
+        # actually delivers, and a dependency announced in prose rather than
+        # installed is what leaves the next turn unable to run the tests.
+        + DEPENDENCY_AUTOMATION_INSTRUCTIONS
     )
 
     def __init__(

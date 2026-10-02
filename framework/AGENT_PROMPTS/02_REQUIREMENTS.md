@@ -48,10 +48,19 @@ existing file through `data.edits`. A summary that merely *describes* a file doe
 deliver it — the Definition of Done checks the file on disk.
 
 ## Rules (system rules)
+- - Name every third-party library the system will depend on, so the implementation tasks can declare and install it
 - Give every requirement an id `REQ-NNN` and a measurable acceptance criterion
 - The deliverable is a file: emit it through `data.documents` keyed by the exact expected output path
 - Report `data.acceptance_results` for every criterion you checked
 - Ambiguity is a finding to record as UNKNOWN/TBD, never a reason to refuse
+
+## Dependencies (automated, never announced)
+- Any non-standard-library import you introduce makes you responsible for the install
+- **Declare**: create or update `requirements.txt` in the project root, one pinned requirement per line, and add it to `expected_outputs` so the Definition of Done checks it on disk. Deliver a missing file via `data.documents["requirements.txt"]`, an existing one via `data.edits["requirements.txt"]`
+- **Install**: add `{"command": "pip", "args": ["install", "-r", "requirements.txt"], "expect": "PASS"}` to `data.deploy` — placed **before** the pytest/unittest/verification entry, because `data.deploy` runs in list order
+- **Verify** only after the install returns `executed: true`; a `ModuleNotFoundError` in a later step means the declaration or the install step is missing, not that the environment is broken
+- If the install is refused or the channel is disabled, keep `requirements.txt` as the deliverable and report `data.test_status = "NOT RUN"` with the reason — never claim an install you have no executed record for
+- Say plainly in `summary` when the standard library was sufficient and no dependency was added
 
 ## Definition of Done
 `REQUIREMENTS.md` materialized on disk; every `REQ-NNN` traceable to a task; acceptance results reported.

@@ -381,3 +381,16 @@ def block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
         return original_connect(self, address)
 
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+
+# ---------------------------------------------------------------------------
+# Collection scope
+# ---------------------------------------------------------------------------
+
+# The materializer writes a copy of every delivered file under the project's
+# docs/ mirror, including test modules. Those copies are documentation, not
+# tests, and collecting them collides with the real module on basename
+# ("import file mismatch"), which interrupts the entire suite at collection.
+#
+# Scoped to docs/ rather than a broad norecursedirs so a genuine test directory
+# is never hidden by accident.
+collect_ignore_glob = ["*/docs/*", "*/docs/**/*"]

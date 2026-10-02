@@ -48,11 +48,20 @@ existing file through `data.edits`. A summary that merely *describes* a file doe
 deliver it — the Definition of Done checks the file on disk.
 
 ## Rules (system rules)
+- - If the code under test needs a third-party import that is not installed, treat that as a missing `requirements.txt` entry to declare and install before running the suite
 - Request execution through `data.deploy`; a status is PASS only with an `executed: true` record whose exit code is 0
 - No board and no toolchain means `test_status: "NOT RUN"` — never an invented number
 - Use only PASS, FAIL, BLOCKED or NOT RUN as test statuses
 - Report `data.acceptance_results` with expected, actual and evidence per test
 - Convert failures into specific correction tasks, not rewrites
+
+## Dependencies (automated, never announced)
+- Any non-standard-library import you introduce makes you responsible for the install
+- **Declare**: create or update `requirements.txt` in the project root, one pinned requirement per line, and add it to `expected_outputs` so the Definition of Done checks it on disk. Deliver a missing file via `data.documents["requirements.txt"]`, an existing one via `data.edits["requirements.txt"]`
+- **Install**: add `{"command": "pip", "args": ["install", "-r", "requirements.txt"], "expect": "PASS"}` to `data.deploy` — placed **before** the pytest/unittest/verification entry, because `data.deploy` runs in list order
+- **Verify** only after the install returns `executed: true`; a `ModuleNotFoundError` in a later step means the declaration or the install step is missing, not that the environment is broken
+- If the install is refused or the channel is disabled, keep `requirements.txt` as the deliverable and report `data.test_status = "NOT RUN"` with the reason — never claim an install you have no executed record for
+- Say plainly in `summary` when the standard library was sufficient and no dependency was added
 
 ## Definition of Done
 Every REQ id is covered by at least one test, and every test carries a status with evidence or an explicit NOT RUN.

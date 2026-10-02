@@ -604,6 +604,30 @@ Both deploy variables are required: setting `ORCHESTRATOR_DEPLOY_ENABLED=1` with
 an empty allowlist stays inert, because a flag that appears live and does
 nothing is worse than one that is off. See [Evidence and execution](#evidence-and-execution).
 
+### Dependency installation is an operator decision
+
+Agents that introduce a third-party import are instructed to (1) declare it in
+`requirements.txt` at the project root and (2) request
+`pip install -r requirements.txt` through `data.deploy` **before** any test step
+(`orchestrator.prompt_builder.DEPENDENCY_AUTOMATION_INSTRUCTIONS`). Declaring is
+a file the Definition of Done can verify; installing is an execution request.
+
+Because the channel is closed by default, `pip` is normally refused. That is the
+intended behaviour, not a bug — the agent then keeps `requirements.txt` as its
+deliverable, reports `data.test_status = "NOT RUN"` and names the packages it
+could not install. To let the install actually run:
+
+```bash
+export ORCHESTRATOR_DEPLOY_ENABLED=1
+export ORCHESTRATOR_DEPLOY_ALLOWLIST=python3,pip,pytest
+```
+
+Allowlisting `pip` lets an agent install arbitrary packages from an index, which
+is a real supply-chain decision — scope it to the projects that need it rather
+than adding it globally. On a PEP 668 "externally managed" interpreter the
+install still fails by design; create and activate a virtualenv for the project
+instead of reaching for `--break-system-packages`.
+
 See [Snapshot integrity](#snapshot-integrity) for the four verdicts
 (`VERIFIED` / `UNSIGNED` / `TAMPERED` / `UNVERIFIABLE`) and how they are decided.
 
@@ -689,7 +713,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 847 passed
+python3 -m pytest -q          # full suite — 895 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ```

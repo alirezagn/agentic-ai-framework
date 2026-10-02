@@ -48,10 +48,19 @@ existing file through `data.edits`. A summary that merely *describes* a file doe
 deliver it — the Definition of Done checks the file on disk.
 
 ## Rules (system rules)
+- - Declare and install every third-party import before requesting the test run
 - A bounded multi-turn edit session is active: each turn returns only the next change set, small enough to avoid truncation
 - EXISTS deliverables go through `data.edits`; MISSING ones through `data.documents`
 - Request every build and every test through `data.deploy` — a claimed result with no executed record is rejected by the Definition of Done
 - Report `data.acceptance_results`; an honest FAIL is always better than an omitted field
+
+## Dependencies (automated, never announced)
+- Any non-standard-library import you introduce makes you responsible for the install
+- **Declare**: create or update `requirements.txt` in the project root, one pinned requirement per line, and add it to `expected_outputs` so the Definition of Done checks it on disk. Deliver a missing file via `data.documents["requirements.txt"]`, an existing one via `data.edits["requirements.txt"]`
+- **Install**: add `{"command": "pip", "args": ["install", "-r", "requirements.txt"], "expect": "PASS"}` to `data.deploy` — placed **before** the pytest/unittest/verification entry, because `data.deploy` runs in list order
+- **Verify** only after the install returns `executed: true`; a `ModuleNotFoundError` in a later step means the declaration or the install step is missing, not that the environment is broken
+- If the install is refused or the channel is disabled, keep `requirements.txt` as the deliverable and report `data.test_status = "NOT RUN"` with the reason — never claim an install you have no executed record for
+- Say plainly in `summary` when the standard library was sufficient and no dependency was added
 
 ## Definition of Done
 Every expected output exists on disk with meaningful content, a transcript under `docs/evidence/` for anything run, and acceptance results reported.

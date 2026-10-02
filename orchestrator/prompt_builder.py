@@ -102,6 +102,63 @@ OUTPUT_FORMAT_INSTRUCTIONS = (
     "Never claim DONE for significant work; report measurable results only."
 )
 
+#: Dependency-management contract for any agent that introduces an import.
+#:
+#: The failure this prevents is specific and was observed in
+#: ``projects/sys_mon``: the agent delivered correct code importing ``psutil``,
+#: wrote the imports, and reported "you may need to install psutil" **in prose**.
+#: No ``requirements.txt`` was created and no ``data.deploy`` step was requested,
+#: so the very next turn — the test run — died at import with
+#: ``ModuleNotFoundError``, and the orchestrator's own suite could not even be
+#: collected. A warning in ``summary`` installs nothing.
+#:
+#: Two obligations, and the ordering between them is the point:
+#:
+#: 1. **Declare** the dependency as a file the Definition of Done can see.
+#: 2. **Install** it through ``data.deploy``, ordered *before* the test or
+#:    verification step that needs it.
+#:
+#: Declaring without installing is what happens today; installing without
+#: declaring is unreproducible. Both, in that order, is the deliverable.
+#:
+#: The honest-failure clause is load-bearing and mirrors the existing deploy
+#: contract: the execution channel is opt-in and closed by default
+#: (:data:`config.DEPLOY_ENABLED` is False and :data:`config.DEPLOY_ALLOWLIST` is
+#: empty), so ``pip`` is normally **not** allowlisted. An instruction that
+#: merely said "always install" would push the model to claim an install it could
+#: not perform — trading a missing file for a fabricated execution record, which
+#: this framework treats as the more serious defect.
+DEPENDENCY_AUTOMATION_INSTRUCTIONS = (
+    "Dependency contract — third-party imports must be automated, not announced:\n"
+    "- The moment your code imports a package that is not in the Python standard "
+    "library, you OWN the install. Mentioning it in `summary` or `warnings` "
+    "installs nothing.\n"
+    "- STEP 1 — DECLARE: create or update `requirements.txt` in the PROJECT ROOT, "
+    "one requirement per line, pinned with `>=` (e.g. `psutil>=5.9`). Deliver it "
+    "like any other file: `data.documents[\"requirements.txt\"]` when missing, "
+    "`data.edits[\"requirements.txt\"]` when it already exists. Add the path to "
+    "the task's `expected_outputs` so the Definition of Done verifies it is on "
+    "disk. Read-only imports you did not introduce (already declared) need no "
+    "new entry.\n"
+    "- STEP 2 — INSTALL: emit the install as an explicit `data.deploy` entry — "
+    '{"command": "pip", "args": ["install", "-r", "requirements.txt"], '
+    '"expect": "PASS", "rationale": "install declared dependencies"}. '
+    "ORDER MATTERS: `data.deploy` runs in list order, so the install entry must "
+    "come BEFORE any pytest, unittest or verification-script entry, or those run "
+    "against an environment that lacks the package.\n"
+    "- STEP 3 — VERIFY: only after the install has returned `executed: true`, "
+    "request the tests. If a test step fails with `ModuleNotFoundError`, that is "
+    "a missing STEP 1 or STEP 2 on your side, not an environment problem to report.\n"
+    "- `pip` is allowlisted only when the operator enabled execution. If the "
+    "install comes back `executed: false` (channel disabled, command refused, or "
+    "no network), that is a legitimate finding: keep `requirements.txt` as your "
+    "deliverable, set `data.test_status = \"NOT RUN\"`, and state in `warnings` "
+    "exactly which packages could not be installed and why. Never report a "
+    "dependency as installed without a matching executed record.\n"
+    "- Prefer the standard library when it genuinely suffices, and say so in "
+    "`summary`; a dependency you do not need is not a dependency to manage."
+)
+
 
 class PromptBuilderError(RuntimeError):
     """Raised when a prompt cannot be assembled from the supplied payload."""
@@ -153,6 +210,9 @@ def render_system_prompt(system_rules: str, agent_spec: str) -> str:
         parts.append("Operating rules:\n" + system_rules.strip())
     if agent_spec:
         parts.append("Your agent specification (framework contract):\n" + agent_spec.strip())
+    # After the agent's own rules so it reads as a standing contract, not as a
+    # suggestion that a later rule can talk the model out of.
+    parts.append(DEPENDENCY_AUTOMATION_INSTRUCTIONS)
     parts.append(OUTPUT_FORMAT_INSTRUCTIONS)
     return "\n\n".join(parts)
 
@@ -223,7 +283,13 @@ def build_prompt(
             f"{rendered}"
         )
 
+    # Restated here, not only in the system message: the user message is the one
+    # carrying the task and the delivery manifest, so an agent that reads for
+    # "what must I deliver" sees the dependency obligation in the same place.
     sections.append("# Required output\n" + OUTPUT_FORMAT_INSTRUCTIONS)
+    sections.append(
+        "# Dependency obligation\n" + DEPENDENCY_AUTOMATION_INSTRUCTIONS
+    )
     return "\n\n".join(sections)
 
 
@@ -235,6 +301,7 @@ __all__ = [
     "PromptBuilderError",
     "AGENT_SPEC_FILES",
     "OUTPUT_FORMAT_INSTRUCTIONS",
+    "DEPENDENCY_AUTOMATION_INSTRUCTIONS",
     "DEFAULT_MEMORY_LIMIT",
     "DEFAULT_CONTEXT_FILE_LIMIT",
     "framework_specs_dir",
