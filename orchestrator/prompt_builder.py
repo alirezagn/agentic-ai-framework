@@ -160,6 +160,78 @@ DEPENDENCY_AUTOMATION_INSTRUCTIONS = (
 )
 
 
+#: Cross-component data contract for agents that define or consume data shapes.
+#:
+#: The failure this prevents is a *shape* mismatch across a task boundary, and
+#: it is invisible until two separately-written components meet. Observed in
+#: ``projects/sys_mon``: the metrics module returns nested mappings
+#: (``{"ram": {"percent_used": 50}}``) while the view layer wants flat scalars
+#: (``{"ram": 50.0}``). Each agent is individually correct, both test green in
+#: isolation, and the integration point explodes with a ``TclError`` or a
+#: ``TypeError`` that names neither the producer nor the consumer.
+#:
+#: Nothing in the payload prevents it, because a task carries *intent*, not a
+#: type. The gap was never "the agent wrote a dict" -- it was that no artifact
+#: anywhere obliged anyone to write down what the dict looks like.
+#:
+#: So the obligation is to make the shape explicit and checkable:
+#:
+#: 1. **Define** the schema where the components are specified, so a consumer is
+#:    written against a declaration rather than against a sample.
+#: 2. **Convert at the boundary** where producer and consumer disagree, in one
+#:    named place, instead of letting both guess.
+#: 3. **Prove it** with an integration test that exercises the real crossing.
+#:
+#: The error-path clause is included because it is the most common way a
+#: contract breaks unnoticed: ``{"error": "psutil not installed"}`` is a flat
+#: ``str`` value where the success path is a nested mapping, so the *failure*
+#: path is the one shape nobody tested against the consumer.
+DATA_CONTRACT_INSTRUCTIONS = (
+    "Data contract — components that exchange values must agree on their shape:\n"
+    "- A task states INTENT, not a type. Nothing in this payload pins the shape of "
+    "a dict you return, so two independently written components will disagree "
+    "unless you make the shape explicit. Writing one component at a time and "
+    "hoping the shapes line up is what produces integration failures where one "
+    "agent returns nested mappings {\"ram\": {\"percent_used\": 50}} and the next "
+    "expects flat scalars {\"ram\": 50.0} -- the producer is not wrong and the "
+    "consumer is not wrong, and the crash (TypeError, TclError, a KeyError three "
+    "modules away) blames neither.\n"
+    "- STEP 1 — DEFINE THE SCHEMA. When requirements_agent or architecture_agent "
+    "creates task specs, or any task introduces a value crossing a module "
+    "boundary, state the exact type for each field in docs/ARCHITECTURE.md, using "
+    "a TypedDict or Pydantic model so it is executable rather than prose: the "
+    "concrete container (dict or dataclass), the key names, and each field\'s "
+    "type and whether it is optional. \"Return metrics\" is not a schema; "
+    "`class Metrics(TypedDict): ram: Dict[str, float]` is. Nested-versus-flat is "
+    "exactly the decision a type declaration forces you to make.\n"
+    "- STEP 2 — CONVERT AT THE BOUNDARY. software_agent must cast or reshape "
+    "explicitly when feeding metrics to a view layer, progress bar, formatter or "
+    "serialiser: one named function, called at the crossing, that takes the "
+    "producer shape and returns the consumer shape. Never let a component index "
+    "a nested value and hand a bare float to code that expects a mapping, or the "
+    "reverse. Convert where the two shapes meet; do not scatter try/except and "
+    "coerce across every call site.\n"
+    "- STEP 3 — KEEP THE ERROR PATH IN THE SCHEMA. An error result must satisfy "
+    "the same declared shape as a success (for example an `error: Optional[str]` "
+    "field alongside the normal fields, or a documented Union), never a different "
+    "shape such as a bare {\"error\": str}. The failure path is the one no "
+    "consumer is written against and the one that breaks first.\n"
+    "- STEP 4 — WIRE AN ENTRYPOINT. Where a task produces runnable components, "
+    "software_agent must deliver a main.py at the PROJECT ROOT that imports and "
+    "runs them end to end, including the conversion wrappers from STEP 2, so the "
+    "crossing is actually exercised rather than only assembled.\n"
+    "- STEP 5 — TEST THE CROSSING, NOT JUST THE PARTS. Unit tests on each "
+    "component prove nothing about the seam. Add a test that feeds real producer "
+    "output into the real consumer and asserts the delivered shape, including one "
+    "case for the error path. Per-component green plus a broken integration is the "
+    "specific outcome this contract exists to prevent.\n"
+    "- If a task's inputs do not pin a shape and you cannot infer one, choose and "
+    "declare the shape yourself in docs/ARCHITECTURE.md rather than leaving it "
+    "implicit -- an invented but declared shape is recoverable; an undeclared one "
+    "is what the next agent has to guess against."
+)
+
+
 class PromptBuilderError(RuntimeError):
     """Raised when a prompt cannot be assembled from the supplied payload."""
 
@@ -213,6 +285,7 @@ def render_system_prompt(system_rules: str, agent_spec: str) -> str:
     # After the agent's own rules so it reads as a standing contract, not as a
     # suggestion that a later rule can talk the model out of.
     parts.append(DEPENDENCY_AUTOMATION_INSTRUCTIONS)
+    parts.append(DATA_CONTRACT_INSTRUCTIONS)
     parts.append(OUTPUT_FORMAT_INSTRUCTIONS)
     return "\n\n".join(parts)
 
@@ -290,6 +363,7 @@ def build_prompt(
     sections.append(
         "# Dependency obligation\n" + DEPENDENCY_AUTOMATION_INSTRUCTIONS
     )
+    sections.append("# Data contract obligation\n" + DATA_CONTRACT_INSTRUCTIONS)
     return "\n\n".join(sections)
 
 
@@ -302,6 +376,7 @@ __all__ = [
     "AGENT_SPEC_FILES",
     "OUTPUT_FORMAT_INSTRUCTIONS",
     "DEPENDENCY_AUTOMATION_INSTRUCTIONS",
+    "DATA_CONTRACT_INSTRUCTIONS",
     "DEFAULT_MEMORY_LIMIT",
     "DEFAULT_CONTEXT_FILE_LIMIT",
     "framework_specs_dir",

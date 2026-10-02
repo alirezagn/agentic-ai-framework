@@ -48,10 +48,19 @@ existing file through `data.edits`. A summary that merely *describes* a file doe
 deliver it — the Definition of Done checks the file on disk.
 
 ## Rules (system rules)
+- Define every cross-module value's exact type in `docs/ARCHITECTURE.md` as a `TypedDict` or Pydantic model
 - Cover every section the spec requires — mark the ones you cannot fill TBD rather than omitting them
 - Create `ARCHITECTURE.md` with `data.documents`; patch an existing one with `data.edits`
 - Record a decision needing a human gate as `data.proposed_change`
 - Report `data.acceptance_results`
+
+## Data contract (shapes crossing components)
+- A task states intent, not a type: nothing obliges you to return a specific shape, so two independently written components will disagree unless you make the shape explicit
+- **Define** — when creating task specs, or introducing any value that crosses a module boundary, state exact types in `docs/ARCHITECTURE.md` using a `TypedDict` or Pydantic model. Nested-versus-flat must be decided there, not discovered later
+- **Convert at the boundary** — one named function that reshapes producer output into the consumer's shape, called where the two meet; never index a nested value and hand a bare float to code expecting a mapping
+- **Keep the error path in the schema** — an error result satisfies the same declared shape (`error: Optional[str]`, or a documented Union), never a different shape such as a bare `{"error": str}`. The failure path is the one nobody writes the consumer for
+- **Wire an entrypoint** — deliver a runnable `main.py` at the project root that imports and runs the components end to end through the conversion wrappers
+- **Test the crossing** — a test feeding real producer output into the real consumer, including the error path. Per-component green plus a broken integration is the failure this prevents
 
 ## Definition of Done
 The architecture document is materialized with every mandated section present.

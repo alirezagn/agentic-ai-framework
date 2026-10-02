@@ -48,6 +48,7 @@ existing file through `data.edits`. A summary that merely *describes* a file doe
 deliver it — the Definition of Done checks the file on disk.
 
 ## Rules (system rules)
+- Cast or reshape metrics at the boundary into a view layer, and deliver a tested `main.py` that runs the whole system end to end
 - - Declare and install every third-party import before requesting the test run
 - A bounded multi-turn edit session is active: each turn returns only the next change set, small enough to avoid truncation
 - EXISTS deliverables go through `data.edits`; MISSING ones through `data.documents`
@@ -61,6 +62,14 @@ deliver it — the Definition of Done checks the file on disk.
 - **Verify** only after the install returns `executed: true`; a `ModuleNotFoundError` in a later step means the declaration or the install step is missing, not that the environment is broken
 - If the install is refused or the channel is disabled, keep `requirements.txt` as the deliverable and report `data.test_status = "NOT RUN"` with the reason — never claim an install you have no executed record for
 - Say plainly in `summary` when the standard library was sufficient and no dependency was added
+
+## Data contract (shapes crossing components)
+- A task states intent, not a type: nothing obliges you to return a specific shape, so two independently written components will disagree unless you make the shape explicit
+- **Define** — when creating task specs, or introducing any value that crosses a module boundary, state exact types in `docs/ARCHITECTURE.md` using a `TypedDict` or Pydantic model. Nested-versus-flat must be decided there, not discovered later
+- **Convert at the boundary** — one named function that reshapes producer output into the consumer's shape, called where the two meet; never index a nested value and hand a bare float to code expecting a mapping
+- **Keep the error path in the schema** — an error result satisfies the same declared shape (`error: Optional[str]`, or a documented Union), never a different shape such as a bare `{"error": str}`. The failure path is the one nobody writes the consumer for
+- **Wire an entrypoint** — deliver a runnable `main.py` at the project root that imports and runs the components end to end through the conversion wrappers
+- **Test the crossing** — a test feeding real producer output into the real consumer, including the error path. Per-component green plus a broken integration is the failure this prevents
 
 ## Definition of Done
 Every expected output exists on disk with meaningful content, a transcript under `docs/evidence/` for anything run, and acceptance results reported.

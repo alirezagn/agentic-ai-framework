@@ -27,7 +27,10 @@ from typing import Any, Callable, Collection, Dict, List, Optional, Set, Type
 
 from .. import config
 from ..context_monitor import payload_chars
-from ..prompt_builder import DEPENDENCY_AUTOMATION_INSTRUCTIONS
+from ..prompt_builder import (
+    DATA_CONTRACT_INSTRUCTIONS,
+    DEPENDENCY_AUTOMATION_INSTRUCTIONS,
+)
 from ..state_manager import StateManager, load_text_file, utc_now_iso
 
 import os
@@ -463,6 +466,12 @@ class BaseAgent:
         # actually delivers, and a dependency announced in prose rather than
         # installed is what leaves the next turn unable to run the tests.
         + DEPENDENCY_AUTOMATION_INSTRUCTIONS
+        # Same reasoning for cross-component data shapes: an agent that returns
+        # a nested mapping while its consumer expects a flat scalar is not
+        # violating anything it was told, because nothing told it. This block is
+        # what every agent's system_rules() delivers, so it is the only place
+        # the obligation reaches a model at all.
+        + DATA_CONTRACT_INSTRUCTIONS
     )
 
     def __init__(
