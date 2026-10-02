@@ -21,6 +21,9 @@ control back to a human.
 - Dependency-gated dispatch with READY → IN_PROGRESS → DONE/BLOCKED transitions
 - Parallel execution (`--max-concurrent N`) serialized through a state lock
 - LLM-backed specialist agents with DoD checks and mandatory review flow
+- An opt-in, allowlisted **execution channel** (`data.deploy`) that produces
+  real ground-truth evidence, so a verification result can be checked rather
+  than believed — see [Evidence and execution](#evidence-and-execution)
 - Loop detection: `same_strategy`, `no_progress`, `alternatives_exhausted`,
   `state_oscillation`, `repeated_output`, `no_new_evidence`
 - Decision control (`PROPOSED_CHANGE` gate) and risk maintenance (`RISKS.md`)
@@ -42,6 +45,8 @@ control back to a human.
 | `orchestrator/llm_client.py` | Stdlib HTTP client for Anthropic / Ollama / OpenRouter |
 | `orchestrator/prompt_builder.py` | Renders system prompts from `framework/*.md` specs |
 | `orchestrator/agents/` | `BaseAgent`, `LLMAgent`, 9 specialists + `ReviewAgent` |
+| `orchestrator/deploy_runner.py` | **The only process-spawning module** — allowlisted, scrubbed, bounded execution for `data.deploy` |
+| `orchestrator/path_policy.py` | Shared path-containment policy used by checkpoint restore and agent delivery |
 | `orchestrator/context_monitor.py` | Measured context-utilization accounting |
 | `orchestrator/cli.py` | Subcommands: `init`, `status`, `tasks`, `run`, `plan`, `health`, `agents`, `checkpoint`, `phase`, `waive`, `retry`, `reopen` |
 
@@ -193,7 +198,8 @@ print(orch.checkpoints.print_checkpoint_list())
 | `DECISIONS.md` | `### DEC-NNN` entries incl. `PROPOSED_CHANGE` gates | `append_decision` / `approve_decision` |
 | `RISKS.md` | `### RISK-NNN` register (status, probability, impact) | supervisor (`ensure_failure_risk`, `append_risk`) |
 | `CHANGELOG.md` | State-file history | every state write |
-| `docs/` | Materialized agent artifacts (`REQUIREMENTS-*.md`, `REVIEW-*.md`, …) | agents (`_materialize_artifacts`) |
+| `docs/` | Materialized agent artifacts (`REVIEW-<task>.md`, …) | agents (`_materialize_artifacts`) |
+| `docs/evidence/<task>/` | Execution transcripts (`NN-<command>.json`) for anything run via `data.deploy` | `DeployRunner.write_evidence` |
 
 **Authoring (G16):** agents deliver real file changes through their payload —
 `data.documents["<path>"]` carries the full content of a new/short file, and
@@ -256,11 +262,15 @@ are only written when a derived value actually changed.
    check → `PROPOSED_CHANGE` decision gate → resolve agent → `IN_PROGRESS` →
    `record_attempt`
 2. **Execution phase (unlocked):** `agent.run(task)` — runs in a worker thread
-   when `max_concurrent > 1`
+   when `max_concurrent > 1` — then any `data.deploy` invocations, which also
+   run here. Both are deliberately off-lock: a build or test suite can take
+   minutes, and holding `_state_lock` across one would stall every other
+   worker's state turn.
 3. **Finalize phase (locked):** context-utilization update → proposed-change
    recording → status finalization (`DONE`/`BLOCKED`/`FAILED`) → risk recording
-   for failures → loop signals + fingerprint → DoD check → derived-state
-   recompute → auto/milestone checkpoint
+   for failures → loop signals + fingerprint → DoD check (including the
+   execution-evidence check) → derived-state recompute → auto/milestone
+   checkpoint
 
 ### Review flow
 
@@ -275,17 +285,56 @@ dispatch batch, `_run_pending_reviews()` routes them to `dispatch_review()`:
 
 ### Definition of Done
 
-`definition_of_done(task, output)` requires: DoD criteria present, all
-`expected_outputs` materialized on disk, **content plausibility** — when an
-expected output already exists in the project, its `docs/` mirror must share
-at least one meaningful line with the real file (summary/prose JSON wrappers
-rejected: deliver via `data.edits` or full file content) — and review passed
-when required. Unmet → task `FAILED` with `DoD unmet: …`. Before failing
-cold, dispatch makes **one auto-repair round**: the DoD problems are sent
-back to the agent (`repair_delivery`), which may re-materialize a real
-delivery; LLM agents re-ask the model, deterministic agents skip. The DoD
-rejection is stored as the task note (not the claiming summary) so the next
-attempt sees honest context.
+`definition_of_done(task, output, deploy_records=…)` requires:
+
+- DoD criteria present
+- all `expected_outputs` materialized on disk
+- **content plausibility** — when an expected output already exists in the
+  project, its `docs/` mirror must share at least one meaningful line with the
+  real file (summary/prose JSON wrappers rejected: deliver via `data.edits` or
+  full file content)
+- **ground truth for any claimed execution** — see below
+- review passed when required
+
+Unmet → task `FAILED` with `DoD unmet: …`. Before failing cold, dispatch makes
+**one auto-repair round**: the DoD problems are sent back to the agent
+(`repair_delivery`), which may re-materialize a real delivery; LLM agents
+re-ask the model, deterministic agents skip. The DoD rejection is stored as the
+task note (not the claiming summary) so the next attempt sees honest context.
+
+#### Why an unevidenced claim becomes `NOT RUN`
+
+The execution evidence check exists because the framework previously had no way
+to tell an invented result from a real one. An agent asked for test outcomes it
+could not obtain would state them anyway, nothing could verify the statement, and
+a fabricated "42/42 tests passed" reached `DONE` and was persisted into
+`TASKS.yaml`.
+
+The check fires on **any one** of three triggers:
+
+1. the output declares `data.deploy` — the agent asked to execute;
+2. the summary or any artifact *claims* an executed verification
+   (`config.claims_execution`: "42/42", "tests passed", "build succeeded",
+   "flashed", "ctest", "coverage", …);
+3. an expected output looks like a build/test artifact (`*.log`, `*.bin`,
+   `test_*`, `test_results*`, …).
+
+When it fires, one of two things must be true:
+
+- **A record with `executed: true` exists.** The real exit code is then
+  authoritative. A non-zero exit blocks completion and routes to repair — a
+  genuine failure is ground truth, and losing it is exactly what a fabricated
+  report accomplishes. A declared `expect` that disagrees with the real exit
+  code also blocks.
+- **The agent reports `data.test_status = "NOT RUN"`.** An honest negative is
+  accepted and the task proceeds on its other merits. "I could not run this" is
+  a legitimate outcome; inventing a pass is not.
+
+With neither, the task is `FAILED` and the note states the missing evidence —
+never the claim. The asymmetry is deliberate: refusing an unevidenced claim is
+always correct, whereas forcing `NOT RUN` on a task that legitimately had
+nothing to run would be noise. An ordinary documentation task triggers nothing
+here.
 
 ### Dependency gating
 
@@ -336,6 +385,121 @@ When a loop is exceeded:
 `state_oscillation` is checked **first** in the dispatch gate and applies to the
 whole project (task id `PROJECT`); the fingerprint history is cleared on
 checkpoint restore.
+
+---
+
+## Evidence and execution
+
+The framework can run a build, a test or a tool on the agent's behalf, and can
+then **prove** it. This is the only ground truth in the system: the runner — not
+the model — stamps `executed` and the exit code.
+
+**Disabled by default.** The runtime is offline by design; nothing executes
+unless both `ORCHESTRATOR_DEPLOY_ENABLED=1` and a non-empty allowlist are set.
+
+### Requesting execution
+
+An agent proposes *what* to run via `data.deploy`. It never decides *whether* it
+ran.
+
+```json
+{
+  "status": "completed",
+  "summary": "Built and ran the unit tests",
+  "data": {
+    "deploy": [
+      {
+        "command": "ctest",
+        "args": ["--test-dir", "build", "--output-on-failure"],
+        "cwd": "build",
+        "expect": "PASS",
+        "rationale": "verify the refactor did not break anything"
+      }
+    ],
+    "test_status": "PASS"
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `command` | string | Required. An allowlisted executable, or a project-relative script (`./scripts/verify.sh`) confined to the project. Rejected *before* spawning if not permitted. |
+| `args` | list of strings | Optional. Passed as a list — never a shell string, so `;`, `&&`, `>` and pipes are inert text. |
+| `cwd` | string | Optional, project-relative. Forced to the project root when omitted; a path escaping the project is refused. |
+| `expect` | `"PASS"` \| `"FAIL"` | Optional. The agent's prediction, **checked against the real exit code**; a mismatch blocks completion just as a failure does. |
+| `rationale` | string | Optional, free text. Recorded in the transcript. |
+
+A single object or a shell-like string is also accepted and normalised, but the
+list form is what agents are instructed to emit.
+
+### Results
+
+Every invocation returns a record, attached to `output.data["deploy_results"]`
+so the agent, the DoD and any later reviewer read the same evidence:
+
+```json
+{
+  "command": "ctest", "args": ["--test-dir", "build"],
+  "exit_code": 0,
+  "stdout_tail": "100% tests passed, 0 tests failed out of 42",
+  "stderr_tail": "", "stdout_truncated": false, "stderr_truncated": false,
+  "duration_ms": 8432,
+  "executed": true, "status": "executed",
+  "declared_expect": "PASS", "expect_matched": true,
+  "artifact_path": "docs/evidence/TASK-004/00-ctest.json"
+}
+```
+
+`executed` is the field that matters, and only `DeployRunner` sets it.
+
+| `status` | Meaning |
+|---|---|
+| `executed` | The process really ran. `exit_code` is authoritative, including when non-zero. |
+| `refused` | Not run: the channel is off, the executable is not allowlisted, or the request was malformed. `reason` says which. |
+| `timeout` | Not run: the child exceeded the timeout and was terminated. |
+| `spawn_failed` | Not run: the process could not be started. |
+
+`executed: false` is a first-class, reportable outcome — which is what makes
+`NOT RUN` an honest, checkable state rather than a silent gap.
+
+### Evidence transcripts
+
+Each executed invocation is persisted as JSON under
+`docs/evidence/<task-id>/NN-<command>.json`, containing the record plus a
+rendered `transcript` and a `recorded_at` stamp. Paths are flattened to a
+single filename, so a project-relative command cannot produce nested evidence
+paths. Evidence is written best-effort: a failure to write it is logged and
+never fails a dispatch.
+
+### Security properties
+
+`orchestrator/deploy_runner.py` is the **only** module in the package that
+spawns a process, so its properties are auditable with a single grep
+(`grep -rn subprocess orchestrator/`). Each exists because it was a way to
+abuse the capability:
+
+- **`shell=False` always**, with a list `argv` — no argument is re-parsed as
+  shell syntax.
+- **Allowlist before spawn.** An executable not on the list is refused before
+  the process is created. Comparison is on the basename, which also means the
+  allowlist trusts `PATH` — allowlisting `gcc` permits whatever `gcc` resolves
+  to.
+- **Forced working directory** at the project root; `cwd` overrides are
+  containment-checked.
+- **Scrubbed child environment** — only `PATH`, `HOME`, locale and a few
+  similar variables are passed, and proxies are dropped. `ANTHROPIC_API_KEY`,
+  `OPENROUTER_API_KEY` and `CHECKPOINT_SIGNING_KEY` are **not** readable by any
+  spawned build script.
+- **Bounded output and time** — a per-stream byte cap keeping the *tail* (where
+  build failures are legible), with truncation reported rather than silent, and
+  a hard timeout.
+- **Fail closed.** There is no "warn and run anyway" path: a disabled channel
+  or empty allowlist means nothing executes.
+
+```python
+records = orch.deploy_runner.run_payload([{"command": "ctest", "expect": "PASS"}])
+print(records[0].executed, records[0].exit_code)
+```
 
 ---
 
@@ -430,6 +594,15 @@ also auto-loads `./.env`, e.g. the repo's Ollama preset in `.env.example`):
 | `CHECKPOINT_SIGNING_KEY` | HMAC-SHA256 key. Setting it **enables signing**: new snapshots record `signed: true` plus a signature bound to contents, id, key id and timestamp. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`. Without it, snapshots are written `signed: false` and verify on checksums only |
 | `ORCHESTRATOR_CHECKPOINT_KEY_ID` | Identifies the signing key (default `default`). Bound into the signature, so a rotated secret reports `UNVERIFIABLE` rather than `TAMPERED` |
 | `CHECKPOINT_ALLOW_UNSIGNED` | `1` lets a snapshot whose signature cannot currently be checked fall back to checksums with a warning. Never allows a tampered snapshot to pass |
+| `ORCHESTRATOR_DEPLOY_ENABLED` | `1` enables the execution channel (`data.deploy`). **Default `0`** — the runtime is offline by design |
+| `ORCHESTRATOR_DEPLOY_ALLOWLIST` | Comma-separated executable **basenames** permitted to be spawned (e.g. `ctest,cmake,python3`). Entries are reduced to a basename, so a path cannot smuggle a different binary in. Empty means nothing can run |
+| `ORCHESTRATOR_DEPLOY_TIMEOUT` | Per-invocation wall-clock seconds (default `300`; accepted range 1–3600) |
+| `ORCHESTRATOR_DEPLOY_MAX_OUTPUT` | Byte cap per captured stream (default `65536`; minimum 1024). The **tail** is kept, and truncation is reported explicitly |
+| `ORCHESTRATOR_DEPLOY_EVIDENCE_DIR` | Where transcripts are written, project-relative (default `docs/evidence`) |
+
+Both deploy variables are required: setting `ORCHESTRATOR_DEPLOY_ENABLED=1` with
+an empty allowlist stays inert, because a flag that appears live and does
+nothing is worse than one that is off. See [Evidence and execution](#evidence-and-execution).
 
 See [Snapshot integrity](#snapshot-integrity) for the four verdicts
 (`VERIFIED` / `UNSIGNED` / `TAMPERED` / `UNVERIFIABLE`) and how they are decided.
@@ -516,15 +689,23 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite
+python3 -m pytest -q          # full suite — 659 passed
 python3 -m pytest test_derived_state.py -q
+python3 -m pytest tests/ -q   # security/regression suites
 ```
 
 Shared fixtures live in `conftest.py` (`build_test_project`, `FakeLLMClient`,
-`_task`). Tests cover dispatch/parallelism, review flow, DoD, decision gate,
-risk maintenance, loop detection, milestone checkpoints, derived state and the
-CLI surface. Never run `run` against a live project you care about from tests —
-use a `tmp_path` copy.
+`_task`, `FakeDeployRunner` plus the `fake_deploy_runner` / `disabled_deploy_runner`
+/ `failing_deploy_runner` variants). Tests cover dispatch/parallelism, review
+flow, DoD, decision gate, risk maintenance, loop detection, milestone
+checkpoints, derived state, concurrent state IO, and the CLI surface.
+
+The suite is **hermetic**: an autouse fixture blocks outbound TCP while
+allowing loopback, so a test can never reach a real provider even if
+`ANTHROPIC_API_KEY` is exported in the developer's shell. The execution channel
+is off by default and `FakeDeployRunner` substitutes for the real runner, so no
+test spawns a process unless it is deliberately exercising one. Never run `run`
+against a live project you care about from tests — use a `tmp_path` copy.
 
 ---
 
@@ -564,11 +745,14 @@ agentic-ai-framework/
 │   ├── checkpoint_manager.py # checkpoints
 │   ├── llm_client.py         # stdlib LLM HTTP client
 │   ├── prompt_builder.py     # prompts from framework/*.md
+│   ├── deploy_runner.py      # allowlisted execution chokepoint (data.deploy)
+│   ├── path_policy.py        # shared path-containment policy
 │   ├── context_monitor.py    # utilization accounting
 │   └── agents/               # BaseAgent, LLMAgent, 9 specialists
 ├── framework/                # architecture specs 00–10, AGENT_PROMPTS/, TEMPLATES/
 ├── projects/kid-robot-face/  # full example project
 ├── project-templates/        # copy-paste state-file templates
 ├── meta/                     # GETTING_STARTED, WORKFLOW, TROUBLESHOOTING
-└── test_*.py                 # pytest suite
+├── test_*.py                 # pytest suite (root)
+└── tests/                    # security + regression suites
 ```

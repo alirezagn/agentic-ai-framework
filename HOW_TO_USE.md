@@ -335,6 +335,77 @@ No SDK — the client is stdlib HTTP with an injectable transport for tests.
 
 ---
 
+## 8b. Enable the execution channel (optional)
+
+**Off by default.** The runtime is offline by design: with no configuration, an
+agent cannot run a build, a test or a flash, and the Definition of Done rejects
+any result it cannot evidence rather than believing it.
+
+Enable it only when you want agents to run allowlisted tools:
+
+```dotenv
+ORCHESTRATOR_DEPLOY_ENABLED=1
+ORCHESTRATOR_DEPLOY_ALLOWLIST=ctest,cmake,python3
+```
+
+Both are required — enabling with an empty allowlist stays inert.
+
+**How an agent uses it.** The agent proposes what to run in `data.deploy`; the
+runner decides whether it ran and reports the real exit code:
+
+```json
+{"data": {"deploy": [{"command": "ctest", "args": ["--output-on-failure"],
+                      "expect": "PASS"}]}}
+```
+
+Results come back as `data.deploy_results` — `{executed, exit_code,
+stdout_tail, stderr_tail}` — and a transcript is written to
+`docs/evidence/<task>/NN-<command>.json`. A genuine non-zero exit is reported
+too: a real failure is information, and the transcript is how you confirm it.
+
+**What the DoD then requires.** If a task declares `data.deploy`, or claims it
+ran something (`"42/42 tests passed"`, `"build succeeded"`), or expects a
+build/test artifact, then one of two things must hold:
+
+- a record with `executed: true` — the real exit code is authoritative, and a
+  mismatch against the declared `expect` blocks completion; or
+- the agent reports `data.test_status = "NOT RUN"` — an honest negative, which
+  completes the task on its other merits.
+
+Neither → the task is `FAILED` and the note states the *missing evidence*,
+never the claim.
+
+**Security properties.** `orchestrator/deploy_runner.py` is the only module in
+the package that spawns a process. It always uses `shell=False` with a list
+`argv` (so `;`, `&&` and `>` are inert), refuses a non-allowlisted executable
+*before* spawning, forces the working directory to the project root, passes a
+scrubbed environment (your API and signing keys are **not** visible to the
+child), caps output per stream, and enforces a timeout.
+
+**Allowlist scope.** Entries are matched on the **basename**, so allowlisting
+`gcc` permits whatever `gcc` resolves to on `PATH` — a project-relative script
+like `./scripts/verify.sh` is resolved inside the project instead. Tighter
+bounds:
+
+```dotenv
+ORCHESTRATOR_DEPLOY_TIMEOUT=600         # seconds per invocation (default 300)
+ORCHESTRATOR_DEPLOY_MAX_OUTPUT=131072   # bytes per stream (default 65536)
+ORCHESTRATOR_DEPLOY_EVIDENCE_DIR=docs/evidence
+```
+
+Verify the channel is live with a direct probe rather than by asking an agent:
+
+```bash
+python3 -c "from orchestrator.deploy_runner import DeployRunner; \
+r=DeployRunner('projects/my-project').run_one({'command':'ctest'}); \
+print(r.executed, r.status, r.reason)"
+```
+
+`executed False` with a `refused` status means the flag or the allowlist is
+still wrong.
+
+---
+
 ## 9. Logging and exit codes
 
 ```bash
@@ -421,13 +492,16 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | `edits['…'] search matched 0 time(s)` | the model guessed a snippet — existing expected outputs are now inlined into the payload (`expected_output:<path>`), and the session feedback carries the file's current body; `retry TASK-00X` |
 | `expected output missing from the project: …` | the model delivered content only to `docs/` — `data.documents` writes the real path for files missing at task start; the `delivery_manifest` in the prompt now states the channel up front, so `retry TASK-00X` |
 | `… exists in the project — update it with data.edits` | the file pre-existed at task start; `data.documents` never modifies it — `retry TASK-00X` (the manifest tells the agent this before generation) |
-| run finished `HEALTHY` but the ESP32 shows no change | by design today: agents only AUTHOR files in the workspace — nothing is built or flashed and the source repo is not touched; close the loop yourself: sync the workspace, `source /media/alireza/PROJECTS/esp-idf-v6.1-beta1/export.sh && idf.py build && idf.py -p /dev/ttyACM0 flash` (the `data.deploy` channel is designed but NOT implemented yet) |
-| `docs/*.log` or docs "Verification Results" claim tests ran | agents cannot execute anything — claims are unverified until YOU run `ctest`; treat as claims |
+| run finished `HEALTHY` but the ESP32 shows no change | the execution channel is **off by default** — nothing is built or flashed. Enable it (§8b) and let the task request `data.deploy`, or close the loop yourself: `source /media/alireza/PROJECTS/esp-idf-v6.1-beta1/export.sh && idf.py build && idf.py -p /dev/ttyACM0 flash` |
+| `docs/*.log` or docs "Verification Results" claim tests ran | with the channel **off** an agent cannot execute, so any such claim is unverified — the DoD now rejects it and the task is `FAILED` rather than silently `DONE`. Enable the channel (§8b) so the claim can be backed by a transcript, or have the agent report `NOT RUN` |
+| `task declared data.deploy but nothing was executed` | the executable is not on `ORCHESTRATOR_DEPLOY_ALLOWLIST`, or `ORCHESTRATOR_DEPLOY_ENABLED` is unset. The refusal reason is in the task note; add the basename to the allowlist and `retry TASK-00X` |
+| `executed verification failed: ctest exited 8` | the command really ran and really failed — this is ground truth. Fix the underlying failure, then `retry TASK-00X` |
+| `declared expectation did not match reality` | the agent predicted `PASS` but the real exit code disagreed. Re-run with an honest `expect`; the mismatch is recorded in `docs/evidence/<task>/` |
 | `LLM backend unavailable` | set provider env vars (§8) |
 | state corrupted | `checkpoint restore cp-...` |
 
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 510 passed
+python3 -m pytest -q      # 659 passed
 ```
