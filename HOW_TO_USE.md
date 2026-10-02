@@ -46,7 +46,9 @@ the `cp-000-init` baseline checkpoint, and **generates the task graph**:
 the planning agent turns `--goal` into a dependency-aware `TASKS.yaml`
 when an LLM backend is configured, otherwise a deterministic 5-task
 starter skeleton (requirements → architecture → implementation → test →
-documentation) is written so the project is runnable immediately. Options:
+documentation) is written so the project is runnable immediately. If the goal
+looks like a GUI or a multi-module build, the implementation task is expanded
+into its stage chain (§3) before the graph is written. Options:
 
 | Flag | Effect |
 |---|---|
@@ -129,7 +131,22 @@ starter skeleton), and you can (re)generate it any time:
 
 Without an LLM backend, `plan` writes the starter skeleton (and refuses to
 touch a non-empty graph), and `run` on an empty graph prints a hint instead
-of dispatching. Then **refine** the generated `TASKS.yaml` — every task
+of dispatching.
+
+**GUI / multi-module goals are split for you.** When the goal (or the
+implementation task's title) reads like a GUI (`tkinter`, `qt`, `canvas`,
+`dashboard`, `desktop`, `frontend`, `graphical`, …) or a multi-module build
+(`module`, `package`, `plugin`, `microservice`, `monorepo`, …), `init` and
+`plan` replace the single implementation task with the stage chain
+`Backend Data Layer → UI Canvas Components → Application Launcher` (or
+`Module Interface Layer` for multi-module), so the plan matches how such work
+actually has to be sequenced: backend before canvas, canvas before a launcher
+that wires it together. The test task then waits on the launcher, ids stay
+`TASK-NNN`, the original deliverables and acceptance criteria move to the
+launcher, and re-running `plan` does not expand an already-expanded graph.
+Anything else is left exactly as generated.
+
+Then **refine** the generated `TASKS.yaml` — every task
 needs id, owner, status, priority, dependencies, `expected_outputs`,
 `acceptance_criteria`, and optionally `review: {required: true}`,
 `milestone`, and `requirement_ids` (REQ ids from `docs/REQUIREMENTS.md`;
@@ -490,6 +507,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | `LOOP LIMIT` (exit 3) | fix the task's inputs, then `retry TASK-003 --reason "..."` to reset its loop counters; `run` prints the exact command in its hint |
 | `retry … is DONE; retry applies to active tasks only` | for finished tasks use `reopen TASK-003 --reason "..."` — never `sed` TASKS.yaml (line numbers shift when the orchestrator rewrites it); `FAILED` tasks need only `retry` (no sed) |
 | task `FAILED` (agent/validation error) | read the printed error, fix the inputs or model output, then `retry TASK-005 --reason "..."` — the same hint appears in `run` output |
+| `agent output looks truncated` / reply cut mid-stream | local recovery runs first: a reassembled reply continues with a `recovered from a truncated payload` warning, a cut inside a file body returns `blocked` with a partial `data.edit_buffers` (nothing written to disk), and only an unsalvageable reply falls through to the one repair re-ask. Raise `ORCHESTRATOR_LLM_MAX_TOKENS` (§8) for data-heavy replies, then `retry TASK-00X` |
 | memory/context grows forever | compaction folds MEMORY.md and resets utilization at the 70% threshold |
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
 | `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings — the first rejection triggers **one automatic repair call**; if it still fails, `retry TASK-003 --reason "use data.edits on <file>"` (the reason reaches the next prompt) |
@@ -500,6 +518,8 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | run finished `HEALTHY` but the ESP32 shows no change | the execution channel is **off by default** — nothing is built or flashed. Enable it (§8b) and let the task request `data.deploy`, or close the loop yourself: `source /media/alireza/PROJECTS/esp-idf-v6.1-beta1/export.sh && idf.py build && idf.py -p /dev/ttyACM0 flash` |
 | `docs/*.log` or docs "Verification Results" claim tests ran | with the channel **off** an agent cannot execute, so any such claim is unverified — the DoD now rejects it and the task is `FAILED` rather than silently `DONE`. Enable the channel (§8b) so the claim can be backed by a transcript, or have the agent report `NOT RUN` |
 | `task declared data.deploy but nothing was executed` | the executable is not on `ORCHESTRATOR_DEPLOY_ALLOWLIST`, or `ORCHESTRATOR_DEPLOY_ENABLED` is unset. The refusal reason is in the task note; add the basename to the allowlist and `retry TASK-00X` |
+| deploy record shows `status: skipped` with reason `requirements already satisfied: …` | the interpreter is PEP 668 externally managed and the packages are already installed — pip was never spawned, so nothing ran. An all-skip result passes only when the task claims nothing and has no test-like outputs; a claim of passing tests over skipped records alone is still rejected (`NOT RUN` or a real run) |
+| `error: externally-managed-environment` from pip | the runner appends `--break-system-packages` only when pip targets the orchestrator's own environment — for `--target`/`--root` installs or another interpreter, use a project virtualenv instead |
 | `executed verification failed: ctest exited 8` | the command really ran and really failed — this is ground truth. Fix the underlying failure, then `retry TASK-00X` |
 | `declared expectation did not match reality` | the agent predicted `PASS` but the real exit code disagreed. Re-run with an honest `expect`; the mismatch is recorded in `docs/evidence/<task>/` |
 | `LLM backend unavailable` | set provider env vars (§8) |
@@ -508,5 +528,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1103 passed
+python3 -m pytest -q      # 1155 passed
 ```

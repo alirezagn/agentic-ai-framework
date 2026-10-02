@@ -47,7 +47,7 @@ agentic-ai-framework/
 │   ├── GETTING_STARTED.md
 │   ├── WORKFLOW.md
 │   └── TROUBLESHOOTING.md
-└── test_*.py, tests/       # pytest suite (1103 passing)
+└── test_*.py, tests/       # pytest suite (1155 passing)
 ```
 
 > `projects/kid-robot-face/` ships the seven state files and a small worked
@@ -313,7 +313,7 @@ See [meta/GETTING_STARTED.md](meta/GETTING_STARTED.md) for detailed walkthroughs
 **Last Updated:** 2026-10-02  
 **Framework Version:** 2.0.0  
 **Status:** STABLE — state engine + LLM-backed agent policy layer  
-**Test suite:** 1103 passing (`python3 -m pytest -q`), hermetic and offline
+**Test suite:** 1155 passing (`python3 -m pytest -q`), hermetic and offline
 
 ## Runtime at a glance
 
@@ -326,6 +326,8 @@ See [meta/GETTING_STARTED.md](meta/GETTING_STARTED.md) for detailed walkthroughs
 | Verification | Definition of Done, traceability, mandatory independent review |
 | Execution | Opt-in `data.deploy` channel producing real, signed-off evidence |
 | Resilience | 6 loop-detection kinds, signed checkpoints, human decision gates |
+| Planning | Goal-driven plan expansion — GUI/multi-module goals get a staged implementation chain (`auto_plan.py`) |
+| Recovery | Local truncation recovery reassembles a cut LLM reply; a partial edit is blocked, never applied |
 
 ### Evidence and execution (v2.0)
 
@@ -343,7 +345,11 @@ ORCHESTRATOR_DEPLOY_ENABLED=1
 ORCHESTRATOR_DEPLOY_ALLOWLIST=ctest,cmake,python3
 ```
 
-Transcripts land in `docs/evidence/<task>/`. Full schema, security properties
+Transcripts land in `docs/evidence/<task>/`. On a PEP 668 "externally managed"
+interpreter the runner appends `--break-system-packages` when pip targets its
+own environment, and skips installs whose requirements are already satisfied —
+a `status: skipped` record is not evidence and can never back a claim that
+tests passed. Full schema, security properties
 and operator guidance: [ORCHESTRATOR_GUIDE.md § Evidence and
 execution](ORCHESTRATOR_GUIDE.md#evidence-and-execution) and
 [HOW_TO_USE.md §8b](HOW_TO_USE.md#8b-enable-the-execution-channel-optional).

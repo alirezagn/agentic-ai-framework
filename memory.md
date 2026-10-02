@@ -1,6 +1,8 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-02 (audit + Critical/High/Medium remediation pass)
+> Last updated: 2026-10-02 night (architecture-redesign batch landed:
+> truncation recovery, PEP 668 deploys, goal-driven decomposition; suite now
+> **1155 collected, 1154 passed / 1 failed** — the failure is still OPEN-1)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -12,15 +14,32 @@
 
 ## Where the project stands
 
-- **Runtime is v2.0.0** (`pyproject.toml`, `cli.py --version`). `ORCHESTRATOR_GUIDE.md`
-  is the technical reference; `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1103 tests, all passing, hermetic** (`python3 -m pytest -q`).
+- **Runtime is v2.0.0** (`pyproject.toml`; `orchestrator/cli.py:84`; verified
+  `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
+  `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
+  `HOW_TO_USE.md` is the operator walkthrough.
+- **Suite: 1155 collected, 1154 passed / 1 failed** — `python3 -m pytest -q`,
+  188 s, 2026-10-02 night. The single failure is **OPEN-1** below (local
+  `checkpoints/` state, not a code regression). The number the four docs assert
+  is the *collected* count (1155) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
   deliberately exercising one.
 - **Repo state:** branch `main`, **in sync with `origin/main`** (0 ahead / 0
-  behind) at commit `101b5fa`. Working tree is clean between batches.
+  behind) at commit `0fbc665`. Working tree is **dirty as I write this**:
+  `projects/sys_mon/{PROJECT,TASKS}.yaml`, `CHANGELOG.md`, `CURRENT_STATE.md`
+  moved after the commit (TASKS summary is now `DONE: 4`), the still-tracked
+  `projects/sys_mon/__pycache__/test_sys_mon.cpython-312-pytest-9.1.1.pyc`
+  changed (`713b3ce` untracked only the *other* pyc), and a stray **0-byte file
+  named `=`** sits in the repo root. Do not describe the tree as clean until
+  that is resolved, and do not sweep those files into an unrelated commit.
+- **Commits since the audit pass** (all 2026-10-02): `1ee05ae` HIGH-01..04,
+  `2c55657` dependency automation, `2cd1fed` completed `sys_mon` sample,
+  `69a55d1` CLI init nesting fix, `2408d42` materializer no-op edit,
+  `762df40` advisory-lock fd release, `117ff10` cross-component data
+  contracts, `59de074` doc count sync, `85c26b5` entrypoint + interface
+  alignment, `0fbc665` UI fidelity + pre-implementation signature checks.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -96,6 +115,35 @@ kept as the record of what was wrong, not as current state.
   `SATISFIED_DEPENDENCY_STATUSES`), so "terminal task another task waits on" is
   the normal path, not a stall.
 
+### Open items (verified 2026-10-02 night)
+
+- **OPEN-1 — one test is red, and the cause is hermeticity, not a regression.**
+  `tests/test_hmac_verification.py::TestLegacyMetadata::test_real_on_disk_snapshots_all_pass_the_containment_policy`
+  raises `FileNotFoundError: checkpoints/sys_mon_gui/cp-risk-RISK-002/metadata.json`.
+  Three verified facts:
+  1. The directory is gone; `checkpoints/sys_mon_gui/index.json` still lists the
+     entry (index last written 18:47:56, entry `cp-risk-RISK-002` created
+     18:45:55, no `cp-risk-*` directory on disk).
+  2. `delete_checkpoint` (`orchestrator/checkpoint_manager.py:1083`) does
+     `shutil.rmtree(target_dir)` **first** and only then filters the index under
+     the lock — a crash (or a hand `rm -rf`) between the two leaves exactly this
+     dangling entry. No test in the suite deletes local checkpoints, so this was
+     external.
+  3. The test reads **gitignored, mutable** `checkpoints/` — it is not hermetic,
+     so the whole suite can go red on local state alone. The other 1154 pass.
+  Choices, none taken yet: repair the index entry (restores green, hides the
+   bug), make the delete transactional, or have the test assert "dangling index
+   entry" clearly instead of throwing. **Do not write "1155 all passing" until
+   one of them lands.**
+- **OPEN-2 — stale count prose (partly fixed this pass).** The four
+  consistency-checked docs (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`,
+  `README.md`, `review_gaps.md`) were bumped 1103 → **1155** when
+  `tests/test_architecture_redesign.py` (52 tests) landed, so
+  `TestCountsConsistentAcrossDocs` is green again. Still stale:
+  `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
+  (findings-of-record doc, deliberately untouched). The "passed" phrasing in
+  those four docs is the *collected* count and is false while OPEN-1 stands.
+
 ### Known documentation drift
 
 - `memory.md` previously claimed 314 tests and "uncommitted work" while the
@@ -144,7 +192,10 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~185 s, 1103 tests).
+- Run full pytest after every change: `python3 -m pytest -q` (~190 s, 1155 tests).
+- **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
+  test reads gitignored `checkpoints/`, so "it passed earlier today" is not
+  evidence — see OPEN-1.
 - YOLO mode: no approval prompts, no TODO stubs, relative paths, autonomous execution.
 - LLM backend is stdlib-only; tests inject `FakeLLMClient` / `transport`.
   **The suite must stay offline-safe** — do not add a test that dials out.
@@ -231,8 +282,64 @@ kept as the record of what was wrong, not as current state.
   `SYSTEM_RULES` (all 10 do) — that separation is load-bearing, do not merge the
   two blocks. `firmware_agent` is a deliberate second registration of
   `SoftwareAgent`.
+- **Prompt-contract batch (post-audit)** — `ENTRYPOINT_CONTRACT` and
+  `INTERFACE_ALIGNMENT_CONTRACT` (`orchestrator/agents/base_agent.py:398`,
+  `:426`) are appended to every agent's rules (`base_agent.py:543`), so the
+  entrypoint obligation is stated once in source and inherited everywhere.
+  `DATA_CONTRACT_SPEC` and `UI_FIDELITY_SPEC` (`orchestrator/prompt_builder.py`)
+  are injected only when `agent_id in DATA_CONTRACT_SPEC_AGENTS` /
+  `UI_FIDELITY_SPEC_AGENTS` — both `frozenset({"software_agent"})` — so
+  "which agents get which spec" is one frozenset, not a copy per site.
+  Enforcement: `tests/test_agent_contract_enforcement.py`,
+  `tests/test_ui_contract_enforcement.py`,
+  `tests/test_data_contract_automation.py`.
+- **Advisory-lock fds are released** (`state_manager.release_file_locks()`,
+  `:449`): cached descriptors from `_file_lock` accumulated across the suite
+  until the fd limit was hit. Lock files still persist on disk by design.
 - **Checkpoint id kinds**: `cp-000-init`, `cp-phase-<name>`, `cp-milestone-<slug>`,
   `cp-risk-<id>`, `cp-auto-<NNN>`. Lowercase phase names (`cp-phase-release`).
+- **Architecture-redesign batch (2026-10-02 night, three features):**
+  1. **Truncation recovery** — `orchestrator/agents/llm_agent.py`
+     `recover_truncated_payload()` + `_recover_truncated_output()`, wired into
+     `LLMAgent.execute` and `_execute_edit_session` *before* the legacy
+     `_repair_truncated_output`. It rescans the raw text for `{` starts /
+     fenced JSON, reassembles a cut JSON document with a stack scanner, and
+     either (a) returns a complete reassembled payload (status kept, warning
+     `"recovered from a truncated payload (local chunked parse)"`), or (b)
+     returns `status="blocked"` with partial file bodies in
+     `data.edit_buffers` — buffers are **never auto-applied**, because
+     `BaseAgent.run()` only materializes edits when `status == COMPLETED`, or
+     (c) yields nothing so the old repair path runs unchanged (the fenced
+     `TRUNCATED` fixture in `test_agents_and_review.py` still returns `None`
+     after 2 client calls). Order matters: local recovery first preserves the
+     truncation-repair tests.
+  2. **PEP 668 deploys** — `orchestrator/deploy_runner.py` gained
+     `is_pep668_managed()` / `pip_targets_running_environment()` /
+     `pip_requirements_satisfied()` and a `STATUS_SKIPPED` record kind. In
+     `run_one`: skip first (externally-managed interpreter + target under
+     `sys.prefix` + bare-name/`==` specs all provably satisfied + no
+     unskipable option such as `-U`/`-e`/`--target`) → else append
+     `--break-system-packages` once. Skipped records are `executed: false`,
+     `exit_code: null`, and `_evidence_problems` accepts an all-skip result
+     only when the task claims nothing and emits no test-like outputs — a
+     skip can never back an execution claim.
+  3. **Goal-driven decomposition** — new `orchestrator/auto_plan.py`
+     (stdlib-only). `should_decompose()` scans the goal + implementation-task
+     title for `GUI_SIGNALS` (tkinter/qt/canvas/dashboard/…) or
+     `MULTI_MODULE_SIGNALS` (module/plugin/…), GUI wins ties; "web", "app",
+     "widget" deliberately do **not** trigger. `expand_implementation_stages()`
+     replaces exactly one `software_agent` task with
+     `Backend Data Layer → UI Canvas Components → Application Launcher`
+     (or `Module Interface Layer` for multi-module), chains deps
+     (`requirements → data → middle → launcher → original dependents`),
+     renumbers `TASK-NNN` and remaps dependencies, keeps the original
+     `expected_outputs`/acceptance criteria on the launcher, mirrors the
+     replaced task's output style (bare `IMPLEMENTATION.md` stays bare), and is
+     idempotent. Contract text `PLANNING_RULES` is appended to
+     `MasterOrchestrator.build_plan`; `seed_starter_tasks` expands specs and
+     joins every later task to `implementation_join_index()` (last
+     `software_agent`, fallback index 2), so starter seeds grow 4 → 7 for a
+     GUI goal. Expansion may exceed `max_tasks` by up to 2 — atomicity wins.
 
 ---
 
@@ -244,7 +351,7 @@ suites added during remediation:
 
 | File | Covers |
 |---|---|
-| `tests/test_hmac_verification.py` | CRIT-03 — signing truth table, tampering, key rotation |
+| `tests/test_hmac_verification.py` | CRIT-03 — signing truth table, tampering, key rotation; **OPEN-1 lives in its `TestLegacyMetadata` real-on-disk test** |
 | `tests/test_deploy_ground_truth.py` | CRIT-01 — runner refusals, live execution, DoD evidence |
 | `tests/test_task_status_injection.py` | CRIT-05 — status/execution injection |
 | `tests/test_state_io_and_contracts.py` | atomic writes, single-parse derived state, deploy contract (its "HIGH-01..04" labels are the *state I/O* batch, not audit IDs) |
@@ -259,6 +366,7 @@ suites added during remediation:
 | `tests/test_cli_init.py` | init destination resolution, name validation, traversal refusal |
 | `tests/test_dependency_automation.py` | dependency contract — declaration, install ordering, honest refusal, `sys_mon` regression |
 | `tests/test_final_high_gaps.py` | audit HIGH-01..04 — pinned-agent isolation, checkpoint trigger evaluation, off-lock DoD repair, deep validation + reachability |
+| `tests/test_architecture_redesign.py` | 52 tests — truncation/chunked-JSON recovery, PEP 668 `--break-system-packages` + satisfied-install skip, skip-vs-DoD evidence, decomposition scope/chains/starter seeding |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
 `checkpoints_root`, `FakeLLMClient`, `_task`, `FakeDeployRunner` (+ the

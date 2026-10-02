@@ -110,6 +110,31 @@ orchestrator [--project PATH] [--version] <command>
 **Exit codes:** `0` success · `1` no command · `2` usage / state error ·
 `3` loop limit or STALLED/BLOCKED health · `4` `HUMAN_DECISION_REQUIRED`
 
+### Goal-driven plan expansion (`orchestrator.auto_plan`)
+
+`init`/`plan` (LLM plan *and* starter skeleton) run the generated graph through
+`expand_implementation_stages()` before it is written. When the goal or the
+implementation task's title looks like a **GUI**
+(`gui`, `tkinter`, `pyqt`/`qt`, `canvas`, `dashboard`, `desktop`, `frontend`,
+`webui`, `graphical`, `ui`, …) or a **multi-module** build (`module`, `package`,
+`plugin`, `microservice`, `monorepo`, …), the single `software_agent`
+implementation task is replaced by the matching stage chain:
+
+- GUI → `Backend Data Layer → UI Canvas Components → Application Launcher`
+- multi-module → `Backend Data Layer → Module Interface Layer → Application Launcher`
+
+The chain is wired as `requirements → data layer → middle stage → launcher →
+original dependents` (the test task now waits on the launcher), `TASK-NNN` ids
+are renumbered and every dependency remapped, and the launcher inherits the
+replaced task's `expected_outputs` and acceptance criteria — so a deliverable
+never disappears. Expansion is **idempotent** (already-expanded graphs are left
+alone), keeps the replaced task's output style (a bare `IMPLEMENTATION.md`
+stays bare rather than gaining a `docs/` prefix), and may exceed
+`--max-tasks` by up to two tasks: not splitting the implementation would be a
+plan the framework cannot execute correctly. Goals that mention neither
+signal are untouched. Detection is deliberately conservative — the words
+`web`, `app` and `widget` alone do not trigger it.
+
 ### Lifecycle phases
 
 `PROJECT.yaml.phase.current` is derived forward-only from the task graph
@@ -223,6 +248,23 @@ with those problems. Successful change sets are recorded in
 Verification is shared: `definition_of_done` delegates its delivery checks to
 the same `delivery_problems()` helper (`orchestrator/agents/base_agent.py`),
 so the session and the DoD can never disagree.
+
+**Truncation recovery:** a reply cut mid-stream (token budget, dropped
+connection) no longer fails the task by default. Before the legacy one-shot
+repair, `LLMAgent` runs a local recovery pass
+(`recover_truncated_payload`, `orchestrator/agents/llm_agent.py`): it re-finds
+the JSON in the raw text (fenced ```json blocks first, then brace-matched
+candidates), reassembles a document whose tail was cut, and resolves the cut
+against the file it was editing. Three ordered outcomes: a fully reassembled
+payload is used as-is (the model's status is kept and a warning
+`recovered from a truncated payload (local chunked parse)` is attached); a cut
+**inside a file body** returns `status=blocked` with the partial body in
+`data.edit_buffers` so nothing is applied — edits materialize only on
+`completed`, a partial body is never written to disk; and when there is nothing
+to salvage the pass yields nothing and the legacy `_repair_truncated_output`
+runs unchanged (one re-ask, and its `TRUNCATED` contract — no JSON at all
+returns `failed` — is untouched). Raise `ORCHESTRATOR_LLM_MAX_TOKENS` for
+data-heavy replies; recovery is a safety net, not a token budget.
 
 **Delivery manifest (G22):** the agent never guesses the delivery channel.
 At payload build, `relevant_context()` adds a `delivery_manifest` entry
@@ -583,7 +625,7 @@ also auto-loads `./.env`, e.g. the repo's Ollama preset in `.env.example`):
 |---|---|
 | `ORCHESTRATOR_LLM_PROVIDER` | `anthropic` \| `ollama` \| `openrouter` (auto-detected from keys) |
 | `ORCHESTRATOR_LLM_MODEL` | Model id (project default: `gemma4:12b`) |
-| `ORCHESTRATOR_LLM_MAX_TOKENS` | Output-token budget per completion (default `4096`; raise for data-heavy replies — truncated JSON fails validation with an explicit "looks truncated" error) |
+| `ORCHESTRATOR_LLM_MAX_TOKENS` | Output-token budget per completion (default `4096`; raise for data-heavy replies — a cut reply is first run through local truncation recovery, and only what that cannot salvage fails validation with an explicit "looks truncated" error) |
 | `ORCHESTRATOR_LLM_NUM_CTX` | Ollama context window for `num_ctx` (default `16384`; the server default of 4096 silently caps prompt+output and truncates JSON — native `/api/chat` only) |
 | `ORCHESTRATOR_LLM_TIMEOUT` | Per-request timeout in seconds (default `120`; raise for slow/busy servers) |
 | `ANTHROPIC_API_KEY` | Enables `anthropic` |
@@ -625,8 +667,20 @@ export ORCHESTRATOR_DEPLOY_ALLOWLIST=python3,pip,pytest
 Allowlisting `pip` lets an agent install arbitrary packages from an index, which
 is a real supply-chain decision — scope it to the projects that need it rather
 than adding it globally. On a PEP 668 "externally managed" interpreter the
-install still fails by design; create and activate a virtualenv for the project
-instead of reaching for `--break-system-packages`.
+runner no longer fails by design: before spawning pip it appends
+`--break-system-packages` when the invocation targets *that same* environment
+(`pip_targets_running_environment` — a `--target`/`--root`/`--prefix` pip, or a
+different interpreter, is left alone), and it **skips** the install entirely
+when the interpreter is externally managed and every requirement is already
+provably satisfied (bare names and exact `==` pins resolvable through
+`importlib.metadata`; `--upgrade`, `--force-reinstall`, `-e` and friends always
+run). A skip is recorded as `status: skipped`, `executed: false`, no exit code.
+It is not ground truth: the DoD accepts an all-skipped result **only** when the
+output claims nothing and names no test-like expected output (a genuine
+"nothing was left to install"), while a summary that claims tests passed over
+skipped records alone is still refused — the agent must report
+`test_status: NOT RUN` or really run the command. Prefer a project virtualenv
+for anything that must really install.
 
 See [Snapshot integrity](#snapshot-integrity) for the four verdicts
 (`VERIFIED` / `UNSIGNED` / `TAMPERED` / `UNVERIFIABLE`) and how they are decided.
@@ -713,7 +767,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1103 passed
+python3 -m pytest -q          # full suite — 1155 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ```
