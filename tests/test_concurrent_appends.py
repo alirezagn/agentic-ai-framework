@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import List
 
 import pytest
 
@@ -39,7 +39,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from conftest import build_test_project  # noqa: E402
-from orchestrator import config  # noqa: E402
 from orchestrator import state_manager as sm  # noqa: E402
 from orchestrator.checkpoint_manager import CheckpointManager  # noqa: E402
 from orchestrator.state_manager import StateError, StateManager  # noqa: E402
@@ -85,7 +84,7 @@ def _run_processes(project: Path, count: int, kind: str, processes: int) -> None
 
 class TestDecisionIdAllocation:
     def test_ids_are_unique_across_threads(self, tmp_path: Path) -> None:
-        state = StateManager(build_test_project(tmp_path / "p"))
+        _ = StateManager(build_test_project(tmp_path / "p"))  # baseline state
         allocated: List[str] = []
         guard = threading.Lock()
 
@@ -177,7 +176,7 @@ class TestRiskIdAllocation:
         assert len(ids) == 24
 
     def test_risks_are_unique_across_threads(self, tmp_path: Path) -> None:
-        state = StateManager(build_test_project(tmp_path / "p"))
+        _ = StateManager(build_test_project(tmp_path / "p"))  # baseline state
         allocated: List[str] = []
         guard = threading.Lock()
 
@@ -356,7 +355,7 @@ class TestCheckpointIndexLocking:
 
     def test_next_checkpoint_id_is_unique_under_threads(self, tmp_path: Path) -> None:
         project = build_test_project(tmp_path / "p")
-        manager = CheckpointManager(project, checkpoints_root=tmp_path / "ck")
+        _ = CheckpointManager(project, checkpoints_root=tmp_path / "ck")  # creates ck root
         allocated: List[str] = []
         guard = threading.Lock()
 

@@ -22,7 +22,6 @@ Layout note: the suite lives at the repository root (``conftest.py`` supplies
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -37,10 +36,8 @@ if str(REPO_ROOT) not in sys.path:
 from conftest import build_test_project  # noqa: E402
 from orchestrator import config  # noqa: E402
 from orchestrator.agents.base_agent import BaseAgent  # noqa: E402
-from orchestrator.checkpoint_manager import CheckpointManager  # noqa: E402
 from orchestrator.orchestrator import (  # noqa: E402
     MasterOrchestrator,
-    OrchestratorError,
     _recorded_dod_problems,
 )
 from orchestrator.prompt_builder import OUTPUT_FORMAT_INSTRUCTIONS, build_prompt  # noqa: E402

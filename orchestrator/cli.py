@@ -1226,7 +1226,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # operator stopped this" from "the orchestrator gave up".
         logger.warning("interrupted by operator")
         print("\nERROR: interrupted", file=sys.stderr)
-        _telemetry_error(command_name, exc, level="WARNING")
+        # `exc` is not bound in this handler (only in the ones below), and
+        # referencing it turned every Ctrl-C into a NameError instead of 130.
+        _telemetry_error(command_name, KeyboardInterrupt(), level="WARNING")
         return 130
     except Exception as exc:
         # GAP-MED-01. Last-resort handler. Filesystem conditions (ENOSPC, EACCES,

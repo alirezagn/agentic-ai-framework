@@ -18,3 +18,23 @@ include = ["orchestrator*"]
 
 [tool.pytest.ini_options]
 testpaths = ["."]
+
+[project.optional-dependencies]
+# `python3 -m pip install -e .[dev]` then `ruff check .` must report 0 errors.
+dev = ["ruff>=0.16"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+# Baseline: ruff's classic pyflakes/PEP 8 error set (E4, E7, E9, F).
+# Modernisation/style rules (UP, I, RUF, …) are deliberately not enforced on
+# this codebase — the gate is "no undefined names, no unused imports or
+# variables, no syntax-adjacent errors".
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Root test modules bootstrap sys.path before their imports (same pattern as
+# conftest.py), which is E402 by design.
+"test_*.py" = ["E402"]

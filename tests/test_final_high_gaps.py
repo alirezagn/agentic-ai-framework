@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict, List
 
 import pytest
 import yaml
@@ -47,11 +47,9 @@ from orchestrator.agents.base_agent import (  # noqa: E402
     BaseAgent,
     create_agent,
 )
-from orchestrator.llm_client import LLMClient  # noqa: E402
 from orchestrator.orchestrator import MasterOrchestrator  # noqa: E402
 from orchestrator.state_manager import (  # noqa: E402
     ADVISORY_PREFIX,
-    StateError,
     StateManager,
 )
 

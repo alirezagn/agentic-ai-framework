@@ -35,7 +35,6 @@ from ..prompt_builder import (
 )
 from ..state_manager import StateManager, load_text_file, utc_now_iso
 
-import os
 import hmac
 import hashlib
 
@@ -52,27 +51,6 @@ _EXPECTED_CONTEXT_CAP = 32_000
 _EXPECTED_TOTAL_CAP = 40_000
 # Current bodies injected into edit-session feedback after apply errors.
 _EDITS_FEEDBACK_CAP = 12_000
-
-
-def restore_checkpoint(base_dir: str, metadata_filename: str):
-    # Old vulnerable line: target = os.path.join(base_dir, metadata_filename)
-    
-    # Updated secure line:
-    target = validate_safe_path(base_dir, metadata_filename)
-    
-    with open(target, 'r') as f:
-        # Load checkpoint data safely...
-        pass
-
-def validate_safe_path(base_dir: str, target_filename: str) -> Path:
-    """Prevents Zip Slip / Path Traversal by enforcing directory boundaries."""
-    base_path = Path(base_dir).resolve()
-    target_path = (base_path / target_filename).resolve()
-    
-    if not target_path.is_relative_to(base_path):
-        raise ValueError(f"Path traversal detected for filename: {target_filename}")
-        
-    return target_path
 
 def verify_hmac_signature(payload: bytes, signature: str | None, secret_key: str | None) -> bool:
     """Fails safely if key or signature is missing."""

@@ -6,7 +6,7 @@ One class per gap so a failure names the gap it regressed.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pytest
 
@@ -462,9 +462,6 @@ class TestCheckpointsAndInitA7A8:
 class TestMemoryCompactionB1:
     def test_compact_folds_middle_keeps_head_and_tail(self, tmp_path: Path) -> None:
         state = StateManager(build_test_project(tmp_path / "p"))
-        filler = "\n\n## Section {}\n\n{}".format(
-            "x", "lorem ipsum dolor sit amet " * 60
-        )
         memory = (
             "# PROJECT_MEMORY — p\n\n## Goal\n\nbuild it\n"
             + "".join(f"## Topic {i}\n\nbody {i} " + "y" * 800 + "\n\n" for i in range(90))

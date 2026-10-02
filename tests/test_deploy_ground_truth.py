@@ -50,6 +50,32 @@ from orchestrator.orchestrator import MasterOrchestrator  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+# Hermetic by construction
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite must not inherit the operator's shell.
+
+    ``config.deploy_enabled()`` and ``config.deploy_allowlist()`` read the
+    environment on every call, so an exported
+    ``ORCHESTRATOR_DEPLOY_ENABLED=1`` / ``ORCHESTRATOR_DEPLOY_ALLOWLIST=*``
+    (a documented operator opt-in) used to turn "the shipped default refuses
+    everything" into a real process spawn during pytest. Module-level scope
+    makes every test here start from the shipped defaults; tests that need the
+    channel switch it back on with ``monkeypatch.setenv`` in the test body.
+    """
+    for name in (
+        "ORCHESTRATOR_DEPLOY_ENABLED",
+        "ORCHESTRATOR_DEPLOY_ALLOWLIST",
+        "ORCHESTRATOR_DEPLOY_TIMEOUT",
+        "ORCHESTRATOR_DEPLOY_MAX_OUTPUT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+# ---------------------------------------------------------------------------
 # Policy: closed by default
 # ---------------------------------------------------------------------------
 
@@ -62,16 +88,6 @@ class TestDeployPolicyDefaults:
     def test_allowlist_is_empty_by_default(self) -> None:
         assert config.DEPLOY_ALLOWLIST == ()
         assert config.deploy_allowlist() == ()
-
-    @pytest.fixture(autouse=True)
-    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for name in (
-            "ORCHESTRATOR_DEPLOY_ENABLED",
-            "ORCHESTRATOR_DEPLOY_ALLOWLIST",
-            "ORCHESTRATOR_DEPLOY_TIMEOUT",
-            "ORCHESTRATOR_DEPLOY_MAX_OUTPUT",
-        ):
-            monkeypatch.delenv(name, raising=False)
 
     def test_enabled_flag_alone_is_not_enough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Enabling with an empty allowlist must stay inert."""
@@ -731,7 +747,6 @@ class TestDispatchIntegration:
         )
         orch.run_task("TASK-002")
         document = orch.state.load_tasks_document()
-        body = json.dumps(document)
         assert "42/42 tests passed" not in json.dumps(
             [t for t in document["tasks"] if t["id"] == "TASK-002"][0].get("execution", {})
         )

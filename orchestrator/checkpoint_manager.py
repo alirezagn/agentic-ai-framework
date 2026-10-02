@@ -50,11 +50,11 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
@@ -65,7 +65,6 @@ from .path_policy import (
     resolve_inside,
     validate_filenames,
     validate_snapshot_id,
-    validate_state_file_name,
 )
 from .state_manager import StateError, _file_lock, atomic_write_text, utc_now_iso
 
@@ -353,16 +352,19 @@ class CheckpointManager:
 
     def _save_index(self, index: Dict[str, Any]) -> None:
         atomic_write_text(self.index_path, json.dumps(index, indent=2, sort_keys=False) + "\n")
-
     @contextmanager
     def _index_lock(self) -> Iterator[Dict[str, Any]]:
-        """Read-modify-write the index inside one lock (GAP-CRIT-06).
+        """Run a read-modify-write of the index inside one lock (GAP-CRIT-06).
 
-        Yields the current index; whatever the caller assigns to ``index_out``
-        is persisted on a clean exit. The read, the mutation and the write all
-        happen under the same lock, so two processes saving a checkpoint at the
-        same time cannot both read the same entry list and have the second write
-        silently discard the first one's checkpoint record.
+        Yields a box; a caller assigns the updated index to ``box["index"]``
+        and it is persisted on a clean exit. Callers re-read the index inside
+        the lock (each mutation starts with ``self._load_index()``), so a
+        corrupted index surfaces here, under the lock, before any write. The
+        read, the mutation and the write all happen under the same lock, so
+        two processes saving a checkpoint at the same time cannot both read
+        the same entry list and have the second write silently discard the
+        first one's checkpoint record.
+
 
         Previously this was a bare load/modify/save with no lock, and the
         consequence was worse than a lost entry: ``check_milestones`` keeps a
@@ -371,7 +373,7 @@ class CheckpointManager:
         incomplete forever.
         """
         with _file_lock(self.index_path):
-            index = self._load_index()
+            self._load_index()  # raises under the lock if the index is corrupted
             box: Dict[str, Any] = {}
             yield box
             if "index" in box:
@@ -494,7 +496,7 @@ class CheckpointManager:
         checkpoint_id: str,
         reason: str = "context compaction",
         detail: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Write an explicit, queryable audit entry for a compaction event.
 
         GAP-MED-03. A context compaction is a **state-changing event**: the
@@ -510,13 +512,13 @@ class CheckpointManager:
         discoverable without grepping prose. Both are written before the fold
         runs, so the event survives its own side effects.
 
-        Returns the recorded index entry, or ``None`` when the checkpoint is
-        unknown (a compaction that failed to snapshot must not invent an audit
-        record).
+        Raises :class:`CheckpointNotFoundError` when the checkpoint is unknown
+        (a compaction that failed to snapshot must not invent an audit
+        record), otherwise returns the recorded index entry.
         """
         checkpoint = self.load_checkpoint(checkpoint_id)
         entry = {
-            "id": checkpoint_id,
+            "id": checkpoint.checkpoint_id,
             "created_at": utc_now_iso(),
             "phase": "COMPACTION",
             "notes": f"Context compaction: {reason}",
@@ -561,6 +563,12 @@ class CheckpointManager:
         to fail the task with an error about the checkpoint rather than about
         the task. The default stays strict for callers that mean to reuse an
         id by accident.
+
+        The snapshot is staged in a sibling directory and swapped in only when
+        it is complete: a failure while building it (empty source, copy error,
+        crash) leaves the previous snapshot and its index row untouched, and
+        the index row is written after the swap, so it can only ever describe
+        a finished directory.
         """
         if not checkpoint_id:
             raise CheckpointError("checkpoint_id must be a non-empty string")
@@ -570,86 +578,117 @@ class CheckpointManager:
         if not source.exists():
             raise CheckpointError(f"Snapshot source does not exist: {source}")
 
-        if target_dir.exists():
-            if not overwrite:
-                raise CheckpointExistsError(
-                    f"Checkpoint '{checkpoint_id}' already exists at {target_dir}"
-                )
-            logger.warning(
-                "checkpoint '%s' already exists — replacing it (overwrite=True)",
-                checkpoint_id,
+        if target_dir.exists() and not overwrite:
+            raise CheckpointExistsError(
+                f"Checkpoint '{checkpoint_id}' already exists at {target_dir}"
             )
-            shutil.rmtree(target_dir)
 
-        target_dir.mkdir(parents=True, exist_ok=False)
+        # Stage beside the target instead of rmtree-then-copy in place. The
+        # old order destroyed the existing snapshot as soon as any later step
+        # failed, which is how ``checkpoints/*/index.json`` grew rows for
+        # directories that no longer existed: the index promised a snapshot,
+        # ``list_checkpoints``/``has_checkpoint`` believed it, and every reader
+        # that opened ``metadata.json`` got FileNotFoundError. A failure now
+        # costs only the staging directory.
+        for stale in self.checkpoints_root.glob(f".staging-{target_dir.name}-*"):
+            shutil.rmtree(stale, ignore_errors=True)
+        staging_dir = self.checkpoints_root / f".staging-{target_dir.name}-{os.getpid()}"
+        staging_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            # Read side: only allowlisted state files, each resolved inside the
+            # snapshot source so a symlink planted in a project cannot redirect
+            # a copy to somewhere else.
+            copied_files: Dict[str, str] = {}
+            for name in config.STATE_FILES:
+                try:
+                    source_file = resolve_inside(source, name, context="snapshot source file")
+                except PathPolicyError as exc:
+                    raise CheckpointError(
+                        f"Refusing to snapshot '{name}' from {source}: {exc}"
+                    ) from exc
+                if not source_file.is_file():
+                    continue
+                destination = self._resolve_snapshot_file(checkpoint_id, staging_dir, name)
+                try:
+                    shutil.copy2(source_file, destination)
+                except OSError as exc:
+                    raise CheckpointError(
+                        f"Failed to copy {source_file} into checkpoint: {exc}"
+                    ) from exc
+                copied_files[name] = _sha256_file(destination)
 
-        # Read side: only allowlisted state files, each resolved inside the
-        # snapshot source so a symlink planted in a project cannot redirect a
-        # copy to somewhere else.
-        copied_files: Dict[str, str] = {}
-        for name in config.STATE_FILES:
-            try:
-                source_file = resolve_inside(source, name, context="snapshot source file")
-            except PathPolicyError as exc:
+            if not copied_files:
                 raise CheckpointError(
-                    f"Refusing to snapshot '{name}' from {source}: {exc}"
-                ) from exc
-            if not source_file.is_file():
-                continue
-            destination = self._resolve_snapshot_file(checkpoint_id, target_dir, name)
-            try:
-                shutil.copy2(source_file, destination)
-            except OSError as exc:
-                raise CheckpointError(f"Failed to copy {source_file} into checkpoint: {exc}") from exc
-            copied_files[name] = _sha256_file(destination)
+                    f"No state files found in {source}; refusing to save an empty checkpoint"
+                )
 
-        if not copied_files:
-            target_dir.rmdir()
-            raise CheckpointError(f"No state files found in {source}; refusing to save an empty checkpoint")
+            checksum = self._compute_checksum(copied_files)
 
-        checksum = self._compute_checksum(copied_files)
+            metadata: Dict[str, Any] = {
+                "id": checkpoint_id,
+                "project": self.project_name,
+                "created_at": utc_now_iso(),
+                "phase": self._read_phase(),
+                "version": self._read_version(),
+                "notes": notes,
+                "files": copied_files,
+                "file_count": len(copied_files),
+                "checksum": checksum,
+                "checksum_algorithm": config.CHECKSUM_ALGORITHM,
+                "source": str(source),
+            }
+            # Signing is opt-in by *key presence*, and the claim is persisted
+            # explicitly. Recording ``signed`` alongside the signature is what
+            # makes "delete the signature" a detectable tamper rather than a
+            # silent downgrade to checksum-only verification.
+            signing_key = _signing_key()
+            if signing_key:
+                key_id = _signing_key_id()
+                metadata["signed"] = True
+                metadata["key_id"] = key_id
+                metadata["signature_algorithm"] = config.CHECKPOINT_SIGNATURE_ALGORITHM
+                metadata["signature_version"] = config.CHECKPOINT_SIGNATURE_VERSION
+                metadata["signature"] = _signature(
+                    signing_key,
+                    signature_payload(
+                        checkpoint_id,
+                        key_id,
+                        str(metadata["created_at"]),
+                        copied_files,
+                    ),
+                )
+            else:
+                metadata["signed"] = False
+                metadata["key_id"] = None
+                metadata["signature_algorithm"] = None
+                metadata["signature_version"] = config.CHECKPOINT_SIGNATURE_VERSION
+                metadata["signature"] = None
 
-        metadata: Dict[str, Any] = {
-            "id": checkpoint_id,
-            "project": self.project_name,
-            "created_at": utc_now_iso(),
-            "phase": self._read_phase(),
-            "version": self._read_version(),
-            "notes": notes,
-            "files": copied_files,
-            "file_count": len(copied_files),
-            "checksum": checksum,
-            "checksum_algorithm": config.CHECKSUM_ALGORITHM,
-            "source": str(source),
-        }
-        # Signing is opt-in by *key presence*, and the claim is persisted
-        # explicitly. Recording ``signed`` alongside the signature is what makes
-        # "delete the signature" a detectable tamper rather than a silent
-        # downgrade to checksum-only verification.
-        signing_key = _signing_key()
-        if signing_key:
-            key_id = _signing_key_id()
-            metadata["signed"] = True
-            metadata["key_id"] = key_id
-            metadata["signature_algorithm"] = config.CHECKPOINT_SIGNATURE_ALGORITHM
-            metadata["signature_version"] = config.CHECKPOINT_SIGNATURE_VERSION
-            metadata["signature"] = _signature(
-                signing_key,
-                signature_payload(
-                    checkpoint_id,
-                    key_id,
-                    str(metadata["created_at"]),
-                    copied_files,
-                ),
+            atomic_write_text(
+                staging_dir / config.CHECKPOINT_METADATA_FILE,
+                json.dumps(metadata, indent=2) + "\n",
             )
-        else:
-            metadata["signed"] = False
-            metadata["key_id"] = None
-            metadata["signature_algorithm"] = None
-            metadata["signature_version"] = config.CHECKPOINT_SIGNATURE_VERSION
-            metadata["signature"] = None
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
 
-        atomic_write_text(target_dir / config.CHECKPOINT_METADATA_FILE, json.dumps(metadata, indent=2) + "\n")
+        # Swap: the target directory disappears only once the replacement is
+        # ready to take its place.
+        try:
+            if target_dir.exists():
+                if not overwrite:
+                    raise CheckpointExistsError(
+                        f"Checkpoint '{checkpoint_id}' already exists at {target_dir}"
+                    )
+                logger.warning(
+                    "checkpoint '%s' already exists — replacing it (overwrite=True)",
+                    checkpoint_id,
+                )
+                shutil.rmtree(target_dir)
+            staging_dir.rename(target_dir)
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
 
         logger.info(
             "checkpoint '%s' created (%d files, signed=%s, key_id=%s)",
@@ -1107,10 +1146,14 @@ class CheckpointManager:
         GAP-CRIT-06: the index is filtered under the lock, so a concurrent
         ``create_checkpoint`` cannot have its record erased by a delete that read
         the index a moment earlier.
+
+        The **index row goes first**: a crash between the two steps then leaves
+        an unreferenced directory (harmless — nothing lists it, and a later
+        create with ``overwrite`` replaces it) instead of an index row pointing
+        at a directory that is gone, which is what used to break every reader
+        of ``metadata.json``.
         """
         target_dir = self.checkpoint_dir(checkpoint_id)
-        if target_dir.exists():
-            shutil.rmtree(target_dir)
         with self._index_lock() as box:
             index = self._load_index()
             index["checkpoints"] = [
@@ -1119,6 +1162,16 @@ class CheckpointManager:
                 if entry.get("id") != checkpoint_id
             ]
             box["index"] = index
+        if target_dir.exists():
+            try:
+                shutil.rmtree(target_dir)
+            except OSError as exc:
+                logger.warning(
+                    "checkpoint '%s': index entry removed but %s could not be deleted: %s",
+                    checkpoint_id,
+                    target_dir,
+                    exc,
+                )
 
     # ------------------------------------------------------------------
     # Directory backup

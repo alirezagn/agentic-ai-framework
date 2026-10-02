@@ -303,7 +303,7 @@ class TestArtifactEmission:
         task = agent.state_manager.get_task("TASK-002")
         task = dict(task)
         task["expected_outputs"] = ["REQUIREMENTS.md"]
-        output = agent.run(task)
+        agent.run(task)
         # requirements agent does not supply documents; default render is used
         assert (test_project / "docs" / "REQUIREMENTS.md").exists()
 
@@ -1123,7 +1123,7 @@ class TestReviewFlow:
         fake = FakeReviewAgent(state_manager=orchestrator.state, invalid=True)
         orchestrator.register_agent(fake)
         orchestrator.run_cycle()
-        results = orchestrator.run_cycle()
+        orchestrator.run_cycle()
 
         task = orchestrator.get_task("TASK-002")
         assert task["status"] == config.TASK_REVIEW

@@ -30,10 +30,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 
@@ -692,6 +691,13 @@ class TestLegacyMetadata:
                 continue
             entries = json.loads(index.read_text()).get("checkpoints", [])
             for entry in entries:
+                if entry.get("reserved"):
+                    # A reservation is not a snapshot: _next_checkpoint_id
+                    # writes the row before create_checkpoint builds the
+                    # directory, so metadata.json legitimately does not exist
+                    # yet (a crash in between leaves a documented "harmless
+                    # gap"). Rows for snapshots are checked below.
+                    continue
                 metadata = json.loads(
                     (project_dir / entry["id"] / config.CHECKPOINT_METADATA_FILE).read_text()
                 )

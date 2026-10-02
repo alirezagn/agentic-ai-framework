@@ -17,7 +17,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -25,8 +25,6 @@ try:  # POSIX advisory locking; absent on Windows.
     import fcntl
 except ImportError:  # pragma: no cover - platform dependent
     fcntl = None  # type: ignore[assignment]
-
-logger = logging.getLogger(__name__)
 
 from . import config
 from .auto_plan import expand_implementation_stages, implementation_join_index
@@ -42,6 +40,8 @@ from .config import (
     TASKS_FILE,
     priority_rank,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # GAP-HIGH-04: findings that describe a graph which works but is probably not

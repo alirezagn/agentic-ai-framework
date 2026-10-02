@@ -20,6 +20,7 @@ Three guarantees are pinned here:
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -30,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import orchestrator.checkpoint_manager as checkpoint_module  # noqa: E402
 from conftest import build_test_project  # noqa: E402
 from orchestrator import config  # noqa: E402
 from orchestrator.agents.base_agent import AgentOutput, BaseAgent  # noqa: E402
@@ -217,3 +219,117 @@ class TestDispatchSurvivesCollision:
         assert "disk full" not in text, text
         assert "connection refused" in text, text
         assert result.new_status == config.TASK_FAILED
+
+
+# ===========================================================================
+# The index can never point at a directory that is gone
+# ===========================================================================
+
+
+class TestIndexNeverOutlivesItsDirectory:
+    """The failure this pins actually happened on disk.
+
+    ``checkpoints/sys_mon_full/index.json`` and ``checkpoints/sys_mon_gui/
+    index.json`` each held a ``cp-risk-RISK-002`` row whose directory had been
+    rmtree'd by a failed overwrite: the old ``create_checkpoint`` removed the
+    old snapshot *first* and only then tried to write the new one, so any
+    failure in between left the index promising a snapshot that no longer
+    existed. Every reader of ``metadata.json`` (including the repository
+    containment test) then died with FileNotFoundError, and
+    ``has_checkpoint``/``list_checkpoints`` kept reporting the ghost.
+    """
+
+    @staticmethod
+    def _project(tmp_path: Path) -> Path:
+        project = tmp_path / "p"
+        project.mkdir(parents=True, exist_ok=True)
+        (project / "PROJECT.yaml").write_text("project:\n  name: x\n")
+        return project
+
+    def test_empty_source_overwrite_keeps_the_previous_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        project = self._project(tmp_path)
+        manager = _manager(project, tmp_path / "ck")
+        manager.create_checkpoint("cp-risk-RISK-001", notes="original")
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        with pytest.raises(CheckpointError, match="No state files found"):
+            manager.create_checkpoint(
+                "cp-risk-RISK-001", source_path=empty, overwrite=True
+            )
+
+        assert (tmp_path / "ck" / "cp-risk-RISK-001").is_dir()
+        assert manager.load_checkpoint("cp-risk-RISK-001").notes == "original"
+        rows = [
+            entry
+            for entry in manager.list_checkpoints()
+            if entry.get("id") == "cp-risk-RISK-001"
+        ]
+        assert [row.get("notes") for row in rows] == ["original"]
+        assert not list((tmp_path / "ck").glob(".staging-*"))
+
+    def test_a_failed_copy_keeps_the_old_snapshot_and_cleans_staging(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = self._project(tmp_path)
+        manager = _manager(project, tmp_path / "ck")
+        manager.create_checkpoint("cp-risk-RISK-001", notes="original")
+
+        class _NoCopy:
+            """Real shutil with copy2 broken — every other call behaves."""
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(shutil, name)
+
+            @staticmethod
+            def copy2(*args: Any, **kwargs: Any) -> Any:
+                raise OSError("disk full")
+
+        monkeypatch.setattr(checkpoint_module, "shutil", _NoCopy())
+
+        with pytest.raises(CheckpointError, match="disk full"):
+            manager.create_checkpoint(
+                "cp-risk-RISK-001", notes="second", overwrite=True
+            )
+
+        assert manager.load_checkpoint("cp-risk-RISK-001").notes == "original"
+        rows = [
+            entry
+            for entry in manager.list_checkpoints()
+            if entry.get("id") == "cp-risk-RISK-001"
+        ]
+        assert [row.get("notes") for row in rows] == ["original"]
+        assert not list((tmp_path / "ck").glob(".staging-*"))
+
+    def test_delete_clears_the_row_even_when_the_directory_is_already_gone(
+        self, tmp_path: Path
+    ) -> None:
+        project = self._project(tmp_path)
+        manager = _manager(project, tmp_path / "ck")
+        manager.create_checkpoint("cp-one", notes="soon orphaned")
+        shutil.rmtree(tmp_path / "ck" / "cp-one")
+
+        manager.delete_checkpoint("cp-one")
+
+        assert not manager.has_checkpoint("cp-one")
+        assert not any(
+            entry.get("id") == "cp-one" for entry in manager.list_checkpoints()
+        )
+
+    def test_a_crashed_staging_directory_is_cleaned_up(
+        self, tmp_path: Path
+    ) -> None:
+        project = self._project(tmp_path)
+        manager = _manager(project, tmp_path / "ck")
+        manager.create_checkpoint("cp-one")
+        leftover = tmp_path / "ck" / ".staging-cp-one-99999"
+        leftover.mkdir()
+        (leftover / "PROJECT.yaml").write_text("half written\n")
+
+        second = manager.create_checkpoint("cp-one", notes="second", overwrite=True)
+
+        assert second.checkpoint_id == "cp-one"
+        assert not leftover.exists()
+        assert not list((tmp_path / "ck").glob(".staging-*"))

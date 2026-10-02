@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Sequence, Tuple
 
 __all__ = [
-    "EDIT",
     "GUI_SIGNALS",
     "MULTI_MODULE_SIGNALS",
     "PLANNING_RULES",

@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from conftest import _task, build_test_project
+from conftest import build_test_project
 from orchestrator.agents.base_agent import AgentOutput, BaseAgent
 from orchestrator.orchestrator import MasterOrchestrator
 from orchestrator.state_manager import StateError, StateManager

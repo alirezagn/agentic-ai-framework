@@ -13,13 +13,12 @@ import pytest
 
 from conftest import FakeLLMClient
 from orchestrator import config
-from orchestrator.agents.base_agent import AgentOutput, AgentOutputError, BaseAgent, create_agent
+from orchestrator.agents.base_agent import AgentOutputError, BaseAgent, create_agent
 from orchestrator.agents.llm_agent import LLMAgent
 from orchestrator.agents.requirements_agent import RequirementsAgent
 from orchestrator.llm_client import (
     LLMClient,
     LLMClientError,
-    LLMResult,
     LLMUnavailableError,
 )
 from orchestrator.prompt_builder import (
