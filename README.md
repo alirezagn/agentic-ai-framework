@@ -38,9 +38,7 @@ agentic-ai-framework/
 │       ├── TASKS.yaml
 │       ├── DECISIONS.md
 │       ├── RISKS.md
-│       ├── CHANGELOG.md
-│       ├── docs/           # Requirements, architecture, plans, tests
-│       └── implementation/ # Code, firmware, schematics
+│       └── CHANGELOG.md
 ├── project-templates/      # Copy-paste state-file templates
 │   ├── PROJECT.yaml  PROJECT_MEMORY.md  CURRENT_STATE.md  TASKS.yaml
 │   ├── DECISIONS.md  RISKS.md  CHANGELOG.md
@@ -49,9 +47,12 @@ agentic-ai-framework/
 │   ├── GETTING_STARTED.md
 │   ├── WORKFLOW.md
 │   └── TROUBLESHOOTING.md
-├── checkpoints/            # Saved recovery points
-└── references/             # External tools, research, standards
+└── test_*.py, tests/       # pytest suite (721 passing)
 ```
+
+> `projects/kid-robot-face/` ships the seven state files and a small worked
+> example graph. It has no `docs/` artifacts or per-phase checkpoints — use it
+> as a state-format reference, not as a demonstration of a completed project.
 
 ## Quick Start
 
@@ -65,13 +66,17 @@ agentic-ai-framework/
 
 ### Study the Framework With a Real Example
 
-Examine `projects/kid-robot-face/` — a voice-reactive ESP32 robot face project fully initialized with:
-- Complete requirements (REQ-001 through REQ-020)
-- Architecture design (ESP32 + OLED, Ollama/Gemma integration)
-- Dependency-aware task graph (30+ tasks, parallel-ready)
-- Risk register and decision log
-- Test plan and acceptance criteria
-- Checkpoints at key milestones
+Examine `projects/kid-robot-face/` — a voice-reactive ESP32 robot face project,
+scaffolded and in progress. It contains:
+- A requirements summary (REQ-001 … REQ-015) in `PROJECT_MEMORY.md`
+- A worked task graph with dependency gating and a blocked task
+- A risk register and a decision log
+- Review flags on some tasks, so the `REVIEW` flow is visible in the state
+
+It is a **state-format reference**, not a finished project: there is no `docs/`
+directory of materialized artifacts and no per-phase checkpoints, so requirements
+are summarized in memory rather than authored. For a completed run, see the PoC
+transcripts under `checkpointing` in `HOW_TO_USE.md`.
 
 ### Key Framework Documents
 
@@ -205,8 +210,8 @@ cp -r projects/my-project checkpoints/my-project-checkpoint-001
 | < 60% | Healthy | Continue normally |
 | 60–70% | Healthy | Monitor |
 | 70–80% | Warning | Begin compaction prep |
-| 80–85% | Critical | Compact immediately |
-| > 85% | Failure Risk | Compact + save checkpoint |
+| 80–85% | Critical (high) | Compact immediately |
+| > 85% | Critical | Compact + save checkpoint |
 
 **Compaction procedure:**
 1. Summarize completed work
@@ -305,6 +310,40 @@ See [meta/GETTING_STARTED.md](meta/GETTING_STARTED.md) for detailed walkthroughs
 
 ---
 
-**Last Updated:** 2026-09-29  
-**Framework Version:** 1.0  
-**Status:** Production Ready
+**Last Updated:** 2026-10-02  
+**Framework Version:** 2.0.0  
+**Status:** STABLE — state engine + LLM-backed agent policy layer  
+**Test suite:** 721 passing (`python3 -m pytest -q`), hermetic and offline
+
+## Runtime at a glance
+
+| Area | Summary |
+|---|---|
+| State | Plain files, atomic writes under advisory locks, `validate()` |
+| Dispatch | Dependency-gated 3-phase flow, `READY → IN_PROGRESS → DONE/BLOCKED` |
+| Parallel | `--max-concurrent N`, state mutations serialized by an `RLock` |
+| Agents | 10 registered specialists, LLM-backed with a shared authoring contract |
+| Verification | Definition of Done, traceability, mandatory independent review |
+| Execution | Opt-in `data.deploy` channel producing real, signed-off evidence |
+| Resilience | 6 loop-detection kinds, signed checkpoints, human decision gates |
+
+### Evidence and execution (v2.0)
+
+The runtime can run a build, a test or a tool and **prove** it did. An agent
+proposes what to run in `data.deploy`; `orchestrator/deploy_runner.py` — the only
+module in the package that spawns a process — decides whether it ran and reports
+the real exit code. The Definition of Done then requires a matching
+`executed: true` record for any claimed verification, so a fabricated
+"42/42 tests passed" is rejected rather than believed.
+
+**Disabled by default.** Enable with both:
+
+```dotenv
+ORCHESTRATOR_DEPLOY_ENABLED=1
+ORCHESTRATOR_DEPLOY_ALLOWLIST=ctest,cmake,python3
+```
+
+Transcripts land in `docs/evidence/<task>/`. Full schema, security properties
+and operator guidance: [ORCHESTRATOR_GUIDE.md § Evidence and
+execution](ORCHESTRATOR_GUIDE.md#evidence-and-execution) and
+[HOW_TO_USE.md §8b](HOW_TO_USE.md#8b-enable-the-execution-channel-optional).

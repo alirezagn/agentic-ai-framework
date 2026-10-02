@@ -2004,6 +2004,36 @@ class MasterOrchestrator:
         notes = f"Automatic checkpoint: {reason}"
         self.state.record_checkpoint(checkpoint_id)
         self.checkpoints.create_checkpoint(checkpoint_id, notes=notes)
+        # GAP-MED-03: record the compaction BEFORE the fold. The fold rewrites
+        # PROJECT_MEMORY.md, so a memory-section note about the event can be
+        # partially discarded by the operation it describes. CHANGELOG.md is
+        # append-only and the index row makes the event queryable.
+        before = self.state.get_context_utilization()
+        self.checkpoints.record_compaction_event(
+            checkpoint_id,
+            reason=reason,
+            detail={
+                "utilization_before_percent": round(float(before), 1),
+                "compaction_threshold_percent": float(
+                    self.state.get_compaction_threshold()
+                ),
+            },
+        )
+        self.state.append_current_state(
+            f"Context compaction -> {checkpoint_id} (reason: {reason}; "
+            f"utilization {before:.1f}% reset to a fresh budget)"
+        )
+        config.emit_telemetry(
+            config.TELEMETRY_EVENT_COMPACTION,
+            level="INFO",
+            checkpoint_id=checkpoint_id,
+            reason=reason,
+            utilization_before_percent=round(float(before), 1),
+        )
+        self.state.append_changelog(
+            f"Context compaction: {checkpoint_id} saved (reason: {reason}); "
+            f"utilization {before:.1f}% reset to a fresh budget"
+        )
         self.state.append_memory_section(
             "Context Compaction",
             (

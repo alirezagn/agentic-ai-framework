@@ -477,6 +477,72 @@ class CheckpointManager:
     # Create
     # ------------------------------------------------------------------
 
+    def compaction_events(self) -> List[Dict[str, Any]]:
+        """Every recorded compaction, newest last.
+
+        Reads only the index, so an event is discoverable without parsing
+        ``CHANGELOG.md`` prose and survives the ``PROJECT_MEMORY.md`` fold.
+        """
+        return [
+            entry
+            for entry in self._load_index().get("checkpoints", [])
+            if isinstance(entry, dict) and entry.get("compaction")
+        ]
+
+    def record_compaction_event(
+        self,
+        checkpoint_id: str,
+        reason: str = "context compaction",
+        detail: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Write an explicit, queryable audit entry for a compaction event.
+
+        GAP-MED-03. A context compaction is a **state-changing event**: the
+        token budget is reset to zero and the working memory is folded, so
+        everything that was only in the live context is gone from that moment.
+        The previous record of it was one prose line inside a
+        ``## Context Compaction`` section of ``PROJECT_MEMORY.md`` — which is
+        itself rewritten by the fold that follows, so the audit trail could be
+        partially discarded by the very operation it described.
+
+        So the entry goes to the append-only ``CHANGELOG.md`` (never folded,
+        never rewritten) *and* into the checkpoint index, which makes it
+        discoverable without grepping prose. Both are written before the fold
+        runs, so the event survives its own side effects.
+
+        Returns the recorded index entry, or ``None`` when the checkpoint is
+        unknown (a compaction that failed to snapshot must not invent an audit
+        record).
+        """
+        checkpoint = self.load_checkpoint(checkpoint_id)
+        entry = {
+            "id": checkpoint_id,
+            "created_at": utc_now_iso(),
+            "phase": "COMPACTION",
+            "notes": f"Context compaction: {reason}",
+            "reserved": False,
+            "compaction": True,
+            "reason": str(reason),
+        }
+        if detail:
+            entry["compaction_detail"] = {
+                key: value for key, value in detail.items() if value is not None
+            }
+        # Index entry written under the same lock as every other record, so a
+        # concurrent save cannot drop this audit row (GAP-CRIT-06).
+        with self._index_lock() as box:
+            index = self._load_index()
+            index["checkpoints"] = [
+                existing
+                for existing in index.get("checkpoints", [])
+                if existing.get("id") != checkpoint_id
+            ] + [entry]
+            box["index"] = index
+        logger.info(
+            "compaction event recorded for checkpoint '%s' (reason=%s)", checkpoint_id, reason
+        )
+        return entry
+
     def create_checkpoint(
         self,
         checkpoint_id: str,
