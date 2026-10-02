@@ -25,6 +25,19 @@ This is a framework for orchestrating complex technical projects using autonomou
 3. **Documentation:** Update `meta/GETTING_STARTED.md` or create new guides
 4. **Examples:** Create working example projects in `projects/`
 
+### Checks Before You Push
+
+```bash
+python3 -m pytest -q     # the whole suite must be green
+ruff check .             # must report 0 errors
+```
+
+The lint baseline (ruff's classic E4/E7/E9/F set) is pinned in
+`pyproject.toml`; install ruff with `python3 -m pip install -e .[dev]`.
+If you add tests, the count asserted by `tests/test_medium_gaps.py`
+(`TestCountsConsistentAcrossDocs`) must be updated in `README.md`,
+`HOW_TO_USE.md`, `ORCHESTRATOR_GUIDE.md` and `review_gaps.md`.
+
 ### Bug Reports
 
 If you find issues with:

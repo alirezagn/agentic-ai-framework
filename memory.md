@@ -1,8 +1,9 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (evidence-repair batch: the DoD repair note is now
-> problem-aware, prose `NOT RUN` counts, `*` allowlist; suite now **1209
-> collected, 1208 passed / 1 failed** — the failure is still OPEN-1)
+> Last updated: 2026-10-03 (integrity batch: **suite fully green — 1213
+> passed / 0 failed**, OPEN-1 closed by atomic checkpoint writes + repaired
+> indexes; deploy tests hermetic under an operator's exported channel;
+> `ruff check .` baseline pinned and at 0)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -18,18 +19,23 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1209 collected, 1208 passed / 1 failed** — `python3 -m pytest -q`,
-  189 s, 2026-10-03. The single failure is **OPEN-1** below (local
-  `checkpoints/` state, not a code regression). The number the four docs assert
-  is the *collected* count (1209) and is current.
+- **Suite: 1213 collected, 1213 passed / 0 failed** — `python3 -m pytest -q`,
+  197 s, 2026-10-03, verified in a **clean env and in the operator's shell
+  (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`)**. The
+  number the four docs assert is the *collected* count (1213) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
-  deliberately exercising one.
+  deliberately exercising one, and `tests/test_deploy_ground_truth.py` scrubs
+  `ORCHESTRATOR_DEPLOY_*` for every test so an exported channel in the shell
+  cannot turn a "default refuses" assertion into a real spawn.
+  **Lint:** `ruff check .` → 0 errors (baseline `E4/E7/E9/F` pinned in
+  `pyproject.toml`; install `python3 -m pip install -e .[dev]`). Never claim
+  green from memory — re-run both.
 - **Repo state:** branch `main`, **in sync with `origin/main`** after this
-  batch's push (hashes in the commits list below; last is `b678aa5` + its docs
-  commit). The only remaining tree dirt is the **pre-existing intentional**
-  dirt: `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`,
+  batch's push (hashes in the commits list below; this batch is `69bfb72` +
+  its docs commit). The only remaining tree dirt is the **pre-existing
+  intentional** dirt: `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`,
   the still-tracked `projects/sys_mon/__pycache__/test_sys_mon…pyc`, and a
   stray **0-byte file named `=`** in the repo root. Do not describe the tree as
   clean until that is resolved, and do not sweep those files into an unrelated
@@ -44,7 +50,10 @@
   deploys + goal-driven decomposition, `173dc75` docs (1155), `6c1feb8`
   `run_until_done.sh`, `802ce20` `run --all`, `b44ea3e` docs (1160), `e7f3fd6`
   `run --all` stop reasons, `25be3eb` static import contract (1185), `e623a70`
-  docs (1185), `b678aa5` checkpoint overwrite + best-effort snapshots (1191).
+  docs (1185), `b678aa5` checkpoint overwrite + best-effort snapshots (1191),
+  `bfafd5c` docs (1191), `bb87543` evidence-repair remedies + prose NOT RUN +
+  `*` allowlist, `5b59ee8` docs (1209), `b3199b2` memory, `69bfb72` atomic
+  checkpoint writes + hermetic deploy tests + lint baseline (1213).
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -122,36 +131,30 @@ kept as the record of what was wrong, not as current state.
 
 ### Open items (verified 2026-10-02 night)
 
-- **OPEN-1 — one test is red, and the cause is hermeticity, not a regression.**
-  `tests/test_hmac_verification.py::TestLegacyMetadata::test_real_on_disk_snapshots_all_pass_the_containment_policy`
-  raises `FileNotFoundError: checkpoints/sys_mon_gui/cp-risk-RISK-002/metadata.json`.
-  Three verified facts:
-  1. The directory is gone; `checkpoints/sys_mon_gui/index.json` still lists the
-     entry (index last written 18:47:56, entry `cp-risk-RISK-002` created
-     18:45:55, no `cp-risk-*` directory on disk).
-  2. `delete_checkpoint` (`orchestrator/checkpoint_manager.py:1083`) does
-     `shutil.rmtree(target_dir)` **first** and only then filters the index under
-     the lock — a crash (or a hand `rm -rf`) between the two leaves exactly this
-     dangling entry. No test in the suite deletes local checkpoints, so this was
-     external.
-   3. The test reads **gitignored, mutable** `checkpoints/` — it is not hermetic,
-      so the whole suite can go red on local state alone. The other 1208 pass.
-   Choices, none taken yet: repair the index entry (restores green, hides the
-    bug), make the delete transactional, or have the test assert "dangling index
-    entry" clearly instead of throwing. **Do not write "1209 all passing" until
-    one of them lands.**
+### Closed this pass (were open)
 
-- **OPEN-2 — stale count prose (partly fixed this pass).** The four
-  consistency-checked docs (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`,
-  `README.md`, `review_gaps.md`) are asserted against `pytest --collect-only`
-  and are currently at **1209** (1103 before `tests/test_architecture_redesign.py`
-  added 52; 1160 after `run --all` added 5; 1185 after the import contract
-  added 25; 1191 after `tests/test_checkpoint_overwrite.py` added 6; 1209 after
-  `tests/test_repair_remedies.py` added 15 and 3 allowlist cases), so
+- **OPEN-1 — RESOLVED (`69bfb72`).** The red
+  `tests/test_hmac_verification.py::TestLegacyMetadata::test_real_on_disk_snapshots_all_pass_the_containment_policy`
+  (`FileNotFoundError: checkpoints/<proj>/cp-risk-RISK-002/metadata.json`)
+  had two causes and both are fixed:
+  1. **Code:** `create_checkpoint` rmtree'd the old snapshot *before* copying
+     the new one and `delete_checkpoint` removed the directory before the
+     index row, so any failure/crash between the two left a row for a
+     directory that no longer existed. Saves now stage under
+     `.staging-<id>-<pid>` and swap in complete; delete clears the row first;
+     four regression tests in `tests/test_checkpoint_overwrite.py` pin it.
+  2. **Local state:** `checkpoints/{sys_mon_full,sys_mon_gui}/index.json` each
+     had one such row; both repaired (backups in `/tmp/index-backup-*.json`).
+  The test still reads gitignored `checkpoints/`, so **local `rm -rf` of a
+  checkpoint directory can still turn it red** — that now means the state is
+  genuinely corrupt, not that the code is wrong.
+- **OPEN-2 — counts current.** The four consistency-checked docs
+  (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
+  are asserted against `pytest --collect-only` and are at **1213** (1103 →
+  1160 → 1185 → 1191 → 1209 → 1213 as batches added tests), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
-  (findings-of-record doc, deliberately untouched). The "passed" phrasing in
-  those four docs is the *collected* count and is false while OPEN-1 stands.
+  (findings-of-record doc, deliberately untouched).
 
 ### Known documentation drift
 
@@ -201,10 +204,12 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~190 s, 1209 tests).
+- Run full pytest after every change: `python3 -m pytest -q` (~200 s, 1213 tests),
+  and `ruff check .` (0 errors, baseline pinned in `pyproject.toml`).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
-  evidence — see OPEN-1.
+  evidence — deleting a checkpoint directory by hand will redden it (OPEN-1,
+  now closed, showed why).
 - YOLO mode: no approval prompts, no TODO stubs, relative paths, autonomous execution.
 - LLM backend is stdlib-only; tests inject `FakeLLMClient` / `transport`.
   **The suite must stay offline-safe** — do not add a test that dials out.
@@ -397,7 +402,7 @@ kept as the record of what was wrong, not as current state.
      snapshot (`cp-risk-*`, `cp-phase-*`, `cp-milestone-*`, `cp-auto-*`) runs
      through `MasterOrchestrator._safe_auto_checkpoint()`, which logs and
      returns `None` on error: a snapshot may be lost, the dispatch may not.
-     Tests: `tests/test_checkpoint_overwrite.py` (6), including the exact
+     Tests: `tests/test_checkpoint_overwrite.py` (10), including the exact
      reproduced sequence (failing dispatch → RISKS.md reset → re-dispatch
      keeps the task's own `connection refused` error and one refreshed index
      row).
@@ -439,6 +444,32 @@ kept as the record of what was wrong, not as current state.
      green and `python3 main.py` runs the window for 6 s without an
      exception (`timeout 6`, exit 124). Entry point is **`main.py`** —
      `python3 src/gui_controller.py` can never work with a relative import.
+  10. **Snapshots are atomic; the suite is hermetic under an exported deploy
+      channel** (2026-10-03, `69bfb72`) — two failures from a real operator
+      shell (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`):
+      (a) `tests/test_deploy_ground_truth.py` only scrubbed `ORCHESTRATOR_DEPLOY_*`
+      inside `TestDeployPolicyDefaults`, so "the shipped default refuses
+      everything" inherited the shell export and spawned a real `ctest`
+      during pytest — the autouse fixture is now module-level; (b)
+      `create_checkpoint` rmtree'd the old snapshot before copying the new
+      one and `delete_checkpoint` removed the directory before the index row,
+      so a failure in between left a row for a directory that was gone
+      (OPEN-1: `cp-risk-RISK-002` in `checkpoints/{sys_mon_full,sys_mon_gui}`).
+      Saves now stage under `.staging-<id>-<pid>` and swap in complete,
+      delete clears the row first, both local indexes repaired (backups in
+      `/tmp`), and the containment test skips documented `reserved` id
+      placeholders. Also fixed while there: `KeyboardInterrupt` in
+      `orchestrator/cli.py` referenced an unbound `exc` (every Ctrl-C raised
+      `NameError` instead of exiting 130), `auto_plan.__all__` exported a
+      phantom `EDIT`, and the dead `base_agent.restore_checkpoint` stub went.
+  11. **Lint baseline pinned** (2026-10-03, `69bfb72`) — `pyproject.toml`
+      now carries `[tool.ruff] select = ["E4", "E7", "E9", "F"]` (ruff's
+      classic pyflakes/PEP 8 error set) plus a `dev` extra (`pip install -e
+      .[dev]`) and `per-file-ignores` for the root `test_*.py` sys.path
+      bootstrap. `ruff check .` → 0 after fixing 51 findings (26 unused
+      imports, 10 unused locals, 3 undefined names, `__all__` export,
+      E402 ordering). Style rules (UP/I/RUF) are deliberately *not* in the
+      baseline.
 
 
 ---
@@ -451,8 +482,8 @@ suites added during remediation:
 
 | File | Covers |
 |---|---|
-| `tests/test_hmac_verification.py` | CRIT-03 — signing truth table, tampering, key rotation; **OPEN-1 lives in its `TestLegacyMetadata` real-on-disk test** |
-| `tests/test_deploy_ground_truth.py` | CRIT-01 — runner refusals, live execution, DoD evidence (+ the `*` allowlist: any executable, disabled channel still inert, traversal still confined) |
+| `tests/test_hmac_verification.py` | CRIT-03 — signing truth table, tampering, key rotation; includes the real-on-disk snapshot containment test (green since the staging fix, OPEN-1 closed) |
+| `tests/test_deploy_ground_truth.py` | CRIT-01 — runner refusals, live execution, DoD evidence (+ the `*` allowlist: any executable, disabled channel still inert, traversal still confined); module-level fixture scrubs `ORCHESTRATOR_DEPLOY_*` so an exported shell channel cannot leak in |
 | `tests/test_task_status_injection.py` | CRIT-05 — status/execution injection |
 | `tests/test_state_io_and_contracts.py` | atomic writes, single-parse derived state, deploy contract (its "HIGH-01..04" labels are the *state I/O* batch, not audit IDs) |
 | `tests/test_concurrent_appends.py` | CRIT-06 — concurrent append + id allocation |
@@ -468,7 +499,7 @@ suites added during remediation:
 | `tests/test_final_high_gaps.py` | audit HIGH-01..04 — pinned-agent isolation, checkpoint trigger evaluation, off-lock DoD repair, deep validation + reachability |
 | `tests/test_architecture_redesign.py` | 52 tests — truncation/chunked-JSON recovery, PEP 668 `--break-system-packages` + satisfied-install skip, skip-vs-DoD evidence, decomposition scope/chains/starter seeding |
 | `tests/test_import_contract.py` | 25 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, DoD wiring, prompt promise |
-| `tests/test_checkpoint_overwrite.py` | 6 tests — `cp-risk-*` collision replaces instead of raising; strict default kept; source validated before delete; dispatch keeps its own error and best-effort snapshotting |
+| `tests/test_checkpoint_overwrite.py` | 10 tests — `cp-risk-*` collision replaces instead of raising; strict default kept; staged `.staging-<id>-<pid>` swap keeps the old snapshot when the new one fails (empty source / copy error); delete clears the row first; crash leftovers cleaned; dispatch keeps its own error and best-effort snapshotting |
 | `tests/test_repair_remedies.py` | 15 tests — problem-aware repair note (evidence/import/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,

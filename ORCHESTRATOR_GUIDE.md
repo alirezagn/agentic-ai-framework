@@ -738,8 +738,21 @@ checkpoints/
   directory is still on disk, and that collision used to fail the task with an
   error *about the checkpoint*, hiding the task's own error and stopping
   `run --all`. `CheckpointManager.create_checkpoint` stays strict unless
-  `overwrite=True` is passed explicitly, and the snapshot source is validated
-  **before** the old directory is removed.
+  `overwrite=True` is passed explicitly.
+- **A snapshot is staged, then swapped in:** `create_checkpoint` builds the
+  new directory under a `.staging-<id>-<pid>` sibling and renames it over the
+  old one only after the copies and `metadata.json` are complete;
+  `delete_checkpoint` removes the **index row first**, then the directory.
+  The index therefore only ever names finished directories. The previous
+  order (rmtree the old directory, *then* copy) destroyed the existing
+  snapshot on any later failure — empty source, failed copy, a crash in
+  between — which is how real `checkpoints/*/index.json` files grew rows for
+  directories that no longer existed: `list_checkpoints`/`has_checkpoint`
+  kept reporting the ghost and every reader of `metadata.json` died with
+  `FileNotFoundError`. A failure now costs only the staging directory, which
+  is cleaned up on the way out (a leftover from a killed process is removed
+  by the next save of that id), and the containment test in
+  `tests/test_hmac_verification.py` keeps the whole set honest.
 - **Auto-checkpoints are best-effort:** every snapshot in the dispatch
   finalize path (`cp-risk-*`, `cp-phase-*`, `cp-milestone-*`, `cp-auto-*`)
   runs through `_safe_auto_checkpoint()`, which logs and returns `None` on
@@ -803,9 +816,10 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1209 passed
+python3 -m pytest -q          # full suite — 1213 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
+ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)
 ```
 
 Shared fixtures live in `conftest.py` (`build_test_project`, `FakeLLMClient`,
