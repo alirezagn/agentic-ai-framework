@@ -515,7 +515,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | task stuck in `WAITING` | a pending `PROPOSED_CHANGE` affects it — approve/reject the decision |
 | phase looks wrong | `phase show` (stored vs derived); `phase set <NAME>` to override |
 | `LOOP LIMIT` (exit 3) | fix the task's inputs, then `retry TASK-003 --reason "..."` to reset its loop counters; `run` prints the exact command in its hint |
-| `run --all` exits 4 with `a human decision is required` | a pending `PROPOSED_CHANGE` (or structural problem) blocks progress — approve/reject it, then rerun `run --all`; it stops rather than dispatching around the decision |
+| `run --all` exits 4 with `a human decision is required` | the stop prints the blocking reason and its options — a starvation escalation (every task blocked, no independent work), a pending `PROPOSED_CHANGE`, or a structural problem. Typical fixes: `retry` the failed task, `waive` a nonessential dependency, resolve the decision; then rerun `run --all` |
 | `run --all` exits 3 with `No READY tasks available` | the project is unfinished but nothing left can reach READY — `status` shows the reason (FAILED task needing `retry`, unmet/unknown dependency); fix it, then rerun `run --all` |
 | `retry … is DONE; retry applies to active tasks only` | for finished tasks use `reopen TASK-003 --reason "..."` — never `sed` TASKS.yaml (line numbers shift when the orchestrator rewrites it); `FAILED` tasks need only `retry` (no sed) |
 | task `FAILED` (agent/validation error) | read the printed error, fix the inputs or model output, then `retry TASK-005 --reason "..."` — the same hint appears in `run` output |

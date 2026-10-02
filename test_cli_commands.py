@@ -813,6 +813,9 @@ class TestRunAllCommand:
         captured = capsys.readouterr()
         assert code == 3
         assert "STOPPED" in captured.out or "No READY tasks" in captured.out
+        # The stop must say *why*: "health WARNING" alone sends the operator
+        # hunting for a cause the supervisor already knows.
+        assert "failed task" in captured.out
 
     def test_all_dispatches_each_wave_until_the_graph_is_done(
         self, test_project: Path, capsys: pytest.CaptureFixture

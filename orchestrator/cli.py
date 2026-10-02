@@ -44,6 +44,7 @@ from .state_manager import (
     utc_now_iso,
 )
 from .llm_client import LLMClient, LLMError
+from .supervisor import HealthReport
 
 logger = logging.getLogger(__name__)
 
@@ -743,6 +744,23 @@ def _wave_summary(counts: Dict[str, Any]) -> str:
     return " | ".join(parts) or "no tasks"
 
 
+def _print_health_reasons(report: HealthReport) -> None:
+    """Print *why* a run stopped: blocking escalations first, then hints.
+
+    Health can be HUMAN_DECISION_REQUIRED because of a pending decision, a
+    starvation escalation, or exhausted retries — naming one cause when the
+    operator sees another sends them looking in the wrong file.
+    """
+    for escalation in report.escalations:
+        if not escalation.blocking:
+            continue
+        print(f"  escalation: {escalation.reason}")
+        for option in escalation.options:
+            print(f"    - {option}")
+    for recommendation in report.recommendations:
+        print(f"  - {recommendation}")
+
+
 def _run_all(
     orchestrator: MasterOrchestrator, max_tasks: int, max_concurrent: int
 ) -> int:
@@ -765,10 +783,16 @@ def _run_all(
 
         report = orchestrator.sync_health()
         if report.state == config.HEALTH_HUMAN_DECISION_REQUIRED:
+            # "human decision" is not always a pending DEC-NNN: a blocking
+            # escalation (starvation, deadlock, exhausted retries) sets the
+            # same state, so print *why* it stopped instead of naming one
+            # cause the operator may not have.
             print(
-                "STOPPED: a human decision is required — approve or reject it, "
-                "then rerun `run --all` (details: `orchestrator health --diagnose`)."
+                "STOPPED: a human decision is required — resolve what is listed "
+                "below, then rerun `run --all` "
+                "(details: `orchestrator health --diagnose`)."
             )
+            _print_health_reasons(report)
             print(f"Health: {report.state}")
             return 4
         if report.state in (config.HEALTH_STALLED, config.HEALTH_BLOCKED):
@@ -776,6 +800,7 @@ def _run_all(
                 f"STOPPED: health {report.state} — nothing can proceed "
                 "(details: `orchestrator health --diagnose`)."
             )
+            _print_health_reasons(report)
             return 3
 
         wave += 1
@@ -790,6 +815,7 @@ def _run_all(
                 "not finished — remaining tasks cannot reach READY; "
                 "inspect them with `orchestrator status`."
             )
+            _print_health_reasons(report)
             print(f"Health: {report.state} (details: `orchestrator health --diagnose`)")
             return 3
 
