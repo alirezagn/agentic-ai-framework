@@ -228,7 +228,13 @@ DATA_CONTRACT_INSTRUCTIONS = (
     "- If a task's inputs do not pin a shape and you cannot infer one, choose and "
     "declare the shape yourself in docs/ARCHITECTURE.md rather than leaving it "
     "implicit -- an invented but declared shape is recoverable; an undeclared one "
-    "is what the next agent has to guess against."
+    "is what the next agent has to guess against.\n"
+    "- VERIFY SIGNATURES BEFORE IMPLEMENTING. Before writing a call into another "
+    "module, read that module and match its signature verbatim: name, "
+    "capitalisation, parameters in order, keyword-only arguments, return type. Do "
+    "not reconstruct it from domain vocabulary, and do not write the call site "
+    "first and then fit the definition to it. A signature you have not read is an "
+    "assumption, and assumptions at the seam are what break the integration."
 )
 
 
@@ -258,35 +264,23 @@ DATA_CONTRACT_INSTRUCTIONS = (
 #: agent optimises for the smallest thing that satisfies the sentence in front of
 #: it. See :data:`DATA_CONTRACT_INSTRUCTIONS` for the shape half.
 UI_CONTRACT_INSTRUCTIONS = (
-    "Application contract — deliver a runnable application, not a fragment:\n"
-    "- ENTRY POINT IS MANDATORY. For an application project (anything with a UI, "
-    "a server, a loop, or a CLI), you MUST deliver an executable `main.py` at the "
-    "PROJECT ROOT. It constructs every dependency, wires the modules together, and "
-    "runs the main loop or dispatches the CLI. A library plus a README is not a "
-    "delivered application: nobody can start it, so nothing downstream can be "
-    "verified against it. If the task did not list main.py in expected_outputs, add "
-    "it.\n"
-    "- SCHEMA MATCH IS MANDATORY. Every structure a backend collector returns must "
-    "match what its consumer actually reads, exactly: a TypedDict/Pydantic model "
-    "declared once and imported by both sides, or a scalar accessor when the "
-    "consumer only needs one number. A consumer written against a different shape "
-    "than the producer emits is the single most common integration defect, and it "
-    "is free to prevent by declaring the shape rather than inferring it.\n"
-    "- VERIFY SIGNATURES BEFORE YOU IMPLEMENT. Before writing any code that calls "
-    "another module, read that module and copy its signature verbatim: name, "
-    "capitalisation, every parameter in order, keyword-only arguments, and the "
-    "return type. Do not reconstruct a signature from domain vocabulary, and do "
-    "not write a call site first and fit the definition to it afterwards. A "
-    "signature you have not read is an assumption, and assumptions at the seam are "
-    "what break the integration.\n"
-    "- A GUI MUST NOT BE A BARE WIDGET. Shipping a lone default-styled progress bar "
-    "understates the task and reads as a placeholder, whatever the task text says. "
-    "A dashboard task means a composed layout. See the UI fidelity spec for the "
-    "required elements; they are not optional decoration.\n"
+    "UI fidelity contract — a dashboard task means a composed interface:\n"
+    "- Shipping a lone default-styled progress bar understates the task and reads "
+    "as a placeholder, whatever the task text literally asks for. An agent "
+    "optimising for the smallest widget that satisfies the sentence in front of it "
+    "is the cause, and every omission it produces is invisible to a test that only "
+    "checks the app starts.\n"
+    "- For any GUI task the delivered interface MUST include the elements listed in "
+    "the UI fidelity spec: composed layout, dark-mode palette, status indicator, "
+    "metric telemetry cards, an axis-labelled canvas chart with a legend, and at "
+    "least one interactive control that actually works. They are required scope, "
+    "not decoration -- so do not trade them away to fit an output limit; deliver the "
+    "modules across several tasks instead of shipping one thin file.\n"
     "- Fidelity is checkable, so check it. Run the app through data.deploy and "
-    "confirm the interface actually renders; a `data.test_status` of PASS with no "
-    "executed record for the entrypoint is a fabrication."
+    "confirm the interface renders; a data.test_status of PASS with no executed "
+    "record for the entrypoint is a fabrication."
 )
+
 
 #: Concrete UI requirements, injected into software_agent prompts only.
 #:
@@ -375,6 +369,10 @@ DATA_CONTRACT_SPEC = (
 #: firmware tasks actually carry module boundaries.
 DATA_CONTRACT_SPEC_AGENTS = frozenset({"software_agent"})
 
+#: Agents receiving :data:`UI_FIDELITY_SPEC` in addition to the shared
+#: :data:`UI_CONTRACT_INSTRUCTIONS`.
+UI_FIDELITY_SPEC_AGENTS = frozenset({"software_agent"})
+
 
 class PromptBuilderError(RuntimeError):
     """Raised when a prompt cannot be assembled from the supplied payload."""
@@ -430,6 +428,7 @@ def render_system_prompt(system_rules: str, agent_spec: str) -> str:
     # suggestion that a later rule can talk the model out of.
     parts.append(DEPENDENCY_AUTOMATION_INSTRUCTIONS)
     parts.append(DATA_CONTRACT_INSTRUCTIONS)
+    parts.append(UI_CONTRACT_INSTRUCTIONS)
     parts.append(OUTPUT_FORMAT_INSTRUCTIONS)
     return "\n\n".join(parts)
 
@@ -508,6 +507,7 @@ def build_prompt(
         "# Dependency obligation\n" + DEPENDENCY_AUTOMATION_INSTRUCTIONS
     )
     sections.append("# Data contract obligation\n" + DATA_CONTRACT_INSTRUCTIONS)
+    sections.append("# Application contract obligation\n" + UI_CONTRACT_INSTRUCTIONS)
     # Per-agent interface spec. Keyed off payload["agent_id"], which build_payload
     # sets from self.AGENT_ID, so the strictest form lands on the agent that
     # actually writes module boundaries -- and on nobody else.
@@ -518,6 +518,11 @@ def build_prompt(
         sections.append(
             f"# Module interface spec ({agent_id})\n" + DATA_CONTRACT_SPEC
         )
+    # The visual checklist only means something to the agent writing the view
+    # layer; every agent already receives the obligation itself via
+    # AUTHORING_CONTRACT, so nothing is lost by scoping the detail.
+    if agent_id in UI_FIDELITY_SPEC_AGENTS:
+        sections.append(f"# UI fidelity spec ({agent_id})\n" + UI_FIDELITY_SPEC)
     return "\n\n".join(sections)
 
 
@@ -535,6 +540,7 @@ __all__ = [
     "UI_FIDELITY_SPEC",
     "DATA_CONTRACT_SPEC",
     "DATA_CONTRACT_SPEC_AGENTS",
+    "UI_FIDELITY_SPEC_AGENTS",
     "DEFAULT_MEMORY_LIMIT",
     "DEFAULT_CONTEXT_FILE_LIMIT",
     "framework_specs_dir",

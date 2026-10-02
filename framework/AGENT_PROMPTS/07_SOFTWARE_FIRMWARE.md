@@ -48,6 +48,7 @@ existing file through `data.edits`. A summary that merely *describes* a file doe
 deliver it — the Definition of Done checks the file on disk.
 
 ## Rules (system rules)
+- Build the whole interface described above; do not ship the minimum that satisfies one sentence
 - Declare every cross-module method exactly — name, positional args, and return type as a `TypedDict`/Pydantic model or a documented scalar; no fallback-key guessing
 - Cast or reshape metrics at the boundary into a view layer, and deliver a tested `main.py` that runs the whole system end to end
 - - Declare and install every third-party import before requesting the test run
@@ -79,6 +80,17 @@ deliver it — the Definition of Done checks the file on disk.
 - Deliver it even when every module already exists — that is exactly the state in which a project is unrunnable
 - **Read the producer before writing the consumer.** Before generating a module that imports another, read those files and match the method name, positional argument order, keyword names and return structure **verbatim**. Never call a method you have not seen defined
 - **No defensive guess chains.** `.get("percent_used", .get("percent", 0.0))` converts a loud `TypeError` into a silent wrong value that displays as `0.0` forever. Re-read the file, or report a finding — do not guess
+
+## UI fidelity (a dashboard, not a widget)
+- A GUI task means a composed interface. A lone default-styled progress bar is a placeholder, not a delivery
+- **Layout** — a composed structure (header, row of metric cards, chart region) that resizes without overlap
+- **Dark mode palette** — use the concrete values: window/canvas `#0f172a`, card/chart surface `#1e293b`, bar track `#334155`, primary text `#f8fafc`, secondary/axis text `#94a3b8`, per-series accents (`#38bdf8` CPU, `#a855f7` RAM, `#34d399` disk)
+- **Status indicator** — live normal/degraded/error state, visibly different when data stops arriving
+- **Metric telemetry cards** — one per metric with label, fixed-precision value (`12.3%`), and a filled bar
+- **Custom canvas chart** — history on a `Canvas` with gridlines, axes and labels, and a legend per series; an unlabelled line is not a chart
+- **Interactive controls** — at least one working control (slider for interval/history length, start/pause or refresh button) that changes behaviour; decorative controls are worse than none
+- **Update-loop guards** — tolerate short, missing or malformed readings, keep the UI responsive, and use real widget option names (`padx`/`pady`, never `px`/`py`, which raise `TclError` at construction)
+- Verify it: run the app through `data.deploy` and confirm it renders — a PASS with no executed record for the entrypoint is a fabrication
 
 ## Definition of Done
 Every expected output exists on disk with meaningful content, a transcript under `docs/evidence/` for anything run, and acceptance results reported.

@@ -30,6 +30,7 @@ from ..context_monitor import payload_chars
 from ..prompt_builder import (
     DATA_CONTRACT_INSTRUCTIONS,
     DEPENDENCY_AUTOMATION_INSTRUCTIONS,
+    UI_CONTRACT_INSTRUCTIONS,
 )
 from ..state_manager import StateManager, load_text_file, utc_now_iso
 
@@ -541,6 +542,11 @@ class BaseAgent:
         # deliverable-list-shaped task never asks for either one.
         + ENTRYPOINT_CONTRACT
         + INTERFACE_ALIGNMENT_CONTRACT
+        # The third leg of the same problem: a runnable, schema-correct app that
+        # is still a bare default widget understates the task invisibly. Kept as
+        # a separate block so the entrypoint/interface rules above stay readable,
+        # and so the concrete visual checklist can be injected per agent.
+        + UI_CONTRACT_INSTRUCTIONS
     )
 
     def __init__(

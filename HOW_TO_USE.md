@@ -508,5 +508,5 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1062 passed
+python3 -m pytest -q      # 1103 passed
 ```
