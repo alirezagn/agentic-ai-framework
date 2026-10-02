@@ -415,7 +415,11 @@ kept as the record of what was wrong, not as current state.
      `_reports_not_run()` (`orchestrator/orchestrator.py`) accepts `NOT RUN`
      stated in the **summary** when the same output does not also claim
      execution — a fabricated "NOT RUN" only loses information, while a
-     fabricated pass still needs a ground-truth record.
+     fabricated pass still needs a ground-truth record. **Verified end to
+     end on `sys_mon_full`:** `retry TASK-006` then `run --all` → TASK-006
+     `READY -> DONE` on the first attempt (model reported `NOT RUN` in the
+     summary *and* `data.test_status`), project 7/7 DONE, health HEALTHY,
+     exit 0.
   8. **`ORCHESTRATOR_DEPLOY_ALLOWLIST=*` means any executable** — it used to
      be compared as the literal basename `*`, so an operator who enabled the
      channel with `*` got "enabled" plus a refusal for *every* command
