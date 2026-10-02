@@ -21,7 +21,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import config
 from .agents.base_agent import agent_names
@@ -32,6 +32,7 @@ from .orchestrator import (
     MasterOrchestrator,
     MissingAgentError,
     OrchestratorError,
+    TaskRunResult,
 )
 from .state_manager import (
     StateError,
@@ -173,6 +174,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Number of agent executions to overlap in one cycle (default: 1)",
+    )
+    run_parser.add_argument(
+        "--all",
+        dest="all",
+        action="store_true",
+        help=(
+            "Keep dispatching waves until every task is terminal: exit 0 when "
+            "finished, 3 when blocked/stalled/loop-limited or nothing can reach "
+            "READY, 4 when a human decision is required"
+        ),
     )
     run_parser.set_defaults(handler=cmd_run)
 
@@ -646,60 +657,27 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    orchestrator = MasterOrchestrator(_resolve_project(args))
-    task_id = getattr(args, "task", None)
-    max_tasks = int(getattr(args, "max_tasks", 25) or 25)
-    max_concurrent = max(1, int(getattr(args, "max_concurrent", 1) or 1))
-    exit_code = 0
-
-    if task_id:
+def _maybe_generate_graph(orchestrator: MasterOrchestrator) -> None:
+    """G5: an empty graph is generated on the fly when a backend exists."""
+    if orchestrator.state.load_tasks():
+        return
+    if LLMClient.is_available():
+        print("Task graph is empty — generating it with the planning agent...")
         try:
-            result = orchestrator.run_task(task_id)
-        except LoopLimitExceededError as exc:
-            print(f"LOOP LIMIT: {exc}")
-            print(
-                "hint: fix the task inputs/strategy, then run "
-                f"`orchestrator retry {task_id}` to reset its loop counters"
-            )
-            return 3
-        except TaskNotFoundError as exc:
-            print(f"ERROR: {exc}")
-            return 2
-        results = [result]
+            created = orchestrator.build_plan()
+            print(f"  generated {len(created)} tasks: {', '.join(created)}")
+        except (StateError, OrchestratorError, LLMError) as exc:
+            print(f"  auto-plan failed: {exc}")
     else:
-        # G5: an empty graph is generated on the fly when a backend exists.
-        if not orchestrator.state.load_tasks():
-            if LLMClient.is_available():
-                print("Task graph is empty — generating it with the planning agent...")
-                try:
-                    created = orchestrator.build_plan()
-                    print(f"  generated {len(created)} tasks: {', '.join(created)}")
-                except (StateError, OrchestratorError, LLMError) as exc:
-                    print(f"  auto-plan failed: {exc}")
-            else:
-                print(
-                    "Task graph is empty — run `orchestrator plan` or edit TASKS.yaml "
-                    "(LLM backend not configured)."
-                )
-        results = orchestrator.run_cycle(max_tasks=max_tasks, max_concurrent=max_concurrent)
-        if not results:
-            # Nothing to dispatch: give a one-line health summary instead of
-            # dumping the full report on every idle cycle of a run loop.
-            print("No READY tasks available.")
-            report = orchestrator.sync_health()
-            detail = (
-                " (details: `orchestrator health --diagnose`)"
-                if report.state != config.HEALTH_HEALTHY
-                else ""
-            )
-            print(f"Health: {report.state}{detail}")
-            if report.state == config.HEALTH_HUMAN_DECISION_REQUIRED:
-                return 4
-            if report.state in (config.HEALTH_STALLED, config.HEALTH_BLOCKED):
-                return 3
-            return 0
+        print(
+            "Task graph is empty — run `orchestrator plan` or edit TASKS.yaml "
+            "(LLM backend not configured)."
+        )
 
+
+def _print_run_results(results: List[TaskRunResult]) -> int:
+    """Print one wave of dispatch results; return the exit code they imply."""
+    exit_code = 0
     for result in results:
         marker = "OK" if result.succeeded else "FAIL"
         print(f"[{marker}] {result.task_id} ({result.agent_id}): "
@@ -723,6 +701,160 @@ def cmd_run(args: argparse.Namespace) -> int:
             "hint: fix the task inputs/strategy, then run "
             f"`orchestrator retry {retryable[0]}` to reset counters and re-dispatch"
         )
+    return exit_code
+
+
+def _all_tasks_terminal(orchestrator: MasterOrchestrator) -> bool:
+    """True when the graph holds tasks and none of them is still in progress.
+
+    Counts are used instead of ``phase.current`` because the phase is stored
+    and forward-only: after a reopen or a re-plan it can read RELEASE while
+    real work remains.
+    """
+    counts = orchestrator.state.summary_counts()
+    if counts.get("TOTAL", 0) <= 0:
+        return False
+    active = sum(
+        count
+        for status, count in counts.items()
+        if status != "TOTAL" and status not in config.TERMINAL_TASK_STATUSES
+    )
+    return active == 0
+
+
+def _wave_summary(counts: Dict[str, Any]) -> str:
+    order = (
+        config.TASK_IN_PROGRESS,
+        config.TASK_READY,
+        config.TASK_REVIEW,
+        config.TASK_TODO,
+        config.TASK_BLOCKED,
+        config.TASK_WAITING,
+        config.TASK_FAILED,
+        config.TASK_DONE,
+        config.TASK_DONE_WITH_LIMITATION,
+        config.TASK_CANCELLED,
+    )
+    parts = [
+        f"{status} {counts.get(status, 0)}"
+        for status in order
+        if counts.get(status, 0)
+    ]
+    return " | ".join(parts) or "no tasks"
+
+
+def _run_all(
+    orchestrator: MasterOrchestrator, max_tasks: int, max_concurrent: int
+) -> int:
+    """``run --all``: dispatch wave after wave until every task is terminal.
+
+    Exit codes mirror a single ``run``: ``0`` everything finished, ``3``
+    blocked/stalled/loop limit/nothing left that can reach READY, ``4`` a
+    human decision is required. One wave is one ``run_cycle`` — the same unit
+    a hand-written ``while`` loop around the CLI would run — so partial
+    progress is already persisted when the loop stops.
+    """
+    _maybe_generate_graph(orchestrator)
+    wave = 0
+    while True:
+        if _all_tasks_terminal(orchestrator):
+            print()
+            print("SUCCESS: every task is terminal (DONE / CANCELLED).")
+            print(f"  {_wave_summary(orchestrator.state.summary_counts())}")
+            return 0
+
+        report = orchestrator.sync_health()
+        if report.state == config.HEALTH_HUMAN_DECISION_REQUIRED:
+            print(
+                "STOPPED: a human decision is required — approve or reject it, "
+                "then rerun `run --all` (details: `orchestrator health --diagnose`)."
+            )
+            print(f"Health: {report.state}")
+            return 4
+        if report.state in (config.HEALTH_STALLED, config.HEALTH_BLOCKED):
+            print(
+                f"STOPPED: health {report.state} — nothing can proceed "
+                "(details: `orchestrator health --diagnose`)."
+            )
+            return 3
+
+        wave += 1
+        results = orchestrator.run_cycle(
+            max_tasks=max_tasks, max_concurrent=max_concurrent
+        )
+        if not results:
+            # Nothing READY and not finished: the remaining tasks have no path
+            # to READY. Stopping here is what keeps --all from spinning.
+            print("No READY tasks available.")
+            print(
+                "not finished — remaining tasks cannot reach READY; "
+                "inspect them with `orchestrator status`."
+            )
+            print(f"Health: {report.state} (details: `orchestrator health --diagnose`)")
+            return 3
+
+        wave_exit = _print_run_results(results)
+        print(
+            f"wave {wave}: {len(results)} result(s) — "
+            f"{_wave_summary(orchestrator.state.summary_counts())}"
+        )
+        if wave_exit:
+            print(
+                "STOPPED: a loop limit was hit — fix the task inputs, then run "
+                "`orchestrator retry <task> --reason \"...\"` and rerun `run --all`."
+            )
+            return wave_exit
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    orchestrator = MasterOrchestrator(_resolve_project(args))
+    task_id = getattr(args, "task", None)
+    max_tasks = int(getattr(args, "max_tasks", 25) or 25)
+    max_concurrent = max(1, int(getattr(args, "max_concurrent", 1) or 1))
+    exit_code = 0
+
+    if task_id and getattr(args, "all", False):
+        print("ERROR: --all and --task are mutually exclusive.")
+        return 2
+
+    if getattr(args, "all", False):
+        return _run_all(orchestrator, max_tasks=max_tasks, max_concurrent=max_concurrent)
+
+    if task_id:
+        try:
+            result = orchestrator.run_task(task_id)
+        except LoopLimitExceededError as exc:
+            print(f"LOOP LIMIT: {exc}")
+            print(
+                "hint: fix the task inputs/strategy, then run "
+                f"`orchestrator retry {task_id}` to reset its loop counters"
+            )
+            return 3
+        except TaskNotFoundError as exc:
+            print(f"ERROR: {exc}")
+            return 2
+        results = [result]
+    else:
+        _maybe_generate_graph(orchestrator)
+        results = orchestrator.run_cycle(max_tasks=max_tasks, max_concurrent=max_concurrent)
+        if not results:
+            # Nothing to dispatch: give a one-line health summary instead of
+            # dumping the full report on every idle cycle of a run loop.
+            print("No READY tasks available.")
+            report = orchestrator.sync_health()
+            detail = (
+                " (details: `orchestrator health --diagnose`)"
+                if report.state != config.HEALTH_HEALTHY
+                else ""
+            )
+            print(f"Health: {report.state}{detail}")
+            if report.state == config.HEALTH_HUMAN_DECISION_REQUIRED:
+                return 4
+            if report.state in (config.HEALTH_STALLED, config.HEALTH_BLOCKED):
+                return 3
+            return 0
+
+    exit_code = max(exit_code, _print_run_results(results))
 
     report = orchestrator.sync_health()
     print()

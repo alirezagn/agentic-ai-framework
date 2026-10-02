@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import build_test_project
+from conftest import _task, build_test_project
 from orchestrator import cli, config
 from orchestrator.cli import main
 from orchestrator.state_manager import StateManager
@@ -740,3 +740,106 @@ class TestEnvFileLoading:
         assert "OLLAMA_BASE_URL=http://192.168.0.200:11434" in example
         assert "ORCHESTRATOR_LLM_MODEL=gemma4:12b" in example
         assert "ORCHESTRATOR_LLM_PROVIDER=ollama" in example
+
+
+class TestRunAllCommand:
+    """``orchestrator run --all`` — the built-in "keep going until done" loop.
+
+    One ``run`` is one wave: tasks unblocked by that wave only become
+    dispatchable on the next call, so running *everything* is a loop. What has
+    to be pinned down is not the dispatch (that is ``run_cycle``'s contract)
+    but the stop conditions, because a loop that cannot stop hangs forever on
+    a graph nobody can finish.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _run_from_tmp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+
+    @staticmethod
+    def _write_tasks(project: Path, tasks: list) -> None:
+        StateManager(project).save_tasks_document({"tasks": tasks})
+
+    def test_all_and_task_are_mutually_exclusive(
+        self, test_project: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        code = main(
+            ["--project", str(test_project), "run", "--all", "--task", "TASK-002"]
+        )
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "mutually exclusive" in captured.out
+
+    def test_all_succeeds_when_every_task_is_terminal(
+        self, test_project: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        self._write_tasks(
+            test_project, [_task("TASK-001", "requirements_agent", "DONE")]
+        )
+        code = main(["--project", str(test_project), "run", "--all"])
+        captured = capsys.readouterr()
+        assert code == 0
+        assert "SUCCESS: every task is terminal" in captured.out
+        assert "DONE 1" in captured.out
+
+    def test_all_stops_when_a_human_decision_is_required(
+        self, test_project: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        # An unknown dependency is a structural problem, and structural
+        # problems surface as HUMAN_DECISION_REQUIRED: --all must hand control
+        # back instead of dispatching around them.
+        self._write_tasks(
+            test_project,
+            [_task("TASK-001", "requirements_agent", "BLOCKED", ["TASK-999"])],
+        )
+        code = main(["--project", str(test_project), "run", "--all"])
+        captured = capsys.readouterr()
+        assert code == 4
+        assert "human decision is required" in captured.out
+
+    def test_all_stops_when_nothing_can_reach_READY(
+        self, test_project: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        # FAILED is non-terminal, so the project is unfinished, but the task
+        # will never be dispatched again: the loop must exit rather than spin.
+        self._write_tasks(
+            test_project,
+            [
+                _task("TASK-001", "requirements_agent", "DONE"),
+                _task("TASK-002", "requirements_agent", "FAILED", ["TASK-001"]),
+            ],
+        )
+        code = main(["--project", str(test_project), "run", "--all"])
+        captured = capsys.readouterr()
+        assert code == 3
+        assert "STOPPED" in captured.out or "No READY tasks" in captured.out
+
+    def test_all_dispatches_each_wave_until_the_graph_is_done(
+        self, test_project: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        # Two waves: TASK-002 is only READY after TASK-001 finishes, which is
+        # exactly what a single `run` cannot do on its own.
+        self._write_tasks(
+            test_project,
+            [
+                _task("TASK-001", "requirements_agent", "READY"),
+                _task(
+                    "TASK-002",
+                    "requirements_agent",
+                    "TODO",
+                    ["TASK-001"],
+                    review_required=False,
+                ),
+            ],
+        )
+        code = main(["--project", str(test_project), "run", "--all"])
+        captured = capsys.readouterr()
+        assert code == 0
+        assert "[OK] TASK-001" in captured.out
+        assert "[OK] TASK-002" in captured.out
+        assert "wave 1:" in captured.out
+        assert "wave 2:" in captured.out
+        assert "SUCCESS: every task is terminal" in captured.out
+        state = StateManager(test_project)
+        assert state.get_task("TASK-001")["status"] == config.TASK_DONE
+        assert state.get_task("TASK-002")["status"] == config.TASK_DONE
