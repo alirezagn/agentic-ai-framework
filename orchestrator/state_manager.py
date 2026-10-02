@@ -8,14 +8,25 @@ Markdown file behind.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import yaml
+
+try:  # POSIX advisory locking; absent on Windows.
+    import fcntl
+except ImportError:  # pragma: no cover - platform dependent
+    fcntl = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 from . import config
 from .context_monitor import context_window_tokens, utilization_from_tokens
@@ -127,6 +138,52 @@ OWNER_PROGRESS_KEY: Dict[str, str] = {
 }
 
 
+def _index_tasks(tasks: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Map task id -> task, coercing ids to ``str`` so lookups always match.
+
+    ``dependency_ids`` yields strings, so a YAML-parsed numeric id would
+    otherwise never match and every dependent task would look permanently
+    blocked. Built once per call site (GAP-HIGH-03) instead of per task.
+    """
+    return {str(task.get("id")): task for task in tasks}
+
+
+def _dependencies_satisfied_with(
+    task: Dict[str, Any],
+    tasks: Sequence[Dict[str, Any]],
+    index: Dict[str, Dict[str, Any]],
+) -> bool:
+    """Dependency check against a pre-built index (see :func:`_index_tasks`)."""
+    for dep_id in _dependency_ids_of(task):
+        dep = index.get(dep_id)
+        if dep is None:
+            return False
+        if str(dep.get("status")) not in SATISFIED_DEPENDENCY_STATUSES:
+            return False
+    return True
+
+
+def _dependency_ids_of(task: Dict[str, Any]) -> List[str]:
+    """Normalised dependency ids for ``task`` (``dependency_ids`` as a function).
+
+    The method form defers to this so the fast path and the public API cannot
+    drift apart.
+    """
+    raw = task.get("dependencies") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(item) for item in raw if str(item).strip()]
+
+
+def _status_breakdown_of(tasks: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    """Count tasks per status from an in-memory list (GAP-HIGH-03)."""
+    breakdown: Dict[str, int] = {}
+    for task in tasks:
+        status = str(task.get("status", "UNKNOWN"))
+        breakdown[status] = breakdown.get(status, 0) + 1
+    return breakdown
+
+
 def derive_agent_status(owned: Sequence[Dict[str, Any]]) -> str:
     """Derive a PROJECT.yaml ``agents`` entry from the tasks an owner holds."""
     statuses = [str(task.get("status", "")) for task in owned]
@@ -144,26 +201,280 @@ def derive_agent_status(owned: Sequence[Dict[str, Any]]) -> str:
 
 
 def atomic_write_text(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` atomically."""
+    """Write ``content`` to ``path`` atomically, under an advisory file lock.
+
+    Sequence, in order:
+
+    1. Serialize happens *before* any file is touched (the caller does this, and
+       :func:`atomic_dump_yaml` enforces it), so a YAML error cannot leave a
+       truncated state file behind.
+    2. A sibling lock file is taken with :func:`_file_lock`. It is a **separate
+       file**, not the target, because ``os.replace`` swaps the inode: locking
+       the target would release the moment the rename lands and would not
+       exclude a second writer that is mid-replace.
+    3. Write to a temp file in the *same directory* (so ``os.replace`` is a
+       same-filesystem rename, which is atomic), ``fsync`` the file, then
+       ``os.replace`` it over the target.
+    4. ``fsync`` the parent directory so the rename itself is durable. Without
+       this a power loss can leave the directory entry pointing at the old
+       inode even though the file contents were fsynced — the file "reverts",
+       which for a state store means silently losing a task transition.
+
+    The lock is advisory and best-effort: platforms without :mod:`fcntl`
+       (Windows) fall back to no locking, because a hard failure there would
+       break the runtime outright. Callers must therefore still assume a
+       last-writer-wins outcome; the lock narrows the window, it does not
+       close it.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-    )
-    tmp_path = Path(tmp_name)
+    with _file_lock(path):
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+            _fsync_directory(path.parent)
+        except BaseException:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            raise
+
+
+def _safe_error_text(exc: BaseException, limit: int = 300) -> str:
+    """Render an exception's message without letting rendering itself fail.
+
+    PyYAML raises ``RepresenterError("<exception str() failed>")`` when the
+    offending value's ``__repr__`` raises. Building the new error message then
+    calls ``str()`` on that exception again, which re-enters the failing
+    ``__repr__`` and lets the *original* error escape the handler — replacing a
+    clear "cannot serialize" with an unrelated traceback, which is exactly the
+    confusing failure this path exists to prevent.
+
+    So: type name always, message only when it renders safely.
+    """
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
+        text = str(exc)
+    except Exception:
+        return "<message unavailable>"
+    if not text:
+        return "<no message>"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+@contextmanager
+def _document_lock(path: Path, timeout: float = 10.0) -> Iterator[None]:
+    """Hold the advisory lock for a state document across a read-modify-write.
+
+    GAP-CRIT-06. A read-modify-write is only atomic if the *read* is inside the
+    same critical section as the *write*. :func:`_file_lock` protects a single
+    write; this wraps the whole cycle, which is what id allocation needs:
+
+        with _document_lock(self.decisions_md):
+            content = read()      # see every other writer's entry
+            new_id = allocate(content)
+            write(content + entry)
+
+    Without this, two processes both read the file, both see no ``DEC-004``,
+    both allocate ``DEC-004``, and the second ``os.replace`` silently discards
+    the first decision.
+    """
+    with _file_lock(path, timeout=timeout):
+        yield
+
+
+def _append_text_locked(path: Path, block: str) -> str:
+    """Append ``block`` to ``path`` atomically, returning the resulting text.
+
+    GAP-CRIT-06. Uses ``O_APPEND`` under the document lock rather than
+    read-concatenate-rewrite. Two reasons:
+
+    * **Correctness.** The read no longer races the write, so concurrent
+      appenders cannot lose each other's entries. A plain read-then-write of an
+      append-only log is a lost-update bug by construction.
+    * **Cost.** The old shape re-read and rewrote the whole file per entry, so
+      a long session was O(n²) in bytes written. Appending is O(len(block)).
+      These files are never edited in the middle, only extended.
+
+    The trailing-newline fixup that the old code performed is kept, but done on
+    the *file* (a one-byte read) rather than on the whole document. Single
+    ``write()`` of a bounded block under ``O_APPEND`` is atomic on POSIX for
+    regular files, so two processes cannot interleave a partial block.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _file_lock(path):
+        prefix = ""
+        if path.exists() and path.stat().st_size:
+            with open(path, "rb") as probe:
+                probe.seek(-1, os.SEEK_END)
+                if probe.read(1) != b"\n":
+                    prefix = "\n"
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(prefix + block)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
-    except BaseException:
-        if tmp_path.exists():
+    return load_text_file(path)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """``fsync`` a directory so a rename into it is durable.
+
+    Best-effort: some filesystems refuse ``O_DIRECTORY`` fsync, and failing to
+    persist a directory entry is not a reason to lose the write that already
+    succeeded.
+    """
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _file_lock(path: Path, timeout: float = 10.0) -> Iterator[None]:
+    """Hold an advisory exclusive lock for ``path`` via a sibling ``.lock`` file.
+
+    The lock is taken on ``<name>.lock`` rather than ``<name>`` itself because
+    :func:`os.replace` installs a new inode: a lock held on the old inode is
+    released by the rename, so a concurrent writer could slip in during exactly
+    the window the lock was meant to cover.
+
+    Two details keep this cheap and correct:
+
+    * **Cached handle.** The ``.lock`` file is opened once per process and
+      reused, and an in-process :class:`threading.Lock` guards it. Without the
+      in-process guard, two threads in the same process each hold their own
+      file descriptor for the same file, so ``flock`` treats them as distinct
+      holders and the second one spins for the full timeout — which is how a
+      20-second test appeared where a 20-millisecond one was expected.
+    * **Re-entrancy.** Held as a per-path counter, so a nested
+      :func:`_document_lock` on the same document (e.g. ``append_decision``
+      taking the changelog lock while holding the decisions lock) is free
+      instead of self-deadlocking.
+
+    Yields immediately when :mod:`fcntl` is unavailable, or when the lock cannot
+    be acquired within ``timeout`` — a stuck lock must not wedge the
+    orchestrator, and every write path remains individually atomic regardless.
+    """
+    if fcntl is None:
+        yield
+        return
+    lock_path = path.with_name(f".{path.name}.lock")
+    state = _lock_state(lock_path)
+    with state.thread_lock:
+        depth = state.depth
+        if depth == 0:
             try:
-                tmp_path.unlink()
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                if state.handle is None or state.handle.closed:
+                    state.handle = open(lock_path, "a+", encoding="utf-8")
             except OSError:
-                pass
-        raise
+                yield
+                return
+            deadline = time.monotonic() + max(0.0, timeout)
+            while True:
+                try:
+                    fcntl.flock(state.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (BlockingIOError, OSError):
+                    if time.monotonic() >= deadline:
+                        logger.warning(
+                            "proceeding without lock for %s after %.1fs",
+                            path,
+                            timeout,
+                        )
+                        break
+                    time.sleep(0.005)
+        state.depth = depth + 1
+        try:
+            yield
+        finally:
+            state.depth = depth
+            if depth == 0 and state.handle is not None and not state.handle.closed:
+                try:
+                    fcntl.flock(state.handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+
+
+class _LockState:
+    """Per-lock-file process state: one fd, one in-process mutex, one depth."""
+
+    __slots__ = ("handle", "thread_lock", "depth")
+
+    def __init__(self) -> None:
+        self.handle: Optional[Any] = None
+        # Reentrant by necessity: _document_lock holds this lock across the
+        # critical section, and the write inside that section calls
+        # atomic_write_text -> _file_lock again for the same document. A plain
+        # Lock self-deadlocks there. Only the owning thread can be inside, so the
+        # shared `depth` counter is safe without being per-thread.
+        self.thread_lock = threading.RLock()
+        self.depth = 0
+
+
+#: Keyed by resolved lock path. Process-wide; the orchestrator is single-process
+#: per project, so this stays small.
+_LOCK_STATES: Dict[str, _LockState] = {}
+
+
+def _lock_state(lock_path: Path) -> _LockState:
+    key = str(lock_path)
+    state = _LOCK_STATES.get(key)
+    if state is None:
+        state = _LockState()
+        _LOCK_STATES[key] = state
+    return state
+
+
+def atomic_dump_yaml(path: Path, data: Dict[str, Any]) -> None:
+    """Serialize ``data`` to YAML and write it atomically under a file lock.
+
+    GAP-HIGH-01/HIGH-02. This is the only supported way to persist a YAML state
+    document. Two properties matter and neither is provided by a bare
+    ``open(path, "w")``:
+
+    * **Serialize first.** ``yaml.safe_dump`` runs to completion (and is
+      converted to :class:`StateCorruptedError` on failure) before a single byte
+      reaches the filesystem. A direct write truncates the file and then fails
+      mid-dump, leaving unparseable YAML where the only copy of the task graph
+      used to be.
+    * **Atomic swap.** The bytes land in a temp file and are renamed over the
+      target, so a reader never observes a partially written document and a
+      crash cannot leave a half-written one.
+    """
+    try:
+        text = yaml.safe_dump(
+            data, default_flow_style=False, sort_keys=False, allow_unicode=True
+        )
+    except BaseException as exc:
+        # Any serialisation failure — an unserialisable value, a recursive
+        # structure, or a value whose __repr__ raises — must abort here, while
+        # the target file is still untouched. Catching broadly is deliberate:
+        # the invariant being protected ("serialize before touching disk") is
+        # more important than classifying the error precisely, and
+        # StateCorruptedError is a StateError so every existing handler works.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise StateCorruptedError(
+            f"Cannot serialize data for {path}: {type(exc).__name__}: "
+            f"{_safe_error_text(exc)}"
+        ) from exc
+    atomic_write_text(Path(path), text)
 
 
 def load_yaml_file(path: Path) -> Dict[str, Any]:
@@ -184,12 +495,12 @@ def load_yaml_file(path: Path) -> Dict[str, Any]:
 
 
 def save_yaml_file(path: Path, data: Dict[str, Any]) -> None:
-    """Serialize ``data`` to YAML and write it atomically."""
-    try:
-        text = yaml.safe_dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    except yaml.YAMLError as exc:
-        raise StateCorruptedError(f"Cannot serialize data for {path}: {exc}") from exc
-    atomic_write_text(Path(path), text)
+    """Serialize ``data`` to YAML and write it atomically under a file lock.
+
+    Thin alias for :func:`atomic_dump_yaml`, kept as the historical public name
+    so existing callers and tests need no change.
+    """
+    atomic_dump_yaml(Path(path), data)
 
 
 def load_text_file(path: Path) -> str:
@@ -379,6 +690,14 @@ class StateManager:
 
     def load_tasks(self) -> List[Dict[str, Any]]:
         document = self.load_tasks_document()
+        return self._tasks_from_document(document)
+
+    def _tasks_from_document(self, document: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract and validate the task list from an already-parsed document.
+
+        GAP-HIGH-03. Lets a caller that has just parsed ``TASKS.yaml`` reuse
+        that parse instead of triggering another ``yaml.safe_load``.
+        """
         tasks = document.get("tasks")
         if tasks is None:
             return []
@@ -399,35 +718,48 @@ class StateManager:
         return None
 
     def dependency_ids(self, task: Dict[str, Any]) -> List[str]:
-        dependencies = task.get("dependencies") or []
-        if not isinstance(dependencies, list):
-            return []
-        return [str(dep) for dep in dependencies]
+        """Normalised dependency ids for ``task``.
 
-    def dependencies_satisfied(self, task: Dict[str, Any], tasks: Optional[Sequence[Dict[str, Any]]] = None) -> bool:
-        task_list = list(tasks) if tasks is not None else self.load_tasks()
-        by_id = {entry.get("id"): entry for entry in task_list}
-        for dep_id in self.dependency_ids(task):
-            dep = by_id.get(dep_id)
-            if dep is None:
-                return False
-            if dep.get("status") not in SATISFIED_DEPENDENCY_STATUSES:
-                return False
-        return True
+        Delegates to :func:`_dependency_ids_of` so this public method and the
+        fast dependency check used by :meth:`get_ready_tasks` cannot drift.
+        """
+        return _dependency_ids_of(task)
 
-    def get_ready_tasks(self) -> List[Dict[str, Any]]:
+    def dependencies_satisfied(
+        self,
+        task: Dict[str, Any],
+        tasks: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> bool:
+        """True when every dependency of ``task`` is in a satisfied status.
+
+        ``tasks`` may be supplied to avoid re-reading ``TASKS.yaml``. The id
+        index is built once per call rather than per dependency (GAP-HIGH-03).
+        """
+        if tasks is None:
+            tasks = self.load_tasks()
+        return _dependencies_satisfied_with(task, tasks, _index_tasks(tasks))
+
+    def get_ready_tasks(
+        self, tasks: Optional[Sequence[Dict[str, Any]]] = None
+    ) -> List[Dict[str, Any]]:
         """READY tasks plus WAITING tasks still eligible for dispatch.
 
-        WAITING (parked by a pending PROPOSED_CHANGE) is dispatched too so
-        the decision gate can refuse it explicitly; the gate — not the
-        status — is what blocks the work.
+        WAITING (parked by a pending PROPOSED_CHANGE) is dispatched too so the
+        decision gate can refuse it explicitly; the gate — not the status — is
+        what blocks the work.
+
+        ``tasks`` may be supplied when the caller already holds the parsed list
+        (GAP-HIGH-03). The id index is also built once and passed down, since
+        :meth:`dependencies_satisfied` otherwise rebuilds it per task.
         """
-        tasks = self.load_tasks()
+        if tasks is None:
+            tasks = self.load_tasks()
+        index = _index_tasks(tasks)
         ready = [
             task
             for task in tasks
             if task.get("status") in (config.TASK_READY, config.TASK_WAITING)
-            and self.dependencies_satisfied(task, tasks)
+            and _dependencies_satisfied_with(task, tasks, index)
         ]
         ready.sort(key=lambda task: (priority_rank(task.get("priority")), str(task.get("id"))))
         return ready
@@ -453,17 +785,18 @@ class StateManager:
 
         Returns the list of task ids whose status changed.
         """
-        tasks = self.load_tasks()
+        document = self.load_tasks_document()
+        tasks = self._tasks_from_document(document)
+        index = _index_tasks(tasks)
         changed: List[str] = []
         for task in tasks:
             status = task.get("status")
             if status not in (config.TASK_TODO, config.TASK_BLOCKED):
                 continue
-            if self.dependencies_satisfied(task, tasks):
+            if _dependencies_satisfied_with(task, tasks, index):
                 task["status"] = config.TASK_READY
                 changed.append(str(task.get("id")))
         if changed:
-            document = self.load_tasks_document()
             document["tasks"] = tasks
             self.save_tasks_document(document)
         self.recompute_derived_state()
@@ -523,18 +856,33 @@ class StateManager:
         ``critical_path.path`` (longest dependency chain).
 
         PROJECT.yaml: ``progress`` (per-workstream completion %), ``agents``
-        (owner activity status), and ``next_tasks`` (currently READY ids).
+        (owner activity status), ``next_tasks`` (currently READY ids), and the
+        forward-only derived phase.
+
+        GAP-HIGH-03 — this runs after *every* status mutation, so its disk I/O
+        dominated the write path. It previously parsed ``TASKS.yaml`` **four
+        times** per call: once here, once more via ``load_tasks_document``,
+        again through ``status_breakdown()``, and once more through
+        ``get_ready_tasks()`` (plus O(n²) scans inside the two dependency
+        helpers). At 400 tasks a single mutation cost ~6 s, almost all of it
+        ``yaml.safe_load``/``safe_dump``.
+
+        Now ``TASKS.yaml`` is parsed **once** and the in-memory list is threaded
+        through the derivations that used to re-read it. ``status_breakdown``
+        and ``get_ready_tasks`` accept an optional pre-loaded task list, and the
+        per-owner/per-key group scans are bucketed in a single pass instead of
+        re-filtering the whole list per key. Behaviour is unchanged; only the
+        number of disk round-trips is.
 
         Planning-only fields (durations, estimates, group metadata) are
-        preserved. Files are only written when a derived value changed.
-        Returns the recomputed derived values.
+        preserved. Files are still only written when a derived value changed.
         """
-        tasks = self.load_tasks()
-        task_ids = {str(task.get("id")) for task in tasks}
         document = self.load_tasks_document()
+        tasks = self._tasks_from_document(document)
+        task_ids = {str(task.get("id")) for task in tasks}
         tasks_changed = False
 
-        breakdown = self.status_breakdown()
+        breakdown = _status_breakdown_of(tasks)
         summary = dict(document.get("summary") or {})
         new_summary = dict(summary)
         new_summary["total_tasks"] = len(tasks)
@@ -578,19 +926,23 @@ class StateManager:
         project = self.load_project()
         project_changed = False
 
-        progress = dict(project.get("progress") or {})
-        progress_keys = set(progress)
+        # Single bucketing pass: previously each progress key and each owner
+        # re-filtered the entire task list, making this block O(keys x tasks).
+        by_progress_key: Dict[str, List[Dict[str, Any]]] = {}
+        by_owner: Dict[str, List[Dict[str, Any]]] = {}
         for task in tasks:
-            key = OWNER_PROGRESS_KEY.get(str(task.get("owner", "")))
+            owner = str(task.get("owner", ""))
+            if owner:
+                by_owner.setdefault(owner, []).append(task)
+            key = OWNER_PROGRESS_KEY.get(owner)
             if key:
-                progress_keys.add(key)
+                by_progress_key.setdefault(key, []).append(task)
+
+        progress = dict(project.get("progress") or {})
+        progress_keys = set(progress) | set(by_progress_key)
         new_progress = dict(progress)
         for key in sorted(progress_keys):
-            owned = [
-                task
-                for task in tasks
-                if OWNER_PROGRESS_KEY.get(str(task.get("owner", ""))) == key
-            ]
+            owned = by_progress_key.get(key)
             if not owned:
                 continue
             done = [
@@ -607,17 +959,15 @@ class StateManager:
 
         agents = dict(project.get("agents") or {})
         new_agents = dict(agents)
-        owners = {str(task.get("owner", "")) for task in tasks if task.get("owner")}
-        for owner in sorted(owners):
-            owned = [task for task in tasks if str(task.get("owner", "")) == owner]
-            status = derive_agent_status(owned)
+        for owner in sorted(by_owner):
+            status = derive_agent_status(by_owner[owner])
             if new_agents.get(owner) != status:
                 new_agents[owner] = status
         if new_agents != agents:
             project["agents"] = new_agents
             project_changed = True
 
-        next_tasks = [str(task.get("id")) for task in self.get_ready_tasks()]
+        next_tasks = [str(task.get("id")) for task in self.get_ready_tasks(tasks=tasks)]
         if (project.get("next_tasks") or []) != next_tasks:
             project["next_tasks"] = next_tasks
             project_changed = True
@@ -990,12 +1340,15 @@ class StateManager:
         self.save_tasks_document(document)
         return dict(target)
 
-    def status_breakdown(self) -> Dict[str, int]:
-        breakdown: Dict[str, int] = {}
-        for task in self.load_tasks():
-            status = str(task.get("status", "UNKNOWN"))
-            breakdown[status] = breakdown.get(status, 0) + 1
-        return breakdown
+    def status_breakdown(self, tasks: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, int]:
+        """Count tasks per status.
+
+        ``tasks`` may be supplied when the caller already holds the parsed list
+        (GAP-HIGH-03), avoiding a redundant ``TASKS.yaml`` parse.
+        """
+        if tasks is None:
+            tasks = self.load_tasks()
+        return _status_breakdown_of(tasks)
 
     def summary_counts(self) -> Dict[str, int]:
         breakdown = self.status_breakdown()
@@ -1046,14 +1399,13 @@ class StateManager:
         save_text_file(self.current_state_md, content)
 
     def append_current_state(self, message: str) -> str:
-        current = self.load_current_state()
-        stamp = utc_now_iso()
-        if current and not current.endswith("\n"):
-            current += "\n"
-        entry = f"\n**Update ({stamp}):** {message}\n"
-        updated = current + entry
-        save_text_file(self.current_state_md, updated)
-        return updated
+        """Append one update line to CURRENT_STATE.md.
+
+        Appends in place under the document lock (GAP-CRIT-06) rather than
+        rewriting the whole file, so concurrent writers cannot lose an entry.
+        """
+        entry = f"**Update ({utc_now_iso()}):** {message}\n"
+        return _append_text_locked(self.current_state_md, entry)
 
     def load_decisions(self) -> str:
         return load_text_file(self.decisions_md)
@@ -1149,10 +1501,6 @@ class StateManager:
         Pattern 3: while pending, dispatch of ``affected_tasks`` is blocked
         until a human calls :meth:`resolve_decision`.
         """
-        content = self.load_decisions()
-        numbers = [int(match.group(1)) for match in re.finditer(r"DEC-(\d+)", content)]
-        dec_id = f"DEC-{((max(numbers) + 1) if numbers else 1):03d}"
-
         def one_line(value: Any) -> str:
             return " ".join(str(value or "").split())
 
@@ -1161,22 +1509,37 @@ class StateManager:
             for item in (affected_tasks or [])
             if str(item).strip()
         ]
-        section = (
-            "\n---\n\n"
-            f"## {dec_id}: {one_line(title)}\n\n"
-            f"**Date:** {utc_now_iso()}  \n"
-            f"**Status:** {one_line(status)}  \n"
-            f"**Proposed by:** {one_line(proposed_by)}  \n"
-            f"**Reason:** {one_line(reason)}  \n"
-            f"**Alternatives:** {one_line(alternatives)}  \n"
-            f"**Impact:** {one_line(impact)}  \n"
-            f"**Affected Tasks:** {one_line(', '.join(affected))}  \n"
-            f"**Risks:** {one_line(risks)}  \n"
-            f"**Recommendation:** {one_line(recommendation)}\n"
-        )
-        if content and not content.endswith("\n"):
-            content += "\n"
-        self.save_decisions(content + section)
+
+        def render(dec_id: str) -> str:
+            return (
+                "\n---\n\n"
+                f"## {dec_id}: {one_line(title)}\n\n"
+                f"**Date:** {utc_now_iso()}  \n"
+                f"**Status:** {one_line(status)}  \n"
+                f"**Proposed by:** {one_line(proposed_by)}  \n"
+                f"**Reason:** {one_line(reason)}  \n"
+                f"**Alternatives:** {one_line(alternatives)}  \n"
+                f"**Impact:** {one_line(impact)}  \n"
+                f"**Affected Tasks:** {one_line(', '.join(affected))}  \n"
+                f"**Risks:** {one_line(risks)}  \n"
+                f"**Recommendation:** {one_line(recommendation)}\n"
+            )
+
+        # GAP-CRIT-06: the read, the id allocation and the write form ONE
+        # critical section. Splitting them lets two processes both read a file
+        # containing no DEC-004, both allocate DEC-004, and the second write
+        # silently discards the first decision. The section body is rendered
+        # inside the lock so the id and the text can never disagree.
+        with _document_lock(self.decisions_md):
+            content = self.load_decisions()
+            numbers = [
+                int(match.group(1)) for match in re.finditer(r"DEC-(\d+)", content)
+            ]
+            dec_id = f"DEC-{((max(numbers) + 1) if numbers else 1):03d}"
+            section = render(dec_id)
+            if content and not content.endswith("\n"):
+                content += "\n"
+            self.save_decisions(content + section)
         self.append_changelog(
             f"Decision {dec_id} recorded ({one_line(status)}): {one_line(title)}"
         )
@@ -1189,7 +1552,16 @@ class StateManager:
         }
 
     def resolve_decision(self, dec_id: str, approved: bool = True) -> Dict[str, Any]:
-        """Approve or reject a recorded decision (updates DECISIONS.md)."""
+        """Approve or reject a recorded decision (updates DECISIONS.md).
+
+        The parse and the rewrite share one document lock (GAP-CRIT-06) so a
+        decision appended concurrently cannot shift the line offsets this
+        method is about to rewrite.
+        """
+        with _document_lock(self.decisions_md):
+            return self._resolve_decision_locked(dec_id, approved)
+
+    def _resolve_decision_locked(self, dec_id: str, approved: bool) -> Dict[str, Any]:
         content = self.load_decisions()
         entries = self._parse_decisions(content)
         target = next((item for item in entries if item["id"] == dec_id), None)
@@ -1307,33 +1679,42 @@ class StateManager:
         status: str = "OPEN",
     ) -> Dict[str, Any]:
         """Record a new risk entry in RISKS.md (+ CHANGELOG.md)."""
-        content = self.load_risks()
-        numbers = [int(match.group(1)) for match in re.finditer(r"RISK-(\d+)", content)]
-        risk_id = f"RISK-{((max(numbers) + 1) if numbers else 1):03d}"
-
         def one_line(value: Any) -> str:
             return " ".join(str(value or "").split())
 
         related = [
             str(item).strip() for item in (related_tasks or []) if str(item).strip()
         ]
-        section = (
-            "\n---\n\n"
-            f"### {risk_id}: {one_line(title)}\n\n"
-            f"**Date:** {utc_now_iso()}  \n"
-            f"**Status:** {one_line(status)}  \n"
-            f"**Probability:** {one_line(probability)}  \n"
-            f"**Impact:** {one_line(impact)}  \n"
-            f"**Related Tasks:** {one_line(', '.join(related))}  \n"
-            f"**Owner:** {one_line(owner)}  \n\n"
-            "**Description:**  \n"
-            f"{one_line(description) or '(none recorded)'}\n\n"
-            "**Mitigation:**  \n"
-            f"{one_line(mitigation) or '(none recorded)'}\n"
-        )
-        if content and not content.endswith("\n"):
-            content += "\n"
-        self.save_risks(content + section)
+
+        def render(risk_id: str) -> str:
+            return (
+                "\n---\n\n"
+                f"### {risk_id}: {one_line(title)}\n\n"
+                f"**Date:** {utc_now_iso()}  \n"
+                f"**Status:** {one_line(status)}  \n"
+                f"**Probability:** {one_line(probability)}  \n"
+                f"**Impact:** {one_line(impact)}  \n"
+                f"**Related Tasks:** {one_line(', '.join(related))}  \n"
+                f"**Owner:** {one_line(owner)}  \n\n"
+                "**Description:**  \n"
+                f"{one_line(description) or '(none recorded)'}\n\n"
+                "**Mitigation:**  \n"
+                f"{one_line(mitigation) or '(none recorded)'}\n"
+            )
+
+        # GAP-CRIT-06: read + id allocation + write in one critical section, so
+        # two failing tasks recorded concurrently cannot both become RISK-002
+        # with one of them silently dropped.
+        with _document_lock(self.risks_md):
+            content = self.load_risks()
+            numbers = [
+                int(match.group(1)) for match in re.finditer(r"RISK-(\d+)", content)
+            ]
+            risk_id = f"RISK-{((max(numbers) + 1) if numbers else 1):03d}"
+            section = render(risk_id)
+            if content and not content.endswith("\n"):
+                content += "\n"
+            self.save_risks(content + section)
         self.append_changelog(
             f"Risk {risk_id} recorded ({one_line(status)}): {one_line(title)}"
         )
@@ -1347,7 +1728,15 @@ class StateManager:
         }
 
     def update_risk_status(self, risk_id: str, status: str) -> Dict[str, Any]:
-        """Change an entry's status (OPEN / MITIGATED / CLOSED / REALIZED)."""
+        """Change an entry's status (OPEN / MITIGATED / CLOSED / REALIZED).
+
+        Parsed and rewritten under one document lock (GAP-CRIT-06) for the same
+        offset-stability reason as :meth:`resolve_decision`.
+        """
+        with _document_lock(self.risks_md):
+            return self._update_risk_status_locked(risk_id, status)
+
+    def _update_risk_status_locked(self, risk_id: str, status: str) -> Dict[str, Any]:
         content = self.load_risks()
         entries = self._parse_risks(content)
         target = next((item for item in entries if item["id"] == risk_id), None)
@@ -1401,23 +1790,23 @@ class StateManager:
         save_text_file(self.changelog_md, content)
 
     def append_changelog(self, entry: str) -> str:
-        current = self.load_changelog()
-        stamp = utc_now_iso()
-        if current and not current.endswith("\n"):
-            current += "\n"
-        block = f"\n## {stamp} — {entry}\n"
-        updated = current + block
-        save_text_file(self.changelog_md, updated)
-        return updated
+        """Append one dated section to CHANGELOG.md.
+
+        Appends in place under the document lock (GAP-CRIT-06).
+        """
+        block = f"## {utc_now_iso()} — {entry}\n"
+        return _append_text_locked(self.changelog_md, block)
 
     def append_memory_section(self, heading: str, body: str) -> str:
-        memory = self.load_memory()
-        if memory and not memory.endswith("\n"):
-            memory += "\n"
-        block = f"\n## {heading}\n\n{body.strip()}\n"
-        updated = memory + block
-        save_text_file(self.memory_md, updated)
-        return updated
+        """Append a section to PROJECT_MEMORY.md.
+
+        ``append_changelog`` is deliberately *not* called here: the compaction
+        path calls this while already holding the memory document lock, and
+        taking the changelog lock inside it would invert the lock order against
+        :meth:`append_decision`.
+        """
+        block = f"## {heading}\n\n{body.strip()}\n"
+        return _append_text_locked(self.memory_md, block)
 
     def extract_requirement_ids(self) -> List[str]:
         """Collect REQ-* ids referenced anywhere in PROJECT_MEMORY.md."""

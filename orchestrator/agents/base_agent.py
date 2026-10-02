@@ -338,6 +338,47 @@ class AgentOutput:
             produced_at=str(payload.get("produced_at") or utc_now_iso()),
         )
 
+#: Schema rules for the ``data.deploy`` channel (GAP-HIGH-04), appended to
+#: :attr:`BaseAgent.AUTHORING_CONTRACT` so every agent receives them.
+#:
+#: The channel exists because the framework must be able to tell a real
+#: verification from an invented one: the runner — not the model — stamps
+#: ``executed`` and the exit code, and the Definition of Done requires a
+#: matching record before a task may be marked DONE. Without these rules an
+#: agent has no way to *ask* for execution, and its only option is to assert
+#: results it never obtained.
+DATA_DEPLOY_CONTRACT = (
+    "Execution contract — how to request that something actually run:\n"
+    "- To have a build, test or tool really executed, return a LIST of "
+    'invocation objects in data.deploy. Each entry: {"command": "<binary or '
+    './project/script.sh>", "args": ["<arg>", ...], "cwd": "<optional, '
+    'project-relative>", "expect": "PASS" | "FAIL", "rationale": "<one line>"}.\n'
+    "- The runner executes it OUTSIDE your session, with a scrubbed environment, "
+    "a forced project-root working directory, a timeout, and a captured output "
+    "cap. It returns the real exit code and output; you never decide whether it "
+    "ran.\n"
+    "- `command` must be on the operator's executable allowlist. Anything else is "
+    'refused before the process is created. Check data.delivery_manifest and the '
+    "task notes for the permitted set; a refused command is reported back to you "
+    "with a reason.\n"
+    "- `expect` is your prediction, and it is CHECKED against reality. A mismatch "
+    "blocks completion just like a failure does — state what you honestly expect, "
+    "not what would look best.\n"
+    "- `args` is a list of plain arguments, never a shell string. Shell syntax "
+    '("; rm -rf /", "&&", ">", pipes) is passed through as inert text and will '
+    "not do what you intended.\n"
+    "- Request execution EARLY, before writing your summary: results come back in "
+    'data.deploy_results with {executed, exit_code, stdout_tail, stderr_tail}, '
+    "and a transcript is saved under docs/evidence/<task>/.\n"
+    "- If execution is unavailable or refused, that is a legitimate finding: set "
+    'data.test_status = "NOT RUN" and say what you could not verify and why. An '
+    "honest NOT RUN completes the task on its other merits.\n"
+    "- NEVER report a result you did not obtain. Claiming a pass with no matching "
+    "executed record is a contract violation: the task is rejected and the claim "
+    "is recorded as the reason."
+)
+
+
 class BaseAgent:
     AGENT_ID = "base_agent"
 
@@ -413,7 +454,8 @@ class BaseAgent:
         "path (and the docs/ mirror); it never modifies a file that existed "
         "when the task started — use data.edits for those.\n"
         "- Never invent executed results: report test or verification statuses as "
-        "NOT RUN unless the payload contains real execution output."
+        "NOT RUN unless the payload contains real execution output.\n"
+        + DATA_DEPLOY_CONTRACT
     )
 
     def __init__(

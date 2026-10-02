@@ -224,9 +224,21 @@ class TestStateLoading:
         assert "TASK-004" in blocked_ids
 
     def test_atomic_write_leaves_no_temp_files(self, test_project: Path) -> None:
+        """A write must leave no half-written temp file behind.
+
+        ``.<name>.lock`` files are expected and are not litter: the advisory
+        lock is taken on a sibling file rather than on the target, because
+        ``os.replace`` swaps the inode and would release a lock held on the
+        target at the exact moment it was meant to cover. The lock file is
+        intentionally persistent so concurrent writers contend on one inode.
+        """
         state = StateManager(test_project)
         state.update_health(status="WARNING")
-        leftovers = [p.name for p in test_project.iterdir() if p.name.startswith(".")]
+        leftovers = [
+            p.name
+            for p in test_project.iterdir()
+            if p.name.startswith(".") and not p.name.endswith(".lock")
+        ]
         assert leftovers == []
         assert state.get_health()["status"] == "WARNING"
 
