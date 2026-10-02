@@ -670,6 +670,13 @@ class BaseAgent:
                 "loop": config.loop_thresholds().as_dict(),
                 "compaction": config.compaction_thresholds().as_dict(),
             },
+            # GAP-CRIT-04: a task flagged for review carries the structural
+            # problems the Definition of Done already found. Hoisted out of
+            # `task` so the reviewer reads them as a pre-verdict it must weigh,
+            # rather than as another field of the work description.
+            "pending_dod_problems": [
+                str(item) for item in (task.get("pending_dod_problems") or [])
+            ],
             "built_at": utc_now_iso(),
         }
 
