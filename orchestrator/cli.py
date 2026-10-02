@@ -577,6 +577,16 @@ def cmd_tasks(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     orchestrator = MasterOrchestrator(_resolve_project(args))
     print(orchestrator.print_status())
+    # GAP-HIGH-04: `status` is the command an operator runs when a run stalls
+    # and no error was printed, so structural problems belong here. The deep
+    # validate() finds the cause (orphan, cycle, unknown owner, unknown
+    # dependency) that health heuristics cannot see. Reported, not fatal: a
+    # human may be mid-edit, and `status` should show state and exit 0.
+    problems = orchestrator.state.validate()
+    if problems:
+        print(f"Structural problems ({len(problems)}):")
+        for problem in problems:
+            print(f"  - {problem}")
     orchestrator.sync_health()
     health = orchestrator.health()
     print(f"Health: {health.state}")

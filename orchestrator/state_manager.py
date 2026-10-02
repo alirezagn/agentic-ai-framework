@@ -43,6 +43,11 @@ from .config import (
 )
 
 
+# GAP-HIGH-04: findings that describe a graph which works but is probably not
+# what was meant. Surfaced by `orchestrator status`; never blocks a plan.
+ADVISORY_PREFIX = "advisory: "
+
+
 class StateError(RuntimeError):
     """Base error for state management failures."""
 
@@ -1983,48 +1988,139 @@ class StateManager:
         ]
 
     def validate(self) -> List[str]:
-        """Return a list of structural problems found in the state files."""
+        """Return a list of structural problems found in the state files.
+
+        GAP-HIGH-04. This is the check the operator guide points at ("`status`
+        prints validate() problems"), so it has to be deep enough to be worth
+        running, and it must be reachable without knowing the internals.
+
+        Scope, and why each item is here:
+
+        *Task identity* — missing/duplicate/blank ids.
+        *Status vocabulary* — an unknown status is silently treated as
+        non-terminal by most readers, so it is reported.
+        *Graph integrity* — unknown dependency, non-list dependency (which used
+        to be silently treated as *empty*, turning a blocked task into a
+        dispatchable one), self-cycle, and dependency cycles.
+        *Orphans* — a task nothing can reach, and a terminal task another task
+        still waits on. Both indicate a graph that can never progress, which is
+        exactly the failure a human needs told about.
+        *Ownership* — an unknown owner makes every dispatch of that task fail
+        with ``MissingAgentError`` at runtime rather than at load.
+        *Project block* — an unknown ``phase.current`` silently makes
+        ``phase_index`` return 0, which disables the forward-only guard and
+        pins the phase forever.
+
+        Returns ``[]`` when the state is structurally sound.
+        """
         problems: List[str] = []
         try:
-            self.load_project()
+            project = self.load_project()
         except StateError as exc:
             problems.append(f"PROJECT.yaml: {exc}")
+            project = {}
         try:
             document = self.load_tasks_document()
         except StateError as exc:
             problems.append(f"TASKS.yaml: {exc}")
             return problems
 
-        tasks = document.get("tasks") or []
-        known_ids = {task.get("id") for task in tasks if isinstance(task, dict)}
+        problems.extend(self._validate_project(project))
+        problems.extend(self._validate_graph(document.get("tasks") or []))
+        return problems
+
+    def graph_blockers(self) -> List[str]:
+        """Only the problems that make the graph unusable (GAP-HIGH-04).
+
+        :meth:`validate` also returns advisory findings, which describe a graph
+        that works but is probably not what was meant. Code that must decide
+        whether to *proceed* — currently the plan-ingestion path — uses this so
+        that advice never blocks a legitimate plan.
+        """
+        return [
+            problem
+            for problem in self.validate()
+            if not problem.startswith(ADVISORY_PREFIX)
+        ]
+
+    def _validate_project(self, project: Dict[str, Any]) -> List[str]:
+        """Project-level structural checks (phase, context, progress shape)."""
+        problems: List[str] = []
+        phase_block = project.get("phase") or {}
+        if not isinstance(phase_block, dict):
+            problems.append("PROJECT.yaml: 'phase' must be a mapping")
+        else:
+            current = str(phase_block.get("current") or "")
+            if current and current not in config.PHASES:
+                problems.append(
+                    f"PROJECT.yaml: unknown phase '{current}'; "
+                    f"allowed: {', '.join(config.PHASES)}"
+                )
+        progress = project.get("progress")
+        if progress is not None and not isinstance(progress, dict):
+            problems.append(
+                f"PROJECT.yaml: 'progress' must be a mapping, got "
+                f"{type(progress).__name__}"
+            )
+        next_tasks = project.get("next_tasks")
+        if next_tasks is not None and not isinstance(next_tasks, list):
+            problems.append(
+                f"PROJECT.yaml: 'next_tasks' must be a list, got "
+                f"{type(next_tasks).__name__}"
+            )
+        return problems
+
+    def _validate_graph(self, tasks: Sequence[Any]) -> List[str]:
+        """Task-identity, ownership and dependency-graph checks."""
+        from .agents.base_agent import agent_names  # local import: avoid cycle
+
+        problems: List[str] = []
+        known_agents = set(agent_names())
+        valid_statuses = set(config.TASK_STATUSES)
+
+        mappings = [task for task in tasks if isinstance(task, dict)]
+        known_ids = {str(task.get("id")) for task in mappings if task.get("id")}
+
         seen_ids: set = set()
         for task in tasks:
             if not isinstance(task, dict):
                 problems.append("TASKS.yaml: every entry under 'tasks' must be a mapping")
                 continue
-            task_id = task.get("id")
+            task_id = str(task.get("id") or "").strip()
             if not task_id:
                 problems.append("TASKS.yaml: task without an 'id'")
                 continue
             if task_id in seen_ids:
                 problems.append(f"TASKS.yaml: duplicate task id '{task_id}'")
             seen_ids.add(task_id)
+
             status = task.get("status")
-            if status not in config.TASK_STATUSES:
-                problems.append(f"TASKS.yaml: task '{task_id}' has invalid status '{status}'")
-            # GAP-MED-02: a cycle is a structural defect, not a health warning.
-            # validate() is the check operators are told to run, so it has to
-            # see cycles — previously only a separate `health` call could.
+            if status not in valid_statuses:
+                problems.append(
+                    f"TASKS.yaml: task '{task_id}' has invalid status '{status}'"
+                )
+
+            owner = str(task.get("owner") or "").strip()
+            if not owner:
+                problems.append(f"TASKS.yaml: task '{task_id}' has no owner")
+            elif owner not in known_agents:
+                problems.append(
+                    f"TASKS.yaml: task '{task_id}' has unknown owner '{owner}'; "
+                    f"dispatch would raise MissingAgentError. "
+                    f"Registered: {', '.join(sorted(known_agents))}"
+                )
+
+            # GAP-MED-02: a cycle is a structural defect, not a health
+            # warning. validate() is the check operators are told to run, so it
+            # has to see cycles — previously only a separate `health` call could.
             raw_dependencies = task.get("dependencies")
-            dependency_list = (
-                raw_dependencies if isinstance(raw_dependencies, list) else []
-            )
+            dependency_list = raw_dependencies if isinstance(raw_dependencies, list) else []
             for dep in dependency_list:
                 if dep not in known_ids:
                     problems.append(
                         f"TASKS.yaml: task '{task_id}' depends on unknown task '{dep}'"
                     )
-                if str(dep) == str(task_id):
+                if str(dep) == task_id:
                     problems.append(
                         f"TASKS.yaml: task '{task_id}' depends on itself (self-cycle); "
                         "break it with `waive`"
@@ -2035,7 +2131,56 @@ class StateManager:
                     f"got {type(raw_dependencies).__name__} (silently treated as empty)"
                 )
 
-        problems.extend(self._cycle_problems([t for t in tasks if isinstance(t, dict)]))
+        problems.extend(self._cycle_problems(mappings))
+        problems.extend(self._orphan_problems(mappings))
+        return problems
+
+    def _orphan_problems(self, tasks: Sequence[Dict[str, Any]]) -> List[str]:
+        """Advisory findings about unreachable parts of the graph.
+
+        An *orphan* here is a second, disconnected root: a task with no
+        dependencies that nothing else depends on. One such task is how every
+        graph starts, so a single root is never reported. Extra roots mean the
+        graph is several disconnected fragments, so no task can ever
+        unblock the others and a milestone that spans both can never complete.
+
+        Deliberately advisory rather than blocking: two parallel tracks can be
+        an intentional plan, so this is advice for :meth:`graph_blockers`
+        callers to surface (``orchestrator status``) and not a reason to refuse
+        a plan.
+
+        Not reported here, because both are correct behaviour rather than
+        defects: a terminal dependency satisfies its dependents (``CANCELLED``
+        is in ``SATISFIED_DEPENDENCY_STATUSES``), and a task waiting on a
+        merely-pending dependency is waiting, not stuck.
+        """
+        problems: List[str] = []
+        mappings = [task for task in tasks if isinstance(task, dict)]
+        if not mappings:
+            return problems
+
+        referenced: set = set()
+        for task in mappings:
+            raw = task.get("dependencies")
+            if isinstance(raw, list):
+                referenced.update(str(dep) for dep in raw)
+
+        roots = [
+            task
+            for task in mappings
+            if str(task.get("id") or "")
+            and not (task.get("dependencies") if isinstance(task.get("dependencies"), list) else [])
+            and str(task.get("id")) not in referenced
+        ]
+        if len(roots) <= 1:
+            return problems
+
+        names = ", ".join(sorted(str(task.get("id")) for task in roots))
+        problems.append(
+            f"{ADVISORY_PREFIX}{len(roots)} disconnected roots ({names}): no task "
+            "depends on any of them, so they can never unblock each other or "
+            "complete a shared milestone"
+        )
         return problems
 
 

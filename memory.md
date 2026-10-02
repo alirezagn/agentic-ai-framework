@@ -14,15 +14,13 @@
 
 - **Runtime is v2.0.0** (`pyproject.toml`, `cli.py --version`). `ORCHESTRATOR_GUIDE.md`
   is the technical reference; `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 721 tests, all passing, hermetic** (`python3 -m pytest -q`).
+- **Suite: 847 tests, all passing, hermetic** (`python3 -m pytest -q`).
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
   deliberately exercising one.
 - **Repo state:** branch `main`, **in sync with `origin/main`** (0 ahead / 0
-  behind) at commit `fb52bed`. **4 doc files are uncommitted** — a test-count
-  sync in `ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `review_gaps.md`,
-  `ARCHITECTURE_COMPLIANCE_AUDIT.md`. No source file is uncommitted.
+  behind) at commit `101b5fa`. Working tree is clean between batches.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -34,44 +32,69 @@
 | CRIT-01 | Critical | **Fixed** — `data.deploy` execution channel, DoD evidence gate |
 | CRIT-02 | Critical | **Fixed** — `path_policy.py`; restore path traversal refused |
 | CRIT-03 | Critical | **Fixed** — explicit `signed` flag, 4-verdict integrity model |
-| CRIT-04 | Critical | **OPEN** — review path still discards DoD problems |
+| CRIT-04 | Critical | **Fixed** — DoD problems travel with the task into review and are persisted |
 | CRIT-05 | Critical | **Fixed** — model-supplied task `status`/`execution` stripped |
 | CRIT-06 | Critical | **Fixed** — cross-process locks on index + id allocation |
-| CRIT-07 | Critical | **OPEN** — `./.env` auto-loaded from CWD (prompt-exfiltration) |
+| CRIT-07 | Critical | **Fixed** — `.env` loading confined to `config.PROJECT_ROOT` |
 | CRIT-08 | Critical | **Fixed** — base `SYSTEM_RULES` no longer shadowed by subclasses |
-| CRIT-09 | Critical | **OPEN** — `AGENT_PROMPTS/*` document a discarded `documents[]` shape |
-| HIGH-01..04 | High | **OPEN** — see "Open findings" below |
+| CRIT-09 / HIGH-13 | Critical / High | **Fixed** — 11 prompt templates share one canonical output schema, generated from code |
+| HIGH-01..04 | High | **CLOSED** — see "Remediated findings" below |
 | HIGH-12, LOW-01, MED-01..03, LOW-10, HIGH-14 | High/Med/Low | **Fixed** |
 
-**2 of 9 Criticals and 4+ Highs remain open.** Do not report this as a clean
-baseline.
+**All 9 Criticals and all 18 Highs are closed.** Re-verify before claiming
+that again: the table below drifted stale twice, once for a whole batch.
 
-### Open findings (all re-verified against the code)
+### Closed findings (were open at audit time)
 
-- **CRIT-04** — `orchestrator.py:343` takes the `review_block.get("required")`
-  branch *before* `elif dod_problems:` (`:350`), and `complete_review`
-  (`:1501`) calls `definition_of_done(prospective)` with `preexisting=None`, so
-  the G22 delivery guarantee is inert on the review path. `review.required: true`
-  is the **default** (`project-templates/TASKS.yaml`, 3 of 4 tasks in
-  `projects/kid-robot-face/`). Proven: a fabricated test task reaches `DONE`.
-- **CRIT-07** — `config.py:157` still resolves `./.env` from `Path.cwd()`, and
-  `cli.py` calls `maybe_load_env_file()` before `parse_args`. Running inside an
-  untrusted repo silently redirects every prompt to a host that repo chooses.
-  No redaction layer exists anywhere.
-- **CRIT-09 / HIGH-13** — all **11** `framework/AGENT_PROMPTS/*.md` still
-  specify a top-level `"documents": [{"name", "content"}]` array, which the
+The three items below were open at audit time and are now fixed; the prose is
+kept as the record of what was wrong, not as current state.
+
+- **CRIT-04 (fixed, `8f10641`)** — the review path took the
+  `review_block.get("required")` branch *before* the DoD branch and
+  `complete_review` called `definition_of_done(prospective)` with
+  `preexisting=None`, so the G22 delivery guarantee was inert on review.
+  `review.required: true` is the **default** (`project-templates/TASKS.yaml`),
+  so this was the common path, not an edge case. Now the problems travel with
+  the task, are persisted for a later cycle, and a PASS cannot reach `DONE`
+  over standing problems.
+- **CRIT-07 (fixed, `8f10641`)** — `config.py` resolved `./.env` from
+  `Path.cwd()`, so running the CLI inside an untrusted repo redirected every
+  prompt to a host that repo chose. Now strictly
+  `config.PROJECT_ROOT / ".env"`.
+- **CRIT-09 / HIGH-13 (fixed, `4c86c6d`)** — all **11**
+  `framework/AGENT_PROMPTS/*.md` specified a top-level
+  `"documents": [{"name", "content"}]` array, which the
   runtime discards (it reads `data.documents` as a dict). **0 of 11** mention
   `data.edits` or `acceptance_results` — i.e. the contract that decides whether
-  a task delivers or fails is undocumented outside `base_agent.py`.
-- **HIGH-01** — `orchestrator.py:201` returns a pinned singleton even when
-  `fresh=True`, contradicting the documented "safe for `--max-concurrent > 1`".
-- **HIGH-02** — `orchestrator.py:440-442` still `or`-short-circuits the
-  checkpoint trigger chain, so `check_milestones()` is skipped when compaction
-  also fires.
-- **HIGH-03** — `orchestrator.py:329` still runs `agent.repair_delivery()` (a
-  full LLM round trip) *inside* the finalize `_state_lock`.
-- **HIGH-04** — `validate()` still does not check `phase.current ∈ config.PHASES`
-  and is still called from `cmd_init` only, not from `status`.
+  a task delivers or fails was undocumented outside `base_agent.py`. The schema
+  now lives in code next to the parser that enforces it and the files are
+  generated from it.
+
+### Remediated findings (closed in the final High batch)
+
+- **HIGH-01 (closed)** — `resolve_agent(fresh=True)` built a detached instance
+  from the pinned agent's class instead of returning the shared one, so parallel
+  dispatches no longer share `_current_task_id` / `last_payload_chars` /
+  `_delivery_snapshot`. The pinned instance is still returned on the serial
+  path. `shared_agent_keys()` reports agents whose class cannot be re-instantiated
+  (those are still shared, deliberately).
+- **HIGH-02 (closed)** — the checkpoint trigger chain evaluates all three
+  triggers and then picks one winner, in both the dispatch and review paths.
+- **HIGH-03 (closed)** — the Definition-of-Done check and `repair_delivery()` run
+  in a new unlocked phase 2b; every state write stays in the locked phase 3.
+- **HIGH-04 (closed)** — `validate()` now also checks `phase.current`,
+  unknown/blank owner, self-cycles and cycles, malformed dependencies and
+  disconnected roots (advisory). It runs on the plan-ingestion path
+  (`_report_graph_problems`, surfaced as dispatch warnings rather than a raise,
+  because a blocker there may be a pre-existing `PROJECT.yaml` defect) and
+  `orchestrator status` prints structural problems while still exiting 0.
+  `graph_blockers()` is the blocking-only subset used for automation.
+
+  Two earlier drafts of HIGH-04 were wrong and were corrected: a single
+  unreferenced root task is **not** an orphan (it is how every graph starts), and
+  a terminal dependency **satisfies** its dependents (`CANCELLED` is in
+  `SATISFIED_DEPENDENCY_STATUSES`), so "terminal task another task waits on" is
+  the normal path, not a stall.
 
 ### Known documentation drift
 
@@ -103,7 +126,7 @@ baseline.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~170 s, 721 tests).
+- Run full pytest after every change: `python3 -m pytest -q` (~160 s, 847 tests).
 - YOLO mode: no approval prompts, no TODO stubs, relative paths, autonomous execution.
 - LLM backend is stdlib-only; tests inject `FakeLLMClient` / `transport`.
   **The suite must stay offline-safe** — do not add a test that dials out.
@@ -206,9 +229,11 @@ suites added during remediation:
 | `tests/test_hmac_verification.py` | CRIT-03 — signing truth table, tampering, key rotation |
 | `tests/test_deploy_ground_truth.py` | CRIT-01 — runner refusals, live execution, DoD evidence |
 | `tests/test_task_status_injection.py` | CRIT-05 — status/execution injection |
-| `tests/test_state_io_and_contracts.py` | HIGH-01/02/03/04 — atomic writes, single-parse derived state, deploy contract |
+| `tests/test_state_io_and_contracts.py` | atomic writes, single-parse derived state, deploy contract (its "HIGH-01..04" labels are the *state I/O* batch, not audit IDs) |
 | `tests/test_concurrent_appends.py` | CRIT-06 — concurrent append + id allocation |
 | `tests/test_medium_gaps.py` | MED-01/02/03, HIGH-14, LOW-10 — telemetry, cycles, compaction, README, counts |
+| `tests/test_final_critical_gaps.py` | CRIT-04/07/09 — review DoD threading, `.env` containment, prompt schema |
+| `tests/test_final_high_gaps.py` | audit HIGH-01..04 — pinned-agent isolation, checkpoint trigger evaluation, off-lock DoD repair, deep validation + reachability |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
 `checkpoints_root`, `FakeLLMClient`, `_task`, `FakeDeployRunner` (+ the

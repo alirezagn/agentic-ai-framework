@@ -49,6 +49,14 @@ from .supervisor import HealthReport, LoopDetection, SupervisorAgent
 
 logger = logging.getLogger(__name__)
 
+# GAP-HIGH-01: per-attempt scratch state on a BaseAgent. These are rewritten at
+# the top of every run() (see orchestrator.agents.base_agent.run), so they must
+# never be carried from a pinned instance onto a detached one -- that would
+# reintroduce the sharing this framework avoids by re-instantiating per dispatch.
+_AGENT_SCRATCH_ATTRIBUTES = frozenset(
+    {"_current_task_id", "last_payload_chars", "_delivery_snapshot"}
+)
+
 
 class OrchestratorError(RuntimeError):
     """Base error for orchestration failures."""
@@ -215,9 +223,12 @@ class MasterOrchestrator:
         # Recent project-state fingerprints, used to detect A<->B oscillation.
         self._fingerprint_history: List[str] = []
         self.registered_agents: Dict[str, BaseAgent] = {}
-        # Agents handed in via register_agent() are singletons we cannot
-        # re-create per thread; resolve_agent() always returns those.
-        self._pinned_agents: set = set()
+        # GAP-HIGH-01: agents handed in via register_agent() are caller-owned
+        # objects, so they cannot simply be re-created per dispatch. We record
+        # their class instead, so a parallel dispatch can build an equivalent
+        # *separate* instance rather than sharing one object's mutable scratch
+        # state across threads. Keys mirror ``registered_agents``.
+        self._pinned_agents: Dict[str, type] = {}
         # Serializes TASKS.yaml / PROJECT.yaml read-modify-write cycles so
         # parallel dispatch (run_cycle(max_concurrent>1)) cannot lose updates.
         self._state_lock = threading.RLock()
@@ -227,11 +238,71 @@ class MasterOrchestrator:
     # ------------------------------------------------------------------
 
     def register_agent(self, agent: BaseAgent) -> BaseAgent:
+        """Register a caller-owned agent instance for ``agent.AGENT_ID``.
+
+        GAP-HIGH-01. The instance is pinned so stateful agents keep their state
+        across dispatches, but its *class* is recorded so a parallel dispatch can
+        obtain an equivalent independent instance (see :meth:`resolve_agent`).
+        An agent whose class cannot be re-instantiated without arguments is
+        still shared, and that is recorded rather than silently pretended away.
+        """
         key = normalize_agent_name(agent.AGENT_ID)
         with self._state_lock:
             self.registered_agents[key] = agent
-            self._pinned_agents.add(key)
+            self._pinned_agents[key] = type(agent)
         return agent
+
+    def _instantiate_like(self, instance: BaseAgent) -> Optional[BaseAgent]:
+        """Build a fresh, independent instance equivalent to ``instance``.
+
+        The constructor is called with the state manager alone, then the pinned
+        instance's own attributes are carried over. Carrying them matters: a
+        caller who registered a customized agent (injected callbacks, extra
+        configuration) must get an agent that behaves the same, not a bare one.
+
+        The per-attempt scratch attributes are excluded. They are rewritten at
+        the top of every ``run()`` (``base_agent._current_task_id``,
+        ``last_payload_chars``, ``_delivery_snapshot``), so copying a stale
+        value would reintroduce the exact sharing this method exists to prevent.
+
+        Returns ``None`` when the class cannot be constructed from the state
+        manager alone; the caller then falls back to sharing, and
+        :meth:`shared_agent_keys` reports it so the condition is visible rather
+        than silently causing a race.
+        """
+        agent_class = type(instance)
+        try:
+            detached = agent_class(state_manager=self.state)
+        except Exception:
+            logger.warning(
+                "agent %s cannot be re-instantiated for parallel dispatch; "
+                "falling back to the shared instance",
+                agent_class.__name__,
+            )
+            return None
+        for name, value in vars(instance).items():
+            if name in _AGENT_SCRATCH_ATTRIBUTES:
+                continue
+            try:
+                setattr(detached, name, value)
+            except Exception:  # read-only property; the fresh default stands
+                continue
+        return detached
+
+    def shared_agent_keys(self) -> List[str]:
+        """Agent ids currently resolved to a shared instance.
+
+        Non-empty means at least one registered agent is not parallel-safe,
+        because its class could not be re-instantiated. Surfaced by
+        ``orchestrator status`` so the condition is visible before it causes a
+        race.
+        """
+        with self._state_lock:
+            shared: List[str] = []
+            for key, instance in self.registered_agents.items():
+                if self._instantiate_like(instance) is None:
+                    shared.append(key)
+            return sorted(shared)
 
     def register_agent_class(self, agent_class: type) -> BaseAgent:
         agent = agent_class(state_manager=self.state)
@@ -240,14 +311,25 @@ class MasterOrchestrator:
     def resolve_agent(self, owner: str, fresh: bool = False) -> BaseAgent:
         """Resolve the agent for ``owner``.
 
-        ``fresh=True`` bypasses the instance cache so concurrent dispatches
-        never share one agent object (its execution scratch state is not
-        thread-safe).
+        ``fresh=True`` returns an instance that no other in-flight dispatch is
+        using. GAP-HIGH-01: previously a *pinned* agent was returned even for a
+        fresh request, so two parallel tasks owned by the same registered agent
+        shared one object's mutable scratch state — ``_current_task_id``,
+        ``last_payload_chars`` and ``_delivery_snapshot`` — which let one task's
+        output be attributed to another and one task's DoD read another's
+        delivery snapshot.
+
+        Falls back to the shared pinned instance when the class cannot be
+        re-instantiated; :meth:`shared_agent_keys` reports that.
         """
         key = normalize_agent_name(owner)
         with self._state_lock:
-            if key in self.registered_agents and (not fresh or key in self._pinned_agents):
-                return self.registered_agents[key]
+            registered = self.registered_agents.get(key)
+            if registered is not None:
+                if not fresh:
+                    return registered
+                detached = self._instantiate_like(registered)
+                return detached if detached is not None else registered
             if self.agent_resolver is not None:
                 resolved = self.agent_resolver(owner, self.state)
                 if resolved is not None:
@@ -355,6 +437,45 @@ class MasterOrchestrator:
         # stamps `executed` and the exit code.
         deploy_records = self._run_requested_deploys(task_id, output)
 
+        # --- phase 2b: Definition-of-Done evaluation and auto-repair --------
+        # GAP-HIGH-03. The DoD check and the repair round are computed OUTSIDE
+        # the state lock. `repair_delivery` is a full LLM round trip (up to
+        # ORCHESTRATOR_LLM_TIMEOUT seconds, default 120); running it while
+        # holding `_state_lock` blocked every other dispatch worker's state
+        # turn for that duration, turning `--max-concurrent 4` into a queue.
+        #
+        # The evaluation is read-only, so moving it out of the lock is safe;
+        # every *write* still happens in phase 3 under the lock.
+        review_block = task.get("review") or {}
+        dod_problems: List[str] = []
+        if output.status == config.AGENT_STATUS_COMPLETED:
+            dod_problems = self.definition_of_done(
+                task, output,
+                preexisting=delivery_snapshot,
+                deploy_records=deploy_records,
+            )
+            if dod_problems:
+                # One automatic repair round: feed the DoD problems back to the
+                # agent instead of failing cold (symmetric to the truncation
+                # repair on parse failures).
+                logger.info(
+                    "DoD reported %d problem(s) for %s; attempting auto-repair off-lock",
+                    len(dod_problems),
+                    task_id,
+                )
+                repaired = agent.repair_delivery(task, output, dod_problems)
+                if repaired is not None:
+                    repaired.task_id = task_id
+                    logger.info("DoD auto-repair succeeded for %s", task_id)
+                    output = repaired
+                    dod_problems = self.definition_of_done(
+                        task, output,
+                        preexisting=delivery_snapshot,
+                        deploy_records=deploy_records,
+                    )
+                else:
+                    logger.info("DoD auto-repair produced no fix for %s", task_id)
+
         # --- phase 3: apply results (locked) ----------------------------
         with self._state_lock:
             self._update_context_utilization(agent, output)
@@ -364,30 +485,6 @@ class MasterOrchestrator:
             new_status: str
 
             if output.status == config.AGENT_STATUS_COMPLETED:
-                review_block = task.get("review") or {}
-                dod_problems = self.definition_of_done(
-                    task, output,
-                    preexisting=delivery_snapshot,
-                    deploy_records=deploy_records,
-                )
-                if dod_problems:
-                    # One automatic repair round: feed the DoD problems back to
-                    # the agent instead of failing cold (symmetric to the
-                    # truncation repair on parse failures).
-                    repaired = agent.repair_delivery(task, output, dod_problems)
-                    if repaired is not None:
-                        repaired.task_id = task_id
-                        logger.info("DoD auto-repair succeeded for %s", task_id)
-                        output = repaired
-                        dod_problems = self.definition_of_done(
-                            task, output,
-                            preexisting=delivery_snapshot,
-                            deploy_records=deploy_records,
-                        )
-                    else:
-                        logger.info(
-                            "DoD auto-repair produced no fix for %s", task_id
-                        )
                 if review_block.get("required"):
                     new_status = config.TASK_REVIEW
                     self.state.set_review_status(task_id, "READY")
@@ -501,9 +598,23 @@ class MasterOrchestrator:
                     loop_now = detection
                     break
 
+            # GAP-HIGH-02: evaluate EVERY trigger, then pick a winner.
+            #
+            # This used to be `a or b or c`, which short-circuits: on a
+            # dispatch that both crossed the compaction threshold and completed
+            # the last task of a milestone, `check_milestones()` never ran. If
+            # that was the final dispatch, `cp-milestone-complete` was never
+            # written — the one moment the snapshot matters most.
+            #
+            # Each trigger is a *decision* (should a checkpoint be taken), not
+            # merely a value, so evaluating all of them is correct; only one
+            # checkpoint is then created, because a compaction and a milestone
+            # completing in the same instant are the same event.
+            auto_checkpoint_id = self._maybe_auto_checkpoint(after)
+            milestone_checkpoint_id = self.check_milestones()
             checkpoint_id = (
-                self._maybe_auto_checkpoint(after)
-                or self.check_milestones()
+                auto_checkpoint_id
+                or milestone_checkpoint_id
                 or phase_checkpoint
             )
             return TaskRunResult(
@@ -769,7 +880,43 @@ class MasterOrchestrator:
         if not created:
             raise StateError("no tasks could be ingested from planning output")
         self.state.refresh_ready_states()
+        # GAP-HIGH-04: validate the graph that was just written, here, while the
+        # plan that produced it is still the thing being worked on. Until now
+        # the only caller of validate() was `init`, which cannot run again once
+        # a graph exists, so an ingested graph's problems surfaced much later as
+        # an unrelated runtime failure.
+        #
+        # Reported, not raised. append_task already rejects the defects it knows
+        # (unknown owner/dependency, duplicate id, missing title, cycle) and each
+        # rejection surfaces as an output warning, so a blocker reaching this
+        # point is either pre-existing (a PROJECT.yaml typo, which is not the
+        # plan's fault and must not stop planning) or one append_task cannot
+        # express. Failing here would make a plan unbuildable because of an
+        # unrelated project defect.
+        self._report_graph_problems(output, "planning output")
         return created
+
+    def _report_graph_problems(
+        self, output: AgentOutput, source: str
+    ) -> List[str]:
+        """Run the deep graph validation and surface anything it finds.
+
+        GAP-HIGH-04. Returns the problems and attaches them to the dispatch
+        record as warnings, so the findings appear in the run log next to the
+        output that caused them and in ``orchestrator status``.
+        """
+        problems = self.state.graph_blockers()
+        if not problems:
+            return []
+        logger.warning(
+            "%s left a structurally invalid task graph: %s",
+            source,
+            "; ".join(problems),
+        )
+        output.warnings = list(output.warnings) + [
+            f"graph validation: {problem}" for problem in problems
+        ]
+        return problems
 
     # Keyword buckets checked in order; first hit wins. Weak models invent
     # domain owners ("qa_agent", "kernel_dev_agent") — map them instead of
@@ -1757,9 +1904,14 @@ class MasterOrchestrator:
         self.state.recompute_derived_state()
         phase_checkpoint = self._checkpoint_phase_advance(previous_phase)
         self._record_fingerprint()
+        # GAP-HIGH-02: same non-short-circuiting evaluation as the dispatch
+        # path. A review completion is exactly when `cp-milestone-complete`
+        # fires, so a compaction in the same instant must not swallow it.
+        auto_checkpoint_id = self._maybe_auto_checkpoint(self.get_task(task_id))
+        milestone_checkpoint_id = self.check_milestones()
         checkpoint_id = (
-            self._maybe_auto_checkpoint(self.get_task(task_id))
-            or self.check_milestones()
+            auto_checkpoint_id
+            or milestone_checkpoint_id
             or phase_checkpoint
         )
         return TaskRunResult(
@@ -2215,7 +2367,11 @@ class MasterOrchestrator:
         restored = self.checkpoints.restore_checkpoint(checkpoint_id)
         self.state = StateManager(self.project_path)
         self.supervisor = SupervisorAgent(state_manager=self.state)
+        # Both registries are cleared together: leaving a pinned class behind
+        # with no instance would let resolve_agent() fabricate an agent the
+        # caller never registered.
         self.registered_agents = {}
+        self._pinned_agents = {}
         self._last_fingerprint = None
         self._fingerprint_history = []
         self._idle_cycles = 0
