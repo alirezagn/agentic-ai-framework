@@ -611,26 +611,79 @@ no_equals_line
 
 
 class TestEnvFileLoading:
+    """GAP-CRIT-07: .env is confined to ``config.PROJECT_ROOT``.
+
+    The parsing tests therefore place their fixture inside the project root
+    rather than in ``tmp_path`` — a file outside the root is now *refused*, and
+    asserting the parse behaviour there would test the wrong thing.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_environment(self) -> Any:
+        """Restore os.environ in full on teardown.
+
+        These tests call ``load_env_file()``, which assigns into
+        ``os.environ`` directly. monkeypatch only reverts the calls *it* made,
+        so without this the repository's real ``.env`` leaks into every later
+        test — a leak that surfaces as an unrelated numeric-default failure.
+        """
+        snapshot = dict(os.environ)
+        yield
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+    @pytest.fixture(autouse=True)
+    def _cleanup_probe(self) -> Any:
+        """Remove the PROJECT_ROOT .env probe on teardown, always."""
+        target = config.PROJECT_ROOT / ".env.probe"
+        yield
+        target.unlink(missing_ok=True)
+
+    @staticmethod
+    def _root_env(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+    ) -> Path:
+        """Place a .env inside PROJECT_ROOT so the loader will read it.
+
+        Distinctly named and removed by ``_cleanup_probe``: a fixture written to
+        the repository root that outlives the test is exactly the litter this
+        suite's other assertions forbid.
+        """
+        target = config.PROJECT_ROOT / ".env.probe"
+        target.write_text(body, encoding="utf-8")
+        monkeypatch.setattr(config, "ENV_FILE_NAME", ".env.probe")
+        return target
+
     def test_load_env_file_parses_quotes_export_and_comments(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        (tmp_path / ".env").write_text(DOTENV_SAMPLE, encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
+        self._root_env(tmp_path, monkeypatch, DOTENV_SAMPLE)
+        for var in ("OLLAMA_BASE_URL", "ORCHESTRATOR_LLM_MODEL", "ORCHESTRATOR_LLM_PROVIDER"):
+            monkeypatch.delenv(var, raising=False)
         loaded = config.load_env_file()
         assert loaded == 3
         assert os.environ["OLLAMA_BASE_URL"] == "http://192.168.0.200:11434"
         assert os.environ["ORCHESTRATOR_LLM_MODEL"] == "gemma4:12b"
         assert os.environ["ORCHESTRATOR_LLM_PROVIDER"] == "ollama"
-        for var in ("OLLAMA_BASE_URL", "ORCHESTRATOR_LLM_MODEL", "ORCHESTRATOR_LLM_PROVIDER"):
-            monkeypatch.delenv(var, raising=False)
+
+    def test_env_file_outside_project_root_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The vulnerability: a CWD-supplied .env configured the runtime."""
+        (tmp_path / ".env").write_text(
+            "ORCHESTRATOR_LLM_PROVIDER=evil-provider\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("ORCHESTRATOR_LLM_PROVIDER", raising=False)
+        config.load_env_file()
+        assert os.environ.get("ORCHESTRATOR_LLM_PROVIDER") != "evil-provider"
 
     def test_existing_environment_always_wins(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        (tmp_path / ".env").write_text(
-            "OLLAMA_BASE_URL=http://from-file\n", encoding="utf-8"
+        self._root_env(
+            tmp_path, monkeypatch, "OLLAMA_BASE_URL=http://from-file\n"
         )
-        monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("OLLAMA_BASE_URL", "http://from-shell")
         assert config.load_env_file() == 0
         assert os.environ["OLLAMA_BASE_URL"] == "http://from-shell"
@@ -641,30 +694,46 @@ class TestEnvFileLoading:
     def test_maybe_load_skipped_while_pytest_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        (tmp_path / ".env").write_text("DOTENV_MARKER=1\n", encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
+        self._root_env(tmp_path, monkeypatch, "DOTENV_MARKER=1\n")
+        monkeypatch.delenv("DOTENV_MARKER", raising=False)
         assert config.maybe_load_env_file() == 0
         assert "DOTENV_MARKER" not in os.environ
 
     def test_maybe_load_runs_outside_tests(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        (tmp_path / ".env").write_text("DOTENV_MARKER=1\n", encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
+        """The pytest guard is lifted, but the PROJECT_ROOT boundary is not.
+
+        Previously this test wrote a .env into ``tmp_path``, chdir'd there, and
+        asserted it was adopted — i.e. it asserted the CRIT-07 behaviour.
+        """
+        self._root_env(tmp_path, monkeypatch, "DOTENV_MARKER=1\n")
+        monkeypatch.delenv("DOTENV_MARKER", raising=False)
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         assert config.maybe_load_env_file() == 1
         assert os.environ.get("DOTENV_MARKER") == "1"
+
+    def test_maybe_load_ignores_cwd_dotenv_outside_tests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GAP-CRIT-07 regression: CWD is not a configuration source."""
+        (tmp_path / ".env").write_text("DOTENV_MARKER=1\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("DOTENV_MARKER", raising=False)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        config.maybe_load_env_file()
+        assert os.environ.get("DOTENV_MARKER") is None
 
     def test_cli_main_auto_loads_dotenv(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        (tmp_path / ".env").write_text("OLLAMA_BASE_URL=http://192.168.0.200:11434\n")
-        monkeypatch.chdir(tmp_path)
+        """The CLI still auto-loads — from PROJECT_ROOT, not the CWD."""
+        self._root_env(
+            tmp_path, monkeypatch, "OLLAMA_BASE_URL=http://192.168.0.200:11434\n"
+        )
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         assert main([]) == 1  # no subcommand -> help, exit 1
         assert os.environ.get("OLLAMA_BASE_URL") == "http://192.168.0.200:11434"
-        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
 
     def test_env_example_documents_project_backend(self) -> None:
         example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")

@@ -144,6 +144,29 @@ SYSTEM_KEYS: SystemKeys = build_system_keys()
 # .env file loading (CLI entry point only)
 # ---------------------------------------------------------------------------
 
+def env_file_path() -> Path:
+    """The one location the auto-loaded ``.env`` may come from.
+
+    Always ``PROJECT_ROOT / ".env"`` — never the current working directory.
+    """
+    return PROJECT_ROOT / ENV_FILE_NAME
+
+
+def _within_project_root(candidate: Path) -> bool:
+    """True when ``candidate`` resolves inside :data:`PROJECT_ROOT`.
+
+    Resolves first, so a symlink pointing out of the tree is rejected as
+    readily as a literal ``../``. Without that, containing the *path* would still
+    permit reading an arbitrary file the attacker can symlink into the repo.
+    """
+    try:
+        resolved = candidate.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    root = PROJECT_ROOT.resolve()
+    return resolved == root or resolved.is_relative_to(root)
+
+
 def load_env_file(path: Optional[os.PathLike] = None) -> int:
     """Load ``KEY=VALUE`` lines from a .env file into ``os.environ``.
 
@@ -152,9 +175,35 @@ def load_env_file(path: Optional[os.PathLike] = None) -> int:
     prefix are supported; surrounding quotes on values are stripped.
     A missing file is not an error (returns 0).
 
+    GAP-CRIT-07. The default path is **strictly** ``PROJECT_ROOT / ".env"``.
+    The previous default was ``Path.cwd() / ".env"``, which meant that running
+    ``orchestrator`` inside any cloned or shared directory silently adopted that
+    directory's configuration — including ``ORCHESTRATOR_LLM_PROVIDER`` and
+    ``OLLAMA_BASE_URL``, so every prompt (project memory, decision log, inlined
+    expected-output bodies) was transmitted to a host that directory chose. A
+    `--project` flag and a state path make the trust boundary obvious; the
+    process CWD does not.
+
+    An explicitly supplied ``path`` is honoured, but only if it resolves inside
+    :data:`PROJECT_ROOT`. Refusing rather than silently ignoring keeps the
+    decision visible: a caller who passes a path outside the tree gets an error
+    naming the boundary, not silence.
+
     Returns the number of variables that were set.
     """
-    env_path = Path(path) if path is not None else Path.cwd() / ".env"
+    if path is None:
+        env_path = env_file_path()
+        if not _within_project_root(env_path):
+            # Cannot happen with the default, but the invariant is the point.
+            logger.warning("refusing .env outside PROJECT_ROOT: %s", env_path)
+            return 0
+    else:
+        env_path = Path(path)
+        if not _within_project_root(env_path):
+            logger.warning(
+                "refusing .env outside PROJECT_ROOT (%s): %s", PROJECT_ROOT, env_path
+            )
+            return 0
     try:
         raw = env_path.read_text(encoding="utf-8")
     except OSError:
@@ -179,11 +228,12 @@ def load_env_file(path: Optional[os.PathLike] = None) -> int:
 
 
 def maybe_load_env_file() -> int:
-    """Load ``./.env`` unless the pytest harness is currently running.
+    """Load ``PROJECT_ROOT/.env`` unless the pytest harness is running.
 
     Tests must stay offline-safe, so the CLI entry point skips .env
     injection whenever ``PYTEST_CURRENT_TEST`` is set (it propagates into
-    subprocesses spawned by the suite as well).
+    subprocesses spawned by the suite as well). The CWD is never consulted —
+    see :func:`load_env_file`.
     """
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return 0
@@ -362,6 +412,18 @@ DEFAULT_AGENTS_DIR = "agents"
 DEFAULT_LOGS_DIR = "logs"
 
 FRAMEWORK_SPECS_DIR = "framework"
+
+#: Root of the installed package's parent — the repository root. Used as the
+#: containment boundary for the auto-loaded ``.env`` (GAP-CRIT-07) so the only
+#: file that can configure the runtime is one shipped alongside the code the
+#: operator chose to run, never one dropped into whatever directory they
+#: happened to `cd` into.
+PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
+
+#: Name of the optional env file loaded from :data:`PROJECT_ROOT`.
+ENV_FILE_NAME = ".env"
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -968,6 +1030,11 @@ __all__ = [
     "CHECKPOINT_BACKUP_DIR",
     "DEFAULT_PROJECTS_DIR",
     "FRAMEWORK_SPECS_DIR",
+    "PROJECT_ROOT",
+    "ENV_FILE_NAME",
+    "env_file_path",
+    "load_env_file",
+    "maybe_load_env_file",
     "TASK_STATUSES",
     "TASK_TODO",
     "TASK_READY",

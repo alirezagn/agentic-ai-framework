@@ -165,6 +165,34 @@ class TestMasterOrchestrator:
         assert final == config.TASK_DONE
         assert orchestrator.get_task("TASK-002")["review"]["status"] == "PASS"
 
+    def test_review_pass_cannot_rescue_an_unmet_dod(
+        self, test_project: Path, checkpoints_root: Path
+    ) -> None:
+        """GAP-CRIT-04: a human verdict cannot override a real DoD failure.
+
+        The task carries a failing ``acceptance_results`` entry, so the
+        structural check is genuinely unmet and a PASS verdict must be
+        downgraded rather than letting a human signature paper over it.
+        """
+        document = yaml.safe_load((test_project / "TASKS.yaml").read_text(encoding="utf-8"))
+        for task in document["tasks"]:
+            if task["id"] == "TASK-002":
+                task["review"]["required"] = True
+                task["acceptance_results"] = [
+                    {"name": "latency budget", "status": "FAIL", "detail": "measured 2.1s"}
+                ]
+        (test_project / "TASKS.yaml").write_text(
+            yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+        )
+
+        orchestrator = MasterOrchestrator(
+            test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
+        )
+        orchestrator.run_task("TASK-002")
+        assert orchestrator.complete_review("TASK-002", passed=True) == config.TASK_FAILED
+        note = orchestrator.get_task("TASK-002")["notes"]
+        assert "acceptance check failed" in note or "DoD unmet" in note
+
     def test_auto_checkpoint_at_compaction_threshold(
         self, tmp_path: Path, checkpoints_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

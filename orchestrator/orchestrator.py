@@ -119,6 +119,54 @@ _TEST_LIKE_SUFFIXES = (
 )
 
 
+#: The DoD problem that is the review gate itself rather than a defect in the
+#: work. A task entering REVIEW always trips it (``review.status`` is not yet
+#: PASS), so forwarding it as a "known failure" would make every review-required
+#: task fail its own review — the guard would fire on the gate it was meant to
+#: sit behind.
+REVIEW_GATE_PROBLEM = "independent review not passed"
+
+
+def _review_forwardable_problems(problems: Sequence[str]) -> List[str]:
+    """Drop the review-gate line from a DoD result before forwarding it.
+
+    Everything else — a missing expected output, an unmet acceptance check, an
+    unevidenced execution claim — is a real defect the reviewer must weigh.
+    """
+    return [
+        str(item)
+        for item in problems
+        if str(item).strip() and str(item).strip() != REVIEW_GATE_PROBLEM
+    ]
+
+
+def _recorded_dod_problems(task: Dict[str, Any]) -> List[str]:
+    """Recover the DoD problems recorded against a task awaiting review.
+
+    GAP-CRIT-04. The reviewer's only durable trace of a failed DoD is the task
+    note, and that note holds the *claiming summary* whenever the task went to
+    review rather than to FAILED. So the problems are also persisted as a
+    structured list, and this reads it back.
+
+    Reading the record rather than re-running the DoD matters: the task has
+    since been persisted and reloaded, so re-deriving could produce a different
+    answer than the one the task was failed on.
+    """
+    recorded = task.get("pending_dod_problems")
+    if not isinstance(recorded, list):
+        return []
+    problems: List[str] = []
+    for item in recorded:
+        if not isinstance(item, str):
+            # A non-string would stringify to "None"/"{}" and be shown to the
+            # reviewer as a finding, which is worse than omitting it.
+            continue
+        text = item.strip()
+        if text:
+            problems.append(text)
+    return problems
+
+
 def _test_like_outputs(task: Dict[str, Any]) -> bool:
     """True when a task's expected outputs look like build/test artifacts.
 
@@ -343,6 +391,23 @@ class MasterOrchestrator:
                 if review_block.get("required"):
                     new_status = config.TASK_REVIEW
                     self.state.set_review_status(task_id, "READY")
+                    # GAP-CRIT-04: the DoD problems travel with the task into
+                    # review, and are persisted so a review resumed in a later
+                    # cycle can still recover them. A review that cannot see them
+                    # can approve work the DoD already rejected.
+                    if dod_problems:
+                        forwarded = _review_forwardable_problems(dod_problems)
+                        if forwarded:
+                            self._persist_dod_problems(task_id, forwarded)
+                        else:
+                            self._clear_dod_problems(task_id)
+                        output.warnings = list(output.warnings) + [
+                            f"definition_of_done reported {len(forwarded)} structural "
+                            "problem(s); the reviewer must not return PASS while "
+                            "these stand"
+                        ]
+                    else:
+                        self._clear_dod_problems(task_id)
                     self.state.update_task_status(
                         task_id, new_status, note=output.summary, error=None
                     )
@@ -1484,21 +1549,38 @@ class MasterOrchestrator:
         """
         task = self.get_task(task_id)
         review = dict(task.get("review") or {})
-        if outcome is None:
+        if outcome is not None:
+            outcome = str(outcome).strip().upper()
+        else:
             outcome = "PASS" if passed else "FAIL"
-        normalized = str(outcome).strip().upper()
-        if normalized == "PASS":
+        if review.get("required") and outcome == "PASS" and _recorded_dod_problems(task):
+            # GAP-CRIT-04: a review that passed while known DoD problems stood
+            # must not reach DONE. The reviewer is told about them; if it still
+            # returns PASS, the structural failure wins, because a human
+            # signature does not create a file that was never written.
+            outstanding = _recorded_dod_problems(task)
+            outcome = "FAIL"
+            note = ((note + "; ") if note else "") + (
+                "review PASSed but the Definition of Done was unmet: "
+                + "; ".join(outstanding)
+            )
+        if outcome == "PASS":
             status = config.TASK_DONE
-        elif normalized == "PASS WITH ACTIONS":
+        elif outcome == "PASS WITH ACTIONS":
             status = config.TASK_DONE_WITH_LIMITATION
-        elif normalized == "FAIL":
+        elif outcome == "FAIL":
             status = config.TASK_FAILED
         else:
             raise OrchestratorError(f"Unknown review outcome '{outcome}'")
-        review["status"] = normalized
+        review["status"] = outcome
         prospective = dict(task)
         prospective["review"] = review
-        dod_problems = self.definition_of_done(prospective)
+        # GAP-CRIT-04: the recorded problems are re-checked here too, so a
+        # review can never complete a task the DoD rejected — whether the
+        # problems came from this attempt or a previous one.
+        dod_problems = _review_forwardable_problems(
+            self.definition_of_done(prospective)
+        ) or _recorded_dod_problems(task)
         if dod_problems and status in (
             config.TASK_DONE,
             config.TASK_DONE_WITH_LIMITATION,
@@ -1510,12 +1592,13 @@ class MasterOrchestrator:
             if entry.get("id") == task_id:
                 entry["review"] = review
                 entry["status"] = status
+                entry.pop("pending_dod_problems", None)
                 if note:
                     entry["notes"] = note
                 break
         self.state.save_tasks_document(document)
         self.state.append_current_state(
-            f"{task_id} review {normalized.lower().replace(' ', '_')}"
+            f"{task_id} review {outcome.lower().replace(' ', '_')}"
         )
         return status
 
@@ -1534,11 +1617,55 @@ class MasterOrchestrator:
                 pending.append(task)
         return pending
 
-    def dispatch_review(self, task_id: str) -> TaskRunResult:
+    def _persist_dod_problems(self, task_id: str, problems: Sequence[str]) -> None:
+        """Record DoD problems on the task so a later review can recover them.
+
+        Written directly to the document because this is review-flow metadata,
+        not agent-supplied state: it must not go through
+        :meth:`StateManager.append_task`, which deliberately strips anything
+        that looks like an input.
+        """
+        with self._state_lock:
+            document = self.state.load_tasks_document()
+            for entry in document.get("tasks") or []:
+                if entry.get("id") == task_id:
+                    entry["pending_dod_problems"] = [str(item) for item in problems]
+                    break
+            self.state.save_tasks_document(document)
+
+    def _clear_dod_problems(self, task_id: str) -> None:
+        """Drop stale DoD problems once a task passes the checks."""
+        with self._state_lock:
+            document = self.state.load_tasks_document()
+            changed = False
+            for entry in document.get("tasks") or []:
+                if entry.get("id") == task_id and "pending_dod_problems" in entry:
+                    entry.pop("pending_dod_problems")
+                    changed = True
+                    break
+            if changed:
+                self.state.save_tasks_document(document)
+
+    def dispatch_review(
+        self,
+        task_id: str,
+        dod_problems: Optional[Sequence[str]] = None,
+    ) -> TaskRunResult:
         """Run the independent review for one REVIEW task.
 
         The reviewer is always the registered ``review_agent`` — never the
         task's own owner — so no artifact approves itself.
+
+        GAP-CRIT-04. ``dod_problems`` carries the structural checks that already
+        failed for this task, so the reviewer is told *what is structurally
+        wrong* rather than having to rediscover it. Without it the review ran
+        against a task the DoD had already rejected and could return ``PASS`` on
+        work that was never delivered — the reviewer approves the artifact, the
+        artifact does not exist.
+
+        They are passed explicitly rather than re-derived, so the review sees
+        the *same* findings the DoD recorded and cannot disagree with them by
+        re-evaluating against a task that has since changed.
         """
         task = self.get_task(task_id)
         previous_status = str(task.get("status"))
@@ -1546,6 +1673,8 @@ class MasterOrchestrator:
             raise OrchestratorError(
                 f"Task '{task_id}' is {previous_status}, not REVIEW; nothing to review"
             )
+
+        pending_problems = [str(item) for item in (dod_problems or []) if str(item).strip()]
 
         loop = self.supervisor.should_block_dispatch(task_id)
         if loop is not None:
@@ -1561,7 +1690,12 @@ class MasterOrchestrator:
         agent = self.resolve_agent("review_agent")
         logger.info("reviewing %s with %s", task_id, agent.AGENT_ID)
         self.state.set_review_status(task_id, "IN_PROGRESS")
-        output = agent.run(self.get_task(task_id), materialize=False)
+        review_task = self.get_task(task_id)
+        if pending_problems:
+            # Surface on the task so it reaches the payload's task block, and in
+            # a dedicated field the reviewer reads as a pre-verdict.
+            review_task["pending_dod_problems"] = list(pending_problems)
+        output = agent.run(review_task, materialize=False)
         output.task_id = task_id
         self._update_context_utilization(agent, output)
 
@@ -1704,12 +1838,22 @@ class MasterOrchestrator:
         return created
 
     def _run_pending_reviews(self) -> List[TaskRunResult]:
-        """Dispatch every pending independent review; never raises."""
+        """Dispatch every pending independent review; never raises.
+
+        GAP-CRIT-04: the DoD problems recorded on the task are forwarded, so a
+        review resumed in a later cycle still knows what the DoD rejected — the
+        note is not enough, because the claiming summary is what it contains.
+        """
         results: List[TaskRunResult] = []
         for task in self.pending_review_tasks():
             task_id = str(task.get("id"))
             try:
-                results.append(self.dispatch_review(task_id))
+                results.append(
+                    self.dispatch_review(
+                        task_id,
+                        dod_problems=_recorded_dod_problems(task),
+                    )
+                )
             except LoopLimitExceededError as exc:
                 loop = getattr(exc, "loop", None) or LoopDetection(
                     task_id=task_id,
@@ -1902,7 +2046,10 @@ class MasterOrchestrator:
             "READY",
             "IN_PROGRESS",
         ):
-            result = self.dispatch_review(task_id)
+            result = self.dispatch_review(
+                task_id,
+                dod_problems=_recorded_dod_problems(self.get_task(task_id)),
+            )
         else:
             result = self.dispatch(task_id)
         self.supervisor.sync_project_health()
