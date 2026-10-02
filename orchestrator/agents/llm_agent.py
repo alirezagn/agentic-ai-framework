@@ -36,6 +36,74 @@ from .base_agent import (
 
 logger = logging.getLogger(__name__)
 
+# --- DoD repair remedies ---------------------------------------------------
+#
+# One generic repair note used to be sent for *every* DoD rejection, and it
+# always claimed the rejection was about missing file content
+# ("It was valid JSON but did not deliver real file content ... patch the
+# project files"). For an evidence rejection — "report test_status=NOT
+# RUN" — that instruction is not merely unhelpful, it is the wrong fix: the
+# model dutifully re-delivers edits, never sets the field, the DoD rejects
+# the repair for the same reason, and the task fails with a complaint about
+# evidence it was never told how to satisfy in structured form. The remedy is
+# therefore chosen from the problems themselves.
+
+_EVIDENCE_MARKERS = ("test_status", "ground-truth", "ground truth", "nothing was executed")
+_INTERFACE_MARKERS = (
+    "does not define",
+    "does not exist in the project",
+    "does not parse",
+    "no module exists at that relative path",
+    "no such module",
+)
+_FILE_MARKERS = (
+    "shares no line",
+    "not materialized",
+    "missing from the project",
+    "update it with data.edits",
+    "summary/prose",
+    "expected output",
+)
+
+_REMEDY_EVIDENCE = (
+    "This is an EVIDENCE problem, not a file problem: no test can run in this "
+    "environment, so answer with a completed reply that sets the field the "
+    "problem names, e.g. "
+    '{"status": "completed", "summary": "<one line>", "data": {"test_status": '
+    '"NOT RUN"}}. Keep the files exactly as they are — do not re-deliver them — '
+    "and never claim a run you did not perform.\n"
+)
+_REMEDY_INTERFACE = (
+    "This is an IMPORT problem: the producer file does not define a name the "
+    "consumer imports. Read the producer file named in the problem and patch "
+    "the consumer with data.edits (search/replace on the exact import line), "
+    "or deliver the missing module.\n"
+)
+_REMEDY_FILE = (
+    "It was valid JSON but did not deliver real file content: patch the "
+    "project files with data.edits for files that already exist (never repeat "
+    "whole files), or data.documents only for a brand-new file under 60 lines.\n"
+)
+_REMEDY_GENERIC = (
+    "Address exactly what the problems say — patch files with data.edits, or "
+    "set the fields they ask for (for example data.test_status).\n"
+)
+
+
+def repair_remedies(problems: Sequence[str]) -> str:
+    """The remedy block for this rejection: one block per problem class."""
+    text = [str(problem) for problem in problems]
+    remedies: List[str] = []
+    if any(any(marker in item for marker in _EVIDENCE_MARKERS) for item in text):
+        remedies.append(_REMEDY_EVIDENCE)
+    if any(any(marker in item for marker in _INTERFACE_MARKERS) for item in text):
+        remedies.append(_REMEDY_INTERFACE)
+    if any(any(marker in item for marker in _FILE_MARKERS) for item in text):
+        remedies.append(_REMEDY_FILE)
+    if not remedies:
+        remedies.append(_REMEDY_GENERIC)
+    return "".join(remedies)
+
 
 class LLMAgent(BaseAgent):
     """Base class for agents that call a language model and parse JSON back."""
@@ -61,20 +129,21 @@ class LLMAgent(BaseAgent):
         "Head of your truncated attempt (for intent only, do not repeat it):\n"
     )
 
-    # Sent when the Definition of Done rejects a parseable-but-empty delivery
-    # (summary/prose JSON instead of real file content).
+    # Sent when the Definition of Done rejects a parseable delivery. The
+    # `{remedies}` block is chosen per problem class by repair_remedies():
+    # an evidence rejection must be answered with data.test_status, an import
+    # rejection with a patched consumer, a content rejection with file edits.
+    # Sending the content remedy for an evidence rejection is what used to
+    # make the repair round useless and the task fail anyway.
     DOD_REPAIR_NOTE = (
         "\n\nThe Definition of Done REJECTED your previous reply as a delivery:\n"
         "{problems}\n"
-        "It was valid JSON but did not deliver real file content. Reply ONLY "
-        "with one compact JSON object (under 600 tokens) that actually patches "
-        "the project files:\n"
-        '{"status": "completed", "summary": "<one line>", "data": {"edits": '
-        '{"<project-relative path>": {"search": "<shortest unique snippet>", '
-        '"replace": "<replacement>"}}}}\n'
-        "Use data.edits for files that already exist (never repeat whole "
-        "files), or data.documents only for a brand-new file under 60 lines. "
-        "Do not reply with descriptions, scopes, or metadata.\n"
+        "{remedies}"
+        "Reply ONLY with one compact JSON object (under 600 tokens) that fixes "
+        "the problems above:\n"
+        '{"status": "completed", "summary": "<one line>", "data": {...}}\n'
+        "Include every field the problems ask for. Do not reply with "
+        "descriptions, scopes, or metadata.\n"
         "If you truly cannot deliver, reply "
         '{"status": "failed", "summary": "<why>", "data": {}} instead.'
     )
@@ -396,7 +465,9 @@ class LLMAgent(BaseAgent):
             prompt = build_prompt(payload, agent_spec=self.spec_text())
             system = render_system_prompt(self.system_rules(), self.spec_text())
             bullets = "\n".join(f"- {problem}" for problem in list(problems)[:8])
-            note = self.DOD_REPAIR_NOTE.replace("{problems}", bullets)
+            note = self.DOD_REPAIR_NOTE.replace("{problems}", bullets).replace(
+                "{remedies}", repair_remedies(problems)
+            )
             result = self.client().complete(
                 system=system, messages=[{"role": "user", "content": prompt + note}]
             )

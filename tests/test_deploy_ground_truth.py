@@ -197,6 +197,32 @@ class TestRunnerRefusals:
         with pytest.raises(DeployError, match="no 'command'"):
             runner._validate_invocation({"args": []})
 
+    def test_star_allowlist_permits_any_executable(self, tmp_path: Path) -> None:
+        """`ORCHESTRATOR_DEPLOY_ALLOWLIST=*` is the allow-all opt-in.
+
+        An operator who writes `*` means "any executable"; treating it as the
+        literal basename `*` refused *every* command, so the channel was
+        "enabled" yet nothing could ever run.
+        """
+        runner = DeployRunner(tmp_path, enabled=True, allowlist=("*",))
+        executable, args, expect = runner._validate_invocation(
+            {"command": "python3", "args": ["-c", "print(1)"]}
+        )
+        assert executable and Path(executable).is_file()
+        assert args == ["-c", "print(1)"]
+
+    def test_star_still_refuses_a_disabled_channel(self, tmp_path: Path) -> None:
+        runner = DeployRunner(tmp_path, enabled=False, allowlist=("*",))
+        record = runner.run_one({"command": "python3", "args": ["-c", "print(1)"]})
+        assert record.executed is False
+        assert "disabled" in record.reason
+
+    def test_star_does_not_open_the_project_boundary(self, tmp_path: Path) -> None:
+        """A traversal script is still confined to the project directory."""
+        runner = DeployRunner(tmp_path, enabled=True, allowlist=("*",))
+        with pytest.raises(DeployError, match="not on the deploy allowlist"):
+            runner._validate_invocation({"command": "../../etc/passwd"})
+
     def test_control_characters_in_command_are_rejected(self, tmp_path: Path) -> None:
         runner = DeployRunner(tmp_path, enabled=True, allowlist=("ctest",))
         with pytest.raises(DeployError, match="control characters"):

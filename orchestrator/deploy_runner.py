@@ -261,16 +261,19 @@ def _resolve_executable(
     The allowlist comparison uses the *basename* on both sides, so
     ``/usr/bin/gcc`` and ``gcc`` grant the same permission. That means the
     allowlist trusts PATH — documented rather than hidden, since allowlisting
-    ``gcc`` is allowing whatever ``gcc`` currently resolves to. The relative
-    branch is additionally confined to the project directory, so a traversal
-    cannot use the allowlist to reach a binary outside it.
+    ``gcc`` is allowing whatever ``gcc`` currently resolves to. A literal
+    ``*`` entry means "any executable" (``ORCHESTRATOR_DEPLOY_ALLOWLIST=*``);
+    everything else about the sandbox — ``shell=False``, project cwd, scrubbed
+    environment, timeout, transcript — still applies. The relative branch is
+    additionally confined to the project directory, so a traversal cannot use
+    the allowlist to reach a binary outside it.
     """
     raw = str(command).strip()
     if not raw:
         return None
     requested = os.path.basename(raw)
     permitted = {os.path.basename(str(item)) for item in allowlist}
-    if requested not in permitted:
+    if "*" not in permitted and requested not in permitted:
         return None
 
     looks_like_path = raw.startswith(("./", "../")) or "/" in raw

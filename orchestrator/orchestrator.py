@@ -199,6 +199,28 @@ def _test_like_outputs(task: Dict[str, Any]) -> bool:
     return False
 
 
+_PROSE_NOT_RUN = re.compile(r"\bnot[\s-]?run\b", re.IGNORECASE)
+
+
+def _reports_not_run(output: Optional["AgentOutput"]) -> bool:
+    """True when the output states, in prose, that nothing was executed.
+
+    ``data.test_status`` is the structured channel, but a model that writes
+    "tests NOT RUN" in its summary has reported the honest negative just as
+    clearly — and a repair round that fails to move it into the field turns a
+    legitimate outcome into a failed task. Accepting the prose form costs
+    nothing: a fabricated *pass* still needs a ground-truth record, while a
+    fabricated "NOT RUN" only loses information. Honoured only when the same
+    output does not also claim execution.
+    """
+    if output is None:
+        return False
+    text = " ".join(
+        [str(output.summary)] + [str(item) for item in output.artifacts or []]
+    )
+    return bool(_PROSE_NOT_RUN.search(text))
+
+
 class MasterOrchestrator:
     """Master execution loop linking managers, agents and tracking loops."""
 
@@ -1602,6 +1624,11 @@ class MasterOrchestrator:
             reported = str(data.get("test_status") or "").strip().upper()
             if reported == config.TEST_STATUS_NOT_RUN:
                 # Honest negative. Nothing ran, and the agent said so.
+                return problems
+            if not claims and _reports_not_run(output):
+                # Same honest negative, stated in prose instead of in the
+                # field (a 12B model rarely moves it across on its own, and a
+                # repair round that cannot either would fail a legitimate task).
                 return problems
             if declares_deploy:
                 reasons = "; ".join(
