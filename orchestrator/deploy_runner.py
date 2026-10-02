@@ -63,9 +63,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -105,6 +107,10 @@ STATUS_REFUSED = "refused"
 STATUS_TIMEOUT = "timeout"
 STATUS_SPAWN_FAILED = "spawn_failed"
 STATUS_ERROR = "error"
+#: A command that was deliberately not run because it had nothing to do
+#: (redundant install of an already-satisfied requirement). Never confused
+#: with ``executed``: nothing happened, and no exit code exists.
+STATUS_SKIPPED = "skipped"
 
 
 @dataclass
@@ -282,6 +288,332 @@ def _resolve_executable(
     return None
 
 
+# ---------------------------------------------------------------------------
+# PEP 668 — externally managed environments, and installs that are already done
+# ---------------------------------------------------------------------------
+
+#: Marker file that makes an interpreter refuse an in-place ``pip install``
+#: unless ``--break-system-packages`` is passed (PEP 668). Debian/Ubuntu put
+#: it in ``lib/pythonX.Y/``; some distributions put it next to the binary.
+_PEP668_MARKER = "EXTERNALLY-MANAGED"
+
+#: pip options whose value is the *next* token. Needed to walk an install
+#: command without mistaking a value for a requirement.
+_PIP_VALUE_OPTIONS = frozenset(
+    {
+        "-r",
+        "--requirement",
+        "-c",
+        "--constraint",
+        "-e",
+        "--editable",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "--trusted-host",
+        "-f",
+        "--find-links",
+        "-d",
+        "--dest",
+        "-t",
+        "--target",
+        "--root",
+        "--prefix",
+        "--platform",
+        "--implementation",
+        "--python-version",
+        "--abi",
+        "--cache-dir",
+        "--log",
+        "--timeout",
+        "--retries",
+        "--progress-bar",
+        "--config-settings",
+        "-C",
+        "--python",
+        "--report",
+        "--no-binary",
+        "--only-binary",
+        "--upgrade-strategy",
+        "--use-feature",
+        "--use-deprecated",
+        "--proxy",
+        "--cert",
+        "--client-cert",
+    }
+)
+
+#: pip flags that change nothing about *what* gets installed, so they do not
+#: make the satisfaction check ambiguous.
+_PIP_HARMLESS_FLAGS = frozenset(
+    {
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+        "--no-input",
+        "--disable-pip-version-check",
+        "--no-cache-dir",
+        "--prefer-binary",
+        "--no-warn-script-location",
+        "--no-warn-conflicts",
+        "--break-system-packages",
+        "--no-break-system-packages",
+    }
+)
+
+#: Options that make an install either move elsewhere (``--target``) or
+#: deliberately redo work (``--upgrade``, ``--force-reinstall``): running them
+#: is the point, so no satisfaction check may short-circuit them.
+_PIP_UNSKIPABLE = frozenset(
+    {
+        "-e",
+        "--editable",
+        "-t",
+        "--target",
+        "--root",
+        "--prefix",
+        "-c",
+        "--constraint",
+        "-U",
+        "--upgrade",
+        "--force-reinstall",
+        "--ignore-installed",
+        "--ignore-requires-python",
+        "--no-deps",
+        "--pre",
+        "--require-hashes",
+    }
+)
+
+
+class _UnverifiableInstall(Exception):
+    """This install cannot be proven redundant — it must run."""
+
+
+def pep668_marker_candidates(executable: Optional[str] = None) -> List[Path]:
+    """Where an ``EXTERNALLY-MANAGED`` marker could live for ``executable``.
+
+    Derived from the *target* interpreter only: the environment pip writes
+    into decides whether PEP 668 applies, not the one the orchestrator
+    happens to run in. Checked locations:
+
+    * next to the binary and its parent (``/usr/bin``, ``/usr``),
+    * ``<prefix>/lib/python*/EXTERNALLY-MANAGED``, which is where
+      Debian/Ubuntu keep it for ``/usr/bin/pip`` and ``/usr/bin/python3``.
+    """
+    raw = str(executable or "").strip() or sys.executable
+    try:
+        resolved = Path(raw).resolve()
+    except OSError:  # pragma: no cover - defensive
+        resolved = Path(raw)
+    prefixes = [resolved.parent, resolved.parent.parent]
+    candidates: List[Path] = []
+    seen: set = set()
+    for prefix in prefixes:
+        for path in (prefix / _PEP668_MARKER, prefix / "lib" / _PEP668_MARKER):
+            if str(path) not in seen:
+                seen.add(str(path))
+                candidates.append(path)
+        lib = prefix / "lib"
+        if lib.is_dir():
+            for child in sorted(lib.glob("python*")):
+                marker = child / _PEP668_MARKER
+                if str(marker) not in seen:
+                    seen.add(str(marker))
+                    candidates.append(marker)
+    return candidates
+
+
+def is_pep668_managed(executable: Optional[str] = None) -> bool:
+    """True when ``pip install`` there needs ``--break-system-packages``."""
+    for candidate in pep668_marker_candidates(executable):
+        try:
+            if candidate.is_file():
+                return True
+        except OSError:  # pragma: no cover - defensive
+            continue
+    return False
+
+
+def pip_targets_running_environment(executable: Optional[str]) -> bool:
+    """True when ``executable`` installs into *this* interpreter's environment.
+
+    Only then can :func:`importlib.metadata` answer "already installed":
+    checking the running interpreter while pip would write into a venv (or
+    via ``--target``) would skip an install that was never performed.
+    """
+    raw = str(executable or "").strip() or sys.executable
+    try:
+        target = Path(raw).resolve()
+        prefix = Path(sys.prefix).resolve()
+    except OSError:  # pragma: no cover - defensive
+        return False
+    if target == Path(sys.executable).resolve():
+        return True
+    return prefix == target or prefix in target.parents
+
+
+def is_pip_install(executable: Optional[str], args: Sequence[str]) -> bool:
+    """True for ``pip install ...`` and ``python -m pip install ...``."""
+    return _install_tail(executable, args) is not None
+
+
+def _install_tail(executable: Optional[str], args: Sequence[str]) -> Optional[List[str]]:
+    """Tokens after the ``install`` subcommand, or ``None`` if not an install."""
+    tokens = [str(arg) for arg in args]
+    base = os.path.basename(str(executable or "")).lower()
+    for suffix in (".exe", ".bat", ".cmd"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    if base.startswith("pip"):
+        rest = tokens
+    else:
+        if "-m" not in tokens:
+            return None
+        position = tokens.index("-m")
+        if position + 1 >= len(tokens) or tokens[position + 1] != "pip":
+            return None
+        rest = tokens[position + 2 :]
+    if not rest or rest[0] != "install":
+        return None
+    return rest[1:]
+
+
+def _distribution_version(name: str) -> Optional[str]:
+    try:
+        from importlib import metadata
+    except ImportError:  # pragma: no cover - Python < 3.8
+        return None
+    try:
+        return str(metadata.version(name))
+    except Exception:  # noqa: BLE001 - absence and bad names both mean "unknown"
+        return None
+
+
+def _requirement_satisfied(spec: str) -> Optional[str]:
+    """Prove one requirement is already present, or return ``None``.
+
+    Deliberately narrow: bare names and exact ``==`` pins only. Ranges,
+    extras, markers, URLs and VCS specs are *not* reasoned about — an
+    unprovable requirement just means pip runs, which is the old behaviour.
+    """
+    text = str(spec or "").strip()
+    if not text or text.startswith("#"):
+        return None
+    if any(token in text for token in (";", "#", "://", "git+", "@")):
+        return None
+    match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)$", text)
+    if not match:
+        return None
+    name, extras, rest = match.group(1), match.group(2) or "", match.group(3).strip()
+    if extras:
+        return None  # extras change the dependency set; cannot be verified here
+    if not rest:
+        version = _distribution_version(name)
+        return f"{name} (installed {version})" if version else None
+    if rest.startswith("=="):
+        wanted = rest[2:].strip()
+        if not wanted or "*" in wanted or any(ch in wanted for ch in "<>!~"):
+            return None
+        version = _distribution_version(name)
+        if version is None:
+            return None
+        return f"{name}=={wanted}" if version == wanted else None
+    return None
+
+
+def _requirement_file_specs(raw_path: str, project_path: Optional[Path]) -> List[str]:
+    """Requirements declared by ``pip install -r <file>`` (project-internal)."""
+    raw = str(raw_path or "").strip()
+    if not raw or raw.startswith("-"):
+        raise _UnverifiableInstall(f"unusable requirement path: {raw_path!r}")
+    base = Path(project_path) if project_path else Path.cwd()
+    try:
+        if project_path is not None:
+            path = resolve_inside(base, raw, context="pip -r")
+        else:
+            path = (base / raw).resolve()
+            if base.resolve() not in path.parents:
+                raise _UnverifiableInstall(f"requirement file outside {base}")
+    except PathPolicyError as exc:
+        raise _UnverifiableInstall(str(exc)) from exc
+    if not path.is_file():
+        raise _UnverifiableInstall(f"requirement file not found: {raw}")
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise _UnverifiableInstall(f"requirement file unreadable: {exc}") from exc
+    specs: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("-"):
+            # nested options (-e, --index-url, constraints): out of scope
+            raise _UnverifiableInstall(f"unsupported option in {raw}: {stripped}")
+        if ";" in stripped:
+            raise _UnverifiableInstall(f"environment marker in {raw}: {stripped}")
+        specs.append(stripped.split(" #", 1)[0].strip())
+    return specs
+
+
+def pip_requirements_satisfied(
+    executable: Optional[str],
+    args: Sequence[str],
+    project_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Reason string when every requirement is already installed here.
+
+    Returns ``None`` — "run it" — for anything not provably redundant: a
+    missing package, an unverifiable spec, an option that would upgrade or
+    relocate the install, or a non-install command. Skipping is an
+    optimisation; it must never change what the install would have done.
+    """
+    try:
+        tail = _install_tail(executable, args)
+    except Exception:  # noqa: BLE001 - never let analysis break a deploy
+        return None
+    if tail is None:
+        return None
+    specs: List[str] = []
+    index = 0
+    try:
+        while index < len(tail):
+            token = tail[index]
+            if not token.startswith("-"):
+                specs.append(token)
+                index += 1
+                continue
+            name = token.split("=", 1)[0]
+            if name in _PIP_UNSKIPABLE:
+                return None
+            if name in _PIP_VALUE_OPTIONS:
+                value = tail[index + 1] if index + 1 < len(tail) else ""
+                if not value or value.startswith("-"):
+                    return None
+                if name in ("-r", "--requirement"):
+                    specs.extend(_requirement_file_specs(value, project_path))
+                index += 2
+                continue
+            if name in _PIP_HARMLESS_FLAGS:
+                index += 1
+                continue
+            return None  # unknown option: reason about nothing
+    except _UnverifiableInstall as exc:
+        logger.debug("deploy: install not skippable (%s)", exc)
+        return None
+    if not specs:
+        return None
+    satisfied: List[str] = []
+    for spec in specs:
+        proof = _requirement_satisfied(spec)
+        if proof is None:
+            return None
+        satisfied.append(proof)
+    return "requirements already satisfied: " + ", ".join(satisfied)
+
+
 class DeployRunner:
     """Executes allowlisted commands on behalf of agents.
 
@@ -297,6 +629,7 @@ class DeployRunner:
         timeout: Optional[float] = None,
         max_output_bytes: Optional[int] = None,
         evidence_dir: Optional[str] = None,
+        externally_managed: Optional[bool] = None,
     ) -> None:
         self.project_path = Path(project_path).expanduser().resolve()
         self._explicit_allowlist = tuple(allowlist) if allowlist is not None else None
@@ -304,10 +637,17 @@ class DeployRunner:
         self._timeout = timeout
         self._max_output_bytes = max_output_bytes
         self._evidence_dir = evidence_dir
+        #: PEP 668 override; ``None`` means detect from the target binary.
+        self._explicit_externally_managed = externally_managed
 
     # ------------------------------------------------------------------
     # Policy
     # ------------------------------------------------------------------
+
+    @property
+    def externally_managed(self) -> Optional[bool]:
+        """PEP 668 override, or ``None`` when detected per command."""
+        return self._explicit_externally_managed
 
     @property
     def allowlist(self) -> Sequence[str]:
@@ -476,6 +816,50 @@ class DeployRunner:
             )
 
         command = os.path.basename(executable) or executable
+
+        # PEP 668 + redundant installs. Skip runs first: a command with
+        # nothing to do gets no flag and no process.
+        if is_pip_install(executable, args):
+            skip_reason = pip_requirements_satisfied(
+                executable, args, project_path=self.project_path
+            )
+            if skip_reason:
+                logger.info("deploy: skipping '%s' — %s", command, skip_reason)
+                config.emit_telemetry(
+                    config.TELEMETRY_EVENT_DEPLOY,
+                    level="INFO",
+                    command_name=command,
+                    executed=False,
+                    status=STATUS_SKIPPED,
+                    argv=[executable, *args],
+                )
+                return DeployRecord(
+                    command=command,
+                    args=args,
+                    cwd=str(self.project_path),
+                    exit_code=None,
+                    executed=False,
+                    status=STATUS_SKIPPED,
+                    reason=skip_reason,
+                    declared_expect=declared_expect,
+                    expect_matched=None,
+                )
+            managed = (
+                self._explicit_externally_managed
+                if self._explicit_externally_managed is not None
+                else is_pep668_managed(executable)
+            )
+            if managed and not any(
+                arg in ("--break-system-packages", "--no-break-system-packages")
+                for arg in args
+            ):
+                logger.info(
+                    "deploy: '%s' runs in an externally managed environment; "
+                    "appending --break-system-packages",
+                    command,
+                )
+                args = [*args, "--break-system-packages"]
+
         argv = [executable, *args]
         environment = _scrubbed_environment()
         limit = self.max_output_bytes
@@ -696,4 +1080,10 @@ __all__ = [
     "STATUS_TIMEOUT",
     "STATUS_SPAWN_FAILED",
     "STATUS_ERROR",
+    "STATUS_SKIPPED",
+    "is_pep668_managed",
+    "is_pip_install",
+    "pep668_marker_candidates",
+    "pip_requirements_satisfied",
+    "pip_targets_running_environment",
 ]

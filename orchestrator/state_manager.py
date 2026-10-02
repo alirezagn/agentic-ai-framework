@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover - platform dependent
 logger = logging.getLogger(__name__)
 
 from . import config
+from .auto_plan import expand_implementation_stages, implementation_join_index
 from .context_monitor import context_window_tokens, utilization_from_tokens
 from .config import (
     CHANGELOG_FILE,
@@ -1302,8 +1303,12 @@ class StateManager:
 
         Deterministic fallback for goal-driven planning: five sequential
         tasks covering requirements -> architecture -> implementation ->
-        testing -> documentation. Returns the created task ids, or an
-        empty list when tasks already exist (idempotent).
+        testing -> documentation. A GUI or multi-module goal splits the
+        implementation task into its atomic stage chain first
+        (:func:`~orchestrator.auto_plan.expand_implementation_stages`), so a
+        desktop app never starts life as one "build it" task. Returns the
+        created task ids, or an empty list when tasks already exist
+        (idempotent).
         """
         if self.load_tasks():
             return []
@@ -1366,15 +1371,17 @@ class StateManager:
                 "acceptance_criteria": ["Docs match shipped behavior"],
             },
         ]
-        # Chain: 0 <- 1 <- 2 <- {3, 4}
+        specs = expand_implementation_stages(specs, goal=goal)
+        # Chain: 0 <- 1 <- ... <- join <- {everything after the implementation}
+        join = implementation_join_index(specs)
         created: List[str] = []
         for index, spec in enumerate(specs):
-            if index == 1:
-                spec["dependencies"] = [created[0]]
-            elif index == 2:
-                spec["dependencies"] = [created[1]]
-            elif index in (3, 4):
-                spec["dependencies"] = [created[2]]
+            if index == 0 or not created:
+                spec["dependencies"] = []
+            elif index <= join:
+                spec["dependencies"] = [created[index - 1]]
+            else:
+                spec["dependencies"] = [created[join]]
             task = self.append_task(spec)
             created.append(str(task.get("id")))
         self.refresh_ready_states()

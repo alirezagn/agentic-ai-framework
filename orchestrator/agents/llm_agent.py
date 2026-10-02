@@ -15,14 +15,24 @@ inherited. Clients are injectable so tests run fully offline::
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Sequence, Tuple, Union
 
 from .. import config
 from ..llm_client import LLMClient, LLMError, LLMResult
 from ..prompt_builder import build_prompt, load_agent_spec, render_system_prompt
-from .base_agent import AgentOutput, AgentOutputError, BaseAgent, delivery_problems, preexisting_expected
+from .base_agent import (
+    AgentOutput,
+    AgentOutputError,
+    BaseAgent,
+    _repair_json_candidate,
+    delivery_problems,
+    preexisting_expected,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +156,9 @@ class LLMAgent(BaseAgent):
         try:
             parsed = self.parse_structured_output(result.text)
         except AgentOutputError as exc:
+            salvaged = self._recover_truncated_output(result.text, task_id)
+            if salvaged is not None:
+                return salvaged
             recovered = self._repair_truncated_output(system, prompt, result.text, task_id)
             if recovered is not None:
                 recovered.warnings.append(
@@ -214,9 +227,11 @@ class LLMAgent(BaseAgent):
                 parsed = self.parse_structured_output(result.text)
                 output = self.output_from_parsed(parsed, task_id=task_id, result=result)
             except AgentOutputError as exc:
-                output = self._repair_truncated_output(
-                    system, prompt, result.text, task_id
-                )
+                output = self._recover_truncated_output(result.text, task_id)
+                if output is None:
+                    output = self._repair_truncated_output(
+                        system, prompt, result.text, task_id
+                    )
                 parse_errors = [str(exc), _snippet(result.text)]
             if output is None:
                 return self.failed(
@@ -279,6 +294,66 @@ class LLMAgent(BaseAgent):
         return self.failed(  # unreachable: every loop path returns
             task_id, "edit session exhausted without a deliverable output"
         )
+
+    def _recover_truncated_output(
+        self, raw: str, task_id: str
+    ) -> Optional[AgentOutput]:
+        """Local chunked re-assembly of a reply the output cap cut off.
+
+        Runs BEFORE the network truncation-repair: the repair note forbids
+        file bodies, so its compact answer cannot carry the delivery that the
+        truncated reply already contained — re-asking would throw the
+        recovered work away. A cut that landed inside file content yields a
+        BLOCKED output with the partial bodies staged in
+        ``data.edit_buffers`` (an incomplete edit must never be applied);
+        a re-assembled complete delivery keeps its parsed status.
+
+        Returns ``None`` when nothing was recovered so the caller keeps the
+        repair path and its original failure detail.
+        """
+        recovery = recover_truncated_payload(raw)
+        if recovery is None:
+            return None
+        detail = [note for note in recovery.notes if note]
+        if recovery.parsed is None:
+            parsed: Dict[str, Any] = {
+                "status": config.AGENT_STATUS_BLOCKED,
+                "summary": _buffer_summary(recovery.buffers),
+                "data": {EDIT_BUFFER_KEY: dict(recovery.buffers), "truncated": True},
+                "warnings": detail
+                + ["partial file content staged in data.edit_buffers (incomplete)"],
+            }
+            return self.output_from_parsed(parsed, task_id=task_id)
+
+        parsed = dict(recovery.parsed)
+        data = parsed.get("data") if isinstance(parsed.get("data"), dict) else {}
+        data = dict(data)
+        warnings = parsed.get("warnings")
+        if isinstance(warnings, str):
+            warnings = [warnings]
+        elif not isinstance(warnings, list):
+            warnings = []
+        warnings = [str(item) for item in warnings]
+        warnings.append("recovered from a truncated payload (local chunked parse)")
+        if recovery.buffers:
+            staged = dict(recovery.buffers)
+            existing = data.get(EDIT_BUFFER_KEY)
+            if isinstance(existing, dict):
+                staged = {**staged, **existing}
+            data[EDIT_BUFFER_KEY] = staged
+            data["truncated"] = True
+            parsed["status"] = config.AGENT_STATUS_BLOCKED
+            parsed["summary"] = _buffer_summary(
+                staged, model_summary=str(parsed.get("summary") or "")
+            )
+            warnings.append(
+                "cut inside file content: partial bodies staged in "
+                "data.edit_buffers, not applied"
+            )
+        warnings.extend(detail)
+        parsed["data"] = data
+        parsed["warnings"] = warnings
+        return self.output_from_parsed(parsed, task_id=task_id)
 
     def _repair_truncated_output(
         self, system: str, prompt: str, raw: str, task_id: str
@@ -371,11 +446,468 @@ class LLMAgent(BaseAgent):
         return AgentOutput.from_dict(parsed)
 
 
+def _buffer_summary(
+    buffers: Dict[str, Dict[str, Any]], model_summary: str = ""
+) -> str:
+    paths = ", ".join(sorted(buffers)) or "unknown file"
+    summary = (
+        f"model output truncated; partial content for {len(buffers)} file(s) "
+        f"staged in data.edit_buffers ({paths})"
+    )
+    if model_summary:
+        summary += f"; model said: {model_summary[:120]}"
+    return summary
+
+
 def _snippet(text: str, limit: int = 400) -> str:
     cleaned = (text or "").strip()
     if len(cleaned) <= limit:
         return cleaned or "[empty model output]"
     return cleaned[:limit] + "..."
+
+
+# ---------------------------------------------------------------------------
+# Truncation recovery — chunked re-assembly of a reply cut by the token cap
+# ---------------------------------------------------------------------------
+
+#: ``data`` keys that carry actual delivery (file content the Definition of
+#: Done looks for). A recovered payload counts as content only when one of
+#: these holds non-empty value — a recovered ``{"status": "completed",
+#: "summary": "..."}`` is just a promise, not a delivery.
+DELIVERY_KEYS: Tuple[str, ...] = ("edits", "documents")
+
+#: Value keys that hold file bodies, used to recognise a cut that happened
+#: *inside* file content (``... "replace": "half a fi``).
+CONTENT_KEYS: FrozenSet[str] = frozenset({"search", "replace", "content"})
+
+#: ``data`` key where partial file content is staged for a blocked task.
+EDIT_BUFFER_KEY = "edit_buffers"
+
+#: Fenced block languages whose body is JSON (never a file body to stage).
+_JSON_LANGS: FrozenSet[str] = frozenset({"json", "jsonc", "json5", "jsonl"})
+
+_FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)(?:```|\Z)", re.DOTALL)
+
+#: Hard cap on locally assembled candidates; the model's first reply is the
+#: only input, so a runaway scan must not turn into unbounded work.
+_MAX_CANDIDATES = 40
+
+#: How many ``{`` positions of one reply may be scanned as the JSON root.
+_MAX_JSON_STARTS = 6
+
+#: Guess which file an unstaged ```python fence belongs to, from nearby
+#: prose (``wrote src/app.py``` -> ``src/app.py``).
+_PATH_IN_TEXT_RE = re.compile(r"(?<![\w./-])([\w./-]+\.[A-Za-z][A-Za-z0-9_]{0,9})")
+
+
+@dataclass(frozen=True)
+class TruncationRecovery:
+    """What could be salvaged from one truncated model reply."""
+
+    parsed: Optional[Dict[str, Any]] = None
+    buffers: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def has_content(self) -> bool:
+        """True when the salvage carries a real delivery (file content)."""
+        return _parsed_has_content(self.parsed)
+
+    @property
+    def has_delivery(self) -> bool:
+        """True when there is anything worth staging or returning."""
+        return bool(self.buffers) or self.has_content
+
+
+def _parsed_has_content(parsed: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(parsed, dict):
+        return False
+    data = parsed.get("data")
+    if not isinstance(data, dict):
+        return False
+    for key in DELIVERY_KEYS:
+        value = data.get(key)
+        if isinstance(value, dict) and value:
+            return True
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _closers(kinds: Sequence[str]) -> str:
+    return "".join(
+        "}" if kind == "obj" else "]" for kind in reversed(list(kinds))
+    )
+
+
+def _close_open_string(text: str) -> str:
+    r"""Terminate the string that was open when the output was cut.
+
+    Drops a dangling escape (``...\`` or a partial ``\u12``) first so the
+    result is lexically valid JSON rather than merely unterminated.
+    """
+    if text.endswith("\\") and not text.endswith("\\\\"):
+        text = text[:-1]
+    else:
+        partial = re.search(r"\\u[0-9a-fA-F]{0,3}$", text)
+        if partial:
+            text = text[: partial.start()]
+    return text + '"'
+
+
+def _finish_value_boundary(text: str) -> str:
+    """Trim a tail that stops between values (bare token / dangling key)."""
+    for _ in range(4):
+        text = text.rstrip()
+        if text.endswith(","):
+            text = text[:-1]
+            continue
+        if text.endswith(":"):
+            text = text[:-1].rstrip()
+            if text.endswith('"'):
+                start = _string_open_index(text, len(text) - 1)
+                if start >= 0:
+                    text = text[:start]
+            continue
+        token = re.search(r"[A-Za-z0-9_.+\-eE]+$", text)
+        if token:
+            text = text[: token.start()]
+            continue
+        break
+    return text.rstrip()
+
+
+def _string_open_index(text: str, quote_index: int) -> int:
+    """Offset of the ``"`` that opened the string ending at ``quote_index``."""
+    pos = quote_index - 1
+    backslashes = 0
+    while pos >= 0 and text[pos] != '"':
+        if text[pos] == "\\":
+            backslashes += 1
+        else:
+            backslashes = 0
+        pos -= 1
+    if backslashes % 2:
+        return -1  # the quote is escaped: not a string delimiter
+    return pos
+
+
+def _scan_json_tail(body: str) -> List[Tuple[str, Tuple[Any, ...], str]]:
+    """Rebuild parseable variants of a JSON object cut off mid-flight.
+
+    Walks the text once, tracking the container stack (so every cut point can
+    be closed with the right number of ``}``/``]``), which key is being read,
+    and whether the cut landed inside a *value* string — the common case,
+    since models truncate while echoing file bodies.
+
+    Returns candidate ``(text, cut_path, note)`` tuples in preference order:
+    first the longest re-assembly, then progressively earlier cut points.
+    ``cut_path`` is the JSON path of the value that was being written when
+    the output stopped (``()`` when the cut was not inside a string).
+    """
+    frames: List[List[Any]] = []  # [kind, current_key, expects_key]
+    path: List[Any] = []  # element each frame is stored under
+    boundaries: List[Tuple[int, Tuple[str, ...]]] = []
+    in_string = False
+    escaped = False
+    string_start = -1
+    string_is_key = False
+    string_path: Tuple[Any, ...] = ()
+    index = 0
+    total = len(body)
+
+    while index < total:
+        char = body[index]
+        if in_string:
+            if not escaped and char == "\\":
+                escaped = True
+            elif not escaped and char == '"':
+                if string_is_key and frames:
+                    # remember which key this frame is filling, so a cut
+                    # inside its value can be located in the parsed tree
+                    frames[-1][1] = body[string_start + 1 : index]
+                in_string = False
+                escaped = False
+            else:
+                escaped = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            string_start = index
+            parent = frames[-1] if frames else None
+            string_is_key = bool(parent and parent[0] == "obj" and parent[2])
+            if string_is_key:
+                string_path = ()
+            else:
+                current = parent[1] if parent else None
+                string_path = tuple(path[1:]) + (current,)
+            index += 1
+            continue
+        if char in "{[":
+            element = frames[-1][1] if frames else None
+            # an array counts elements from 0: ``current`` is the index of
+            # the element being written, advanced on every comma
+            frames.append(
+                ["obj" if char == "{" else "arr", None if char == "{" else 0, char == "{"]
+            )
+            path.append(element)
+            index += 1
+            boundaries.append((index, tuple(frame[0] for frame in frames)))
+            continue
+        if char in "}]":
+            if frames:
+                frames.pop()
+                path.pop()
+            index += 1
+            continue
+        if char == ",":
+            if frames:
+                if frames[-1][0] == "obj":
+                    frames[-1][1] = None
+                    frames[-1][2] = True
+                elif isinstance(frames[-1][1], int):
+                    frames[-1][1] += 1
+                else:
+                    frames[-1][1] = 0
+            index += 1
+            boundaries.append((index, tuple(frame[0] for frame in frames)))
+            continue
+        if char == ":" and frames:
+            frames[-1][2] = False
+            index += 1
+            continue
+        index += 1
+
+    closers = _closers(frame[0] for frame in frames)
+    candidates: List[Tuple[str, Tuple[Any, ...], str]] = []
+
+    if in_string:
+        if string_is_key:
+            candidates.append(
+                (body[:string_start] + closers, (), "cut inside a JSON key")
+            )
+        else:
+            where = ".".join(str(part) for part in string_path if part is not None)
+            candidates.append(
+                (
+                    _close_open_string(body) + closers,
+                    string_path,
+                    f"cut inside the string at '{where}'" if where else "cut inside a string",
+                )
+            )
+    else:
+        stripped = body.rstrip()
+        candidates.append((stripped + closers, (), "cut after a value"))
+        trimmed = _finish_value_boundary(body)
+        if trimmed and trimmed != stripped:
+            candidates.append((trimmed + closers, (), "cut between values"))
+
+    # Every earlier cut point (right after a `,` or an opening brace) closed
+    # with the stack as it stood there — the fallback when the tail itself
+    # cannot be repaired.
+    for offset, kinds in reversed(boundaries):
+        segment = body[:offset].rstrip()
+        if segment.endswith(","):
+            segment = segment[:-1].rstrip()
+        if not segment:
+            continue
+        candidates.append((segment + _closers(kinds), (), "closed at an earlier cut"))
+        if len(candidates) >= _MAX_CANDIDATES:
+            break
+    return candidates
+
+
+def _json_candidates(raw: str) -> Iterator[Tuple[str, Tuple[Any, ...], str]]:
+    """Every chunked-parse candidate in ``raw``, fenced JSON first.
+
+    The global scan starts at the first ``{`` in the reply; when the reply
+    wraps its JSON in a fence, scanning that fence's body directly comes
+    first so a brace in the surrounding prose cannot hijack the scan.
+    Non-JSON fences (file bodies) are Stage B, not JSON candidates.
+    """
+    seen: set = set()
+    for match in _FENCE_RE.finditer(raw or ""):
+        lang = (match.group(1) or "").strip().lower()
+        body = match.group(2)
+        if lang not in _JSON_LANGS and body.lstrip()[:1] != "{":
+            continue
+        start = body.find("{")
+        if start < 0:
+            continue
+        for candidate in _scan_json_tail(body[start:]):
+            if candidate[0] not in seen:
+                seen.add(candidate[0])
+                yield candidate
+    start = (raw or "").find("{")
+    if start < 0:
+        return
+    cursor = 0
+    starts: List[int] = []
+    # A brace in the surrounding prose must not hijack the scan: try each
+    # opening brace in turn (the consumer stops at the first candidate that
+    # parses with content, so the wasted work is bounded in practice).
+    while len(starts) < _MAX_JSON_STARTS:
+        position = (raw or "").find("{", cursor)
+        if position < 0:
+            break
+        starts.append(position)
+        cursor = position + 1
+    for begin in starts:
+        for candidate in _scan_json_tail(raw[begin:]):
+            if candidate[0] not in seen:
+                seen.add(candidate[0])
+                yield candidate
+
+
+def _load_candidate(text: str) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    try:
+        salvaged = _repair_json_candidate(text)
+    except Exception:  # noqa: BLE001 — salvage is best-effort
+        salvaged = None
+    return salvaged if isinstance(salvaged, dict) else None
+
+
+def _lookup_path(obj: Any, path: Sequence[Any]) -> Any:
+    for key in path:
+        if isinstance(obj, dict):
+            obj = obj.get(key)
+        elif isinstance(obj, list) and isinstance(key, int) and -len(obj) <= key < len(obj):
+            obj = obj[key]
+        else:
+            return None
+    return obj
+
+
+def _buffer_from_cut(
+    path: Sequence[Any], value: Any, parsed: Any = None
+) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Stage a half-written file body as an incomplete edit buffer.
+
+    Works for both delivery shapes: ``data.edits["file.py"]["replace"]`` (the
+    key is the path) and ``data.documents[0]["content"]`` (an index — the
+    path is read from the record's own ``path`` field).
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    parts = list(path)
+    if parts and parts[0] == "data":
+        parts = parts[1:]
+    if not parts or str(parts[0]) not in DELIVERY_KEYS:
+        return None
+    file_path = ""
+    record = _lookup_path(parsed, list(path)[:-1]) if parsed is not None else None
+    if isinstance(record, dict):
+        for key in ("path", "file", "filename", "target"):
+            candidate = record.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                file_path = candidate.strip()
+                break
+    if not file_path:
+        for part in parts[1:]:
+            if isinstance(part, int) or part is None:
+                continue
+            file_path = str(part)
+            break
+    if not file_path:
+        return None
+    last = parts[-1]
+    field_name = "content" if isinstance(last, int) else str(last)
+    return file_path, {
+        "path": file_path,
+        "field": field_name,
+        "text": value,
+        "truncated": True,
+        "source": "json",
+    }
+
+
+def _fence_buffers(raw: str) -> Dict[str, Dict[str, Any]]:
+    """Partial file bodies the model fenced off instead of JSON-encoding.
+
+    Stage B of the recovery: prose plus a ```python fence that the output cap
+    cut in half. The file path is read from the prose around the fence; an
+    unclosed fence is marked truncated so a staged body is never mistaken for
+    a complete file.
+    """
+    buffers: Dict[str, Dict[str, Any]] = {}
+    matches = list(_FENCE_RE.finditer(raw or ""))
+    for position, match in enumerate(matches):
+        lang = (match.group(1) or "").strip().lower()
+        body = match.group(2)
+        if lang in _JSON_LANGS or body.lstrip()[:1] in ("{", "["):
+            continue
+        if lang and lang not in ("py", "python"):
+            continue
+        closed = match.group(0).endswith("```")
+        text = body
+        if not text.strip():
+            continue
+        context = (raw or "")[: match.start()]
+        guessed = ""
+        for candidate in reversed(_PATH_IN_TEXT_RE.findall(context)):
+            if candidate.count(".") == 1:
+                guessed = candidate
+                break
+        suffix = {"python": "py", "py": "py"}.get(lang) or lang or "txt"
+        file_path = guessed or f"recovered/part_{position + 1}.{suffix}"
+        if file_path in buffers:
+            continue
+        buffers[file_path] = {
+            "path": file_path,
+            "field": "content",
+            "text": text,
+            "truncated": not closed,
+            "source": "fence",
+            "path_source": "text" if guessed else "guessed",
+        }
+    return buffers
+
+
+def recover_truncated_payload(raw: str) -> Optional[TruncationRecovery]:
+    """Salvage a reply that the output token cap cut mid-flight.
+
+    Stage A re-assembles the JSON chunk by chunk: every cut point is closed
+    with the right brackets, an interrupted string is terminated, and the
+    result is parsed. When the cut landed inside file content, that content
+    is staged as an incomplete buffer (never as a delivery).
+
+    Stage B handles prose-plus-fence replies whose file body never made it
+    into JSON at all.
+
+    Returns ``None`` when neither stage produces content *and* no buffers —
+    the caller then falls back to the network truncation-repair, which is
+    the right move when the reply carried no delivery to salvage.
+    """
+    notes: List[str] = []
+    for candidate_text, cut_path, note in _json_candidates(raw):
+        parsed = _load_candidate(candidate_text)
+        if parsed is None:
+            continue
+        buffers: Dict[str, Dict[str, Any]] = {}
+        if cut_path:
+            staged = _buffer_from_cut(
+                cut_path, _lookup_path(parsed, cut_path), parsed
+            )
+            if staged:
+                buffers[staged[0]] = staged[1]
+        if buffers or _parsed_has_content(parsed):
+            if note not in notes:
+                notes.append(note)
+            return TruncationRecovery(parsed=parsed, buffers=buffers, notes=notes)
+    buffers = _fence_buffers(raw)
+    if buffers:
+        notes.append("recovered partial file bodies from fenced blocks")
+        return TruncationRecovery(parsed=None, buffers=buffers, notes=notes)
+    return None
 
 
 __all__ = ["LLMAgent"]

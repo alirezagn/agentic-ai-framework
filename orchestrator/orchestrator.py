@@ -33,9 +33,10 @@ from .agents.base_agent import (
     normalize_agent_name,
     preexisting_expected,
 )
+from .auto_plan import PLANNING_RULES, expand_implementation_stages
 from .checkpoint_manager import CheckpointManager
 from .context_monitor import tokens_for_output, utilization_for_output
-from .deploy_runner import DeployRecord, DeployRunner
+from .deploy_runner import STATUS_SKIPPED, DeployRecord, DeployRunner
 from .state_manager import (
     UNTRUSTED_TASK_FIELDS,
     StateError,
@@ -788,7 +789,8 @@ class MasterOrchestrator:
             "that another task in this plan will produce (its "
             "expected_outputs), declare that task in dependencies — the "
             "review/synthesis task must always run after the tasks whose "
-            "outputs it reads."
+            "outputs it reads.\n\n"
+            f"{PLANNING_RULES}"
         )
         plan_task: Dict[str, Any] = {
             "id": "PLAN-001",
@@ -824,6 +826,11 @@ class MasterOrchestrator:
         specs = self._normalize_plan_specs(raw[:max_tasks])
         if not specs:
             raise StateError("planning output contained no usable task specs")
+        # Architecture rule: a GUI or multi-module goal may not ship as one
+        # "implement everything" task. The contract asks the model for the
+        # stage chain; this is the deterministic pass that enforces it when
+        # the plan arrives anyway as a single implementation task.
+        specs = expand_implementation_stages(specs, goal=goal_text)
         prepared: List[Dict[str, Any]] = []
         # G11: remember the model's REQUESTED inputs per task — existence
         # filtering below drops exactly the not-yet-created artifacts (the
@@ -1561,6 +1568,19 @@ class MasterOrchestrator:
 
         ground_truth = [record for record in records if record.executed]
         if not ground_truth:
+            skipped = [record for record in records if record.status == STATUS_SKIPPED]
+            if (
+                records
+                and len(skipped) == len(records)
+                and not claims
+                and not test_like_outputs
+            ):
+                # Every requested command was a redundant install already
+                # satisfied in the target environment: there was genuinely
+                # nothing to run, and nothing was invented. A claim of a
+                # passing run is never backed by a skip, so `claims` still
+                # falls through to the refusal below.
+                return problems
             reported = str(data.get("test_status") or "").strip().upper()
             if reported == config.TEST_STATUS_NOT_RUN:
                 # Honest negative. Nothing ran, and the agent said so.
