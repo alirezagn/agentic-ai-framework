@@ -1,0 +1,22 @@
+{
+  "args": [
+    "test_sys_mon.py"
+  ],
+  "artifact_path": null,
+  "command": "python3",
+  "cwd": "/media/alireza/microos/projects/agentic-ai-framework/projects/sys_mon",
+  "declared_expect": "PASS",
+  "duration_ms": 199,
+  "executed": true,
+  "exit_code": 1,
+  "expect_matched": false,
+  "reason": "",
+  "recorded_at": "2026-10-02T07:30:54Z",
+  "status": "executed",
+  "stderr_tail": "Traceback (most recent call last):\n  File \"/media/alireza/microos/projects/agentic-ai-framework/projects/sys_mon/test_sys_mon.py\", line 4, in <module>\n    from sys_mon import get_system_metrics\n  File \"/media/alireza/microos/projects/agentic-ai-framework/projects/sys_mon/sys_mon.py\", line 2, in <module>\n    import psutil\nModuleNotFoundError: No module named 'psutil'\n",
+  "stderr_truncated": false,
+  "stdout_tail": "",
+  "stdout_truncated": false,
+  "task_id": "TASK-002",
+  "transcript": "$ python3 test_sys_mon.py\nexecuted: True | status: executed | exit_code: 1\ndeclared expectation: PASS (matched: False)\n--- stderr ---\nTraceback (most recent call last):\n  File \"/media/alireza/microos/projects/agentic-ai-framework/projects/sys_mon/test_sys_mon.py\", line 4, in <module>\n    from sys_mon import get_system_metrics\n  File \"/media/alireza/microos/projects/agentic-ai-framework/projects/sys_mon/sys_mon.py\", line 2, in <module>\n    import psutil\nModuleNotFoundError: No module named 'psutil'\n"
+}

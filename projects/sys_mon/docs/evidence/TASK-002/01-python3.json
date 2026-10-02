@@ -1,0 +1,22 @@
+{
+  "args": [
+    "test_sys_mon.py"
+  ],
+  "artifact_path": null,
+  "command": "python3",
+  "cwd": "/media/alireza/microos/projects/agentic-ai-framework/projects/sys_mon",
+  "declared_expect": "PASS",
+  "duration_ms": 120,
+  "executed": true,
+  "exit_code": 0,
+  "expect_matched": true,
+  "reason": "",
+  "recorded_at": "2026-10-02T07:57:52Z",
+  "status": "executed",
+  "stderr_tail": ".........\n----------------------------------------------------------------------\nRan 9 tests in 2.021s\n\nOK\n",
+  "stderr_truncated": false,
+  "stdout_tail": "",
+  "stdout_truncated": false,
+  "task_id": "TASK-002",
+  "transcript": "$ python3 test_sys_mon.py\nexecuted: True | status: executed | exit_code: 0\ndeclared expectation: PASS (matched: True)\n--- stderr ---\n.........\n----------------------------------------------------------------------\nRan 9 tests in 2.021s\n\nOK\n"
+}

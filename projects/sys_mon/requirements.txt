@@ -1,0 +1,4 @@
+# Runtime dependencies for sys_mon.py.
+# Declared so the install is reproducible and so `pip install -r requirements.txt`
+# is the single command that sets the project up.
+psutil>=5.9

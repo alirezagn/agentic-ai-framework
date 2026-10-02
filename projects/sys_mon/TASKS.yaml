@@ -1,0 +1,134 @@
+tasks:
+- title: Develop sys_mon.py
+  owner: software_agent
+  priority: CRITICAL
+  dependencies: []
+  expected_outputs:
+  - sys_mon.py
+  acceptance_criteria:
+  - sys_mon.py produces JSON output containing CPU, RAM, and disk usage
+  input_files:
+  - docs/README.md
+  notes: Implemented sys_mon.py to fetch and output CPU, RAM, and disk usage as JSON.
+  id: TASK-001
+  status: DONE
+  execution:
+    attempt_count: 1
+    no_progress_cycles: 0
+    strategy_changes: 0
+    attempts_since_change: 1
+    recovering: false
+    last_error: null
+    retry_reason: null
+    last_output_hash: 543626a12f373fb399a6da501a5b53c56398064948fb1e3a9073e32d0ab32a88
+    repeated_output_count: 1
+    evidence_stall_count: 0
+    known_artifacts:
+    - docs/sys_mon.py
+    - sys_mon.py
+    last_loop: null
+  review:
+    required: false
+    status: NOT_STARTED
+- title: Develop test_sys_mon.py
+  owner: software_agent
+  priority: HIGH
+  dependencies:
+  - TASK-001
+  expected_outputs:
+  - test_sys_mon.py
+  acceptance_criteria:
+  - test_sys_mon.py verifies the JSON structure of sys_mon.py output
+  input_files:
+  - docs/README.md
+  - sys_mon.py
+  notes: Updated test_sys_mon.py to include the correct JSON structure verification
+    and dependency handling.
+  id: TASK-002
+  status: DONE
+  execution:
+    attempt_count: 3
+    no_progress_cycles: 0
+    strategy_changes: 0
+    attempts_since_change: 1
+    recovering: false
+    last_error: null
+    retry_reason: null
+    last_output_hash: 3ed6e46beb632a10a74541ee4827725a52de33f0dade735a158754e823269f38
+    repeated_output_count: 1
+    evidence_stall_count: 0
+    known_artifacts:
+    - docs/test_sys_mon.py
+    - test_sys_mon.py
+    last_loop: null
+  review:
+    required: false
+    status: NOT_STARTED
+- title: Execute tests and collect evidence
+  owner: test_agent
+  priority: CRITICAL
+  dependencies:
+  - TASK-002
+  expected_outputs:
+  - docs/evidence/test_results.txt
+  acceptance_criteria:
+  - test_sys_mon.py executes successfully and results are saved
+  input_files:
+  - docs/README.md
+  - test_sys_mon.py
+  notes: Initiated test execution request to the runner to collect evidence.
+  id: TASK-003
+  status: DONE
+  execution:
+    attempt_count: 1
+    no_progress_cycles: 0
+    strategy_changes: 0
+    attempts_since_change: 1
+    recovering: false
+    last_error: null
+    retry_reason: null
+    last_output_hash: a39d3b471358b21800130e66985719fc6805b23aab47d4bcb92f550a311c5c8a
+    repeated_output_count: 1
+    evidence_stall_count: 0
+    known_artifacts:
+    - docs/evidence/test_results.txt
+    - docs/test_results.txt
+    last_loop: null
+  review:
+    required: false
+    status: NOT_STARTED
+- title: Final documentation and review
+  owner: documentation_agent
+  priority: MEDIUM
+  dependencies:
+  - TASK-003
+  expected_outputs:
+  - docs/FINAL_REPORT.md
+  acceptance_criteria:
+  - docs/FINAL_REPORT.md summarizes the project and includes evidence links
+  input_files:
+  - docs/README.md
+  - docs/evidence/test_results.txt
+  notes: Summarize the project completion and link to the evidence folder.
+  id: TASK-004
+  status: READY
+  execution:
+    attempt_count: 0
+    no_progress_cycles: 0
+    strategy_changes: 0
+    attempts_since_change: 0
+    recovering: false
+    last_error: null
+    retry_reason: null
+  review:
+    required: false
+    status: NOT_STARTED
+parallel_groups: []
+critical_path:
+  path: TASK-001 -> TASK-002 -> TASK-003 -> TASK-004
+summary:
+  total: 0
+  total_tasks: 4
+  status_breakdown:
+    DONE: 3
+    READY: 1
