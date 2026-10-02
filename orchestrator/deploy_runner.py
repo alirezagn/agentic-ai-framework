@@ -566,6 +566,19 @@ class DeployRunner:
             declared_expect=declared_expect,
             expect_matched=expect_matched,
         )
+        # GAP-MED-01: one structured event per real invocation. Only the shape
+        # and the outcome are recorded — never stdout/stderr, which routinely
+        # contain build paths, environment echoes, and occasionally credentials.
+        config.emit_telemetry(
+            config.TELEMETRY_EVENT_DEPLOY,
+            level="INFO",
+            command_name=command,
+            executed=True,
+            exit_code=record.exit_code,
+            duration_ms=elapsed,
+            expect_matched=expect_matched,
+            argv=record.argv,
+        )
         logger.info(
             "deploy: '%s' exited %s in %dms",
             command,

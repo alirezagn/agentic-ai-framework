@@ -1150,6 +1150,34 @@ class StateManager:
         tasks = list(document.get("tasks") or [])
         existing_ids = {str(task.get("id")) for task in tasks}
 
+        # GAP-MED-02: refuse to add a task that would *join* a dependency cycle,
+        # before writing. A cycle is unfixable by waiting (every task in it
+        # waits for the others), so it must never reach the file where it would
+        # silently strand the graph.
+        #
+        # Scoped to cycles the new task participates in. A cycle that already
+        # exists elsewhere in the graph must not block unrelated new work — it
+        # is reported by validate() and fixed with `waive`. A blanket rejection
+        # would make the graph unappendable until an unrelated defect was
+        # cleared, which is a worse failure than the one being prevented.
+        new_id = str((spec or {}).get("id") or "").strip() or "__new__"
+        probe: Dict[str, Any] = dict(spec) if isinstance(spec, dict) else {}
+        probe["id"] = new_id
+        probe["dependencies"] = _dependency_ids_of(probe)
+        prospective = [
+            {**item, "id": str(item.get("id")), "dependencies": _dependency_ids_of(item)}
+            for item in tasks
+            if isinstance(item, dict) and item.get("id")
+        ]
+        prospective.append(probe)
+        cycles = self.find_dependency_cycles(prospective)
+        joined = [cycle for cycle in cycles if new_id in cycle]
+        if joined:
+            raise StateError(
+                "Task spec would create a dependency cycle: "
+                + "; ".join(" -> ".join(cycle + [cycle[0]]) for cycle in joined)
+            )
+
         task = dict(spec)
         task_id = str(task.get("id") or "").strip()
         if not task_id:
@@ -1873,6 +1901,87 @@ class StateManager:
         lines.append("=" * 60)
         return "\n".join(lines)
 
+    @staticmethod
+    def find_dependency_cycles(
+        tasks: Sequence[Dict[str, Any]],
+    ) -> List[List[str]]:
+        """Return every dependency cycle in ``tasks`` (GAP-MED-02).
+
+        Iterative three-colour DFS. Reports each cycle once, as a node-ordered
+        path, so an error message can name the exact chain to break.
+
+        Iterative rather than recursive on purpose: a plan can produce a graph
+        thousands of tasks deep, and the recursive form would hit Python's
+        recursion limit and surface as ``RecursionError`` — turning a structural
+        problem into an opaque crash inside a status mutation.
+
+        A self-dependency (``TASK-001 -> TASK-001``) is reported as a
+        single-node cycle, which is the shape that is easiest to miss and
+        permanently blocks a task.
+        """
+        graph: Dict[str, List[str]] = {}
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("id"))
+            if not task_id or task_id == "None":
+                continue
+            raw = task.get("dependencies") or []
+            graph[task_id] = [str(item) for item in raw] if isinstance(raw, list) else []
+
+        WHITE, GRAY, BLACK = 0, 1, 2
+        colour: Dict[str, int] = {node: WHITE for node in graph}
+        cycles: List[List[str]] = []
+        seen: set = set()
+
+        for start in graph:
+            if colour.get(start, WHITE) != WHITE:
+                continue
+            # Each frame is (node, iterator over its remaining dependencies).
+            stack: List[List[Any]] = [[start, iter(graph.get(start, []))]]
+            path: List[str] = [start]
+            colour[start] = GRAY
+            while stack:
+                frame = stack[-1]
+                node = frame[0]
+                advanced = False
+                for neighbour in frame[1]:
+                    if neighbour not in graph:
+                        # Unknown dependency: reported separately by validate().
+                        continue
+                    state = colour.get(neighbour, WHITE)
+                    if state == WHITE:
+                        colour[neighbour] = GRAY
+                        stack.append([neighbour, iter(graph.get(neighbour, []))])
+                        path.append(neighbour)
+                        advanced = True
+                        break
+                    if state == GRAY:
+                        # Back edge: everything from `neighbour` onward is a cycle.
+                        if neighbour in path:
+                            cycle = path[path.index(neighbour):]
+                        else:
+                            cycle = [neighbour]
+                        key = frozenset(cycle)
+                        if key not in seen:
+                            seen.add(key)
+                            cycles.append(list(cycle))
+                if not advanced:
+                    colour[node] = BLACK
+                    stack.pop()
+                    if path and path[-1] == node:
+                        path.pop()
+        return cycles
+
+    def _cycle_problems(self, tasks: Sequence[Dict[str, Any]]) -> List[str]:
+        """Human-readable cycle problems for a task list."""
+        return [
+            "TASKS.yaml: dependency cycle "
+            + " -> ".join(cycle + [cycle[0]])
+            + f" ({len(cycle)} task(s)); break one edge with `waive`"
+            for cycle in self.find_dependency_cycles(tasks)
+        ]
+
     def validate(self) -> List[str]:
         """Return a list of structural problems found in the state files."""
         problems: List[str] = []
@@ -1888,7 +1997,7 @@ class StateManager:
 
         tasks = document.get("tasks") or []
         known_ids = {task.get("id") for task in tasks if isinstance(task, dict)}
-        seen_ids: Iterable[str] = []
+        seen_ids: set = set()
         for task in tasks:
             if not isinstance(task, dict):
                 problems.append("TASKS.yaml: every entry under 'tasks' must be a mapping")
@@ -1899,13 +2008,34 @@ class StateManager:
                 continue
             if task_id in seen_ids:
                 problems.append(f"TASKS.yaml: duplicate task id '{task_id}'")
-            seen_ids = list(seen_ids) + [task_id]
+            seen_ids.add(task_id)
             status = task.get("status")
             if status not in config.TASK_STATUSES:
                 problems.append(f"TASKS.yaml: task '{task_id}' has invalid status '{status}'")
-            for dep in task.get("dependencies") or []:
+            # GAP-MED-02: a cycle is a structural defect, not a health warning.
+            # validate() is the check operators are told to run, so it has to
+            # see cycles — previously only a separate `health` call could.
+            raw_dependencies = task.get("dependencies")
+            dependency_list = (
+                raw_dependencies if isinstance(raw_dependencies, list) else []
+            )
+            for dep in dependency_list:
                 if dep not in known_ids:
-                    problems.append(f"TASKS.yaml: task '{task_id}' depends on unknown task '{dep}'")
+                    problems.append(
+                        f"TASKS.yaml: task '{task_id}' depends on unknown task '{dep}'"
+                    )
+                if str(dep) == str(task_id):
+                    problems.append(
+                        f"TASKS.yaml: task '{task_id}' depends on itself (self-cycle); "
+                        "break it with `waive`"
+                    )
+            if raw_dependencies is not None and not isinstance(raw_dependencies, list):
+                problems.append(
+                    f"TASKS.yaml: task '{task_id}' 'dependencies' must be a list, "
+                    f"got {type(raw_dependencies).__name__} (silently treated as empty)"
+                )
+
+        problems.extend(self._cycle_problems([t for t in tasks if isinstance(t, dict)]))
         return problems
 
 

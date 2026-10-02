@@ -15,10 +15,13 @@ tuned in exactly one place.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +538,97 @@ LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 DEFAULT_LOG_LEVEL = "INFO"
 
+# GAP-MED-01: machine-readable error telemetry, emitted as single-line JSON so a
+# log shipper can parse it without a grok pattern. The human-readable
+# ``LOG_FORMAT`` above is unchanged — an operator tailing stderr should not have
+# to decode JSON — so the two coexist: human output on the console, structured
+# events on a dedicated channel.
+#
+# One JSON object per line, keys stable across releases. The logger is
+# ``orchestrator.telemetry`` and the sink is added only when
+# ORCHESTRATOR_TELEMETRY_FILE (or an ORCHESTRATOR_TELEMETRY_DIR) is configured,
+# so the default run writes no extra file.
+TELEMETRY_LOGGER_NAME = "orchestrator.telemetry"
+
+#: Event names. Stable identifiers: dashboards and alerts key on these, so a
+#: rename is a breaking change.
+TELEMETRY_EVENT_ERROR = "command.error"
+TELEMETRY_EVENT_COMMAND = "command.start"
+TELEMETRY_EVENT_COMMAND_DONE = "command.done"
+TELEMETRY_EVENT_DEPLOY = "deploy.result"
+TELEMETRY_EVENT_CHECKPOINT = "checkpoint.created"
+TELEMETRY_EVENT_COMPACTION = "context.compaction"
+
+#: Fields always present in a telemetry record, so consumers can rely on them
+#: without null-checking every access.
+TELEMETRY_FIELDS = ("event", "ts", "level", "command", "exc_type", "message")
+
+#: Never logged, in any channel. Secrets that live in the environment, a signed
+#: checkpoint, and any value that looks like a credential must not reach a log
+#: file, so a shipped telemetry sink cannot become a credential store.
+TELEMETRY_REDACT_KEYS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "checkpoint_signing_key",
+    "llm_api_key",
+    "openrouter_api_key",
+    "password",
+    "secret",
+    "signing_key",
+    "token",
+)
+
+def telemetry_file() -> str:
+    """Destination for JSON telemetry events, or ``""`` when disabled.
+
+    Read dynamically so a test can point it at a ``tmp_path`` without reimporting
+    ``config``. An empty result means the channel is off and no file is written.
+    """
+    explicit = os.environ.get("ORCHESTRATOR_TELEMETRY_FILE", "").strip()
+    if explicit:
+        return explicit
+    directory = os.environ.get("ORCHESTRATOR_TELEMETRY_DIR", "").strip()
+    if directory:
+        return os.path.join(directory, "telemetry.jsonl")
+    return ""
+
+
+def redact(value: Any, _depth: int = 0) -> Any:
+    """Recursively replace credential-looking values with ``"***"``.
+
+    GAP-MED-01. Telemetry is written to disk, which makes it durable in a way
+    stdout is not, so anything recorded there outlives the run. Redaction is by
+    key name (and by a value-shape heuristic) rather than by call site, so a new
+    field is safe by default instead of safe only if someone remembered.
+    """
+    if _depth > 6:
+        return "***"
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(marker in lowered for marker in TELEMETRY_REDACT_KEYS):
+                cleaned[str(key)] = "***"
+            else:
+                cleaned[str(key)] = redact(item, _depth + 1)
+        return cleaned
+    if isinstance(value, (list, tuple)):
+        return [redact(item, _depth + 1) for item in value]
+    if isinstance(value, str) and _looks_like_secret(value):
+        return "***"
+    return value
+
+
+_SECRET_SHAPES = ("sk-", "ghp_", "gho_", "xoxb-", "xoxp-", "AKIA", "Bearer ")
+
+
+def _looks_like_secret(value: str) -> bool:
+    """Heuristic: is this string shaped like a credential?"""
+    if len(value) < 16:
+        return False
+    return any(value.startswith(prefix) for prefix in _SECRET_SHAPES)
+
 # A cycle with no status fingerprint change counts as "no progress".
 MAX_CONSECUTIVE_IDLE_CYCLES = LOOP_THRESHOLDS.no_progress_max_cycles
 
@@ -736,6 +830,82 @@ def allow_unsigned_checkpoints() -> bool:
     operator can set it without a code change.
     """
     return _env_flag("CHECKPOINT_ALLOW_UNSIGNED", ALLOW_UNSIGNED)
+
+
+# ---------------------------------------------------------------------------
+# Structured error telemetry (GAP-MED-01)
+# ---------------------------------------------------------------------------
+
+
+def get_telemetry_logger() -> Optional["logging.Logger"]:
+    """Return the JSON telemetry logger, or ``None`` when the channel is off.
+
+    Configured lazily on first use so importing ``config`` never creates a file.
+    Writes append-only JSON Lines, which survives the append-only state files
+    this repository already relies on.
+    """
+    destination = telemetry_file()
+    if not destination:
+        return None
+    logger = logging.getLogger(TELEMETRY_LOGGER_NAME)
+    if getattr(logger, "_orchestrator_configured", False):
+        return logger
+    try:
+        parent = os.path.dirname(os.path.abspath(destination))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        handler = logging.FileHandler(destination, encoding="utf-8")
+    except OSError:
+        # Telemetry must never be the reason a run fails.
+        return None
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    # Structured events go to the file, never to stderr: they are machine
+    # output and would only confuse an operator reading the human log.
+    logger.propagate = False
+    logger._orchestrator_configured = True  # type: ignore[attr-defined]
+    return logger
+
+
+def emit_telemetry(
+    event: str,
+    *,
+    level: str = "INFO",
+    exc_type: str = "",
+    message: str = "",
+    **fields: Any,
+) -> None:
+    """Record one structured event. A no-op when telemetry is not configured.
+
+    Never raises: telemetry is observability, and a logging failure must not
+    escalate into an operational one.
+    """
+    logger = get_telemetry_logger()
+    if logger is None:
+        return
+    try:
+        record: Dict[str, Any] = {
+            "event": str(event),
+            "ts": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "level": str(level).upper(),
+            "command": str(fields.pop("command", "") or ""),
+            "exc_type": str(exc_type or ""),
+            "message": _telemetry_text(message),
+        }
+        record.update(redact(fields))
+        logger.info(json.dumps(record, sort_keys=True, default=str))
+    except Exception:  # noqa: BLE001 - telemetry must not break the run
+        return
+
+
+def _telemetry_text(message: Any, limit: int = 500) -> str:
+    """Bounded, single-line rendering of a message for one-line JSON."""
+    text = " ".join(str(message or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 # Characters of an agent error retained inside TASKS.yaml.
 ERROR_SNIPPET_LENGTH = 500

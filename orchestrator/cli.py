@@ -971,8 +971,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if handler is None:
         parser.print_help()
         return 1
+    command_name = type(args).__name__ or "unknown"
+    config.emit_telemetry(
+        config.TELEMETRY_EVENT_COMMAND, command=command_name, level="INFO"
+    )
     try:
-        return int(handler(args))
+        exit_code = int(handler(args))
     except StateFileMissingError as exc:
         print(f"ERROR: {exc}")
         # Common cause: the workspace was wiped (rm -rf + rsync) without
@@ -986,13 +990,73 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"      orchestrator init {project_dir.name} "
                 f"--dest {project_dir.parent} --force --goal \"<your goal>\""
             )
+        _telemetry_error(command_name, exc)
         return 2
     except (StateError, OrchestratorError, MissingAgentError, CheckpointError) as exc:
+        logger.error("command failed: %s", exc)
         print(f"ERROR: {exc}")
+        _telemetry_error(command_name, exc)
         return 2
     except FileNotFoundError as exc:
+        logger.error("file not found: %s", exc)
         print(f"ERROR: {exc}")
+        _telemetry_error(command_name, exc)
         return 2
+    except KeyboardInterrupt:
+        # Exit 130 is the conventional shell code for SIGINT, and is distinct
+        # from 2 (state error) and 3 (loop limit) so a script can tell "the
+        # operator stopped this" from "the orchestrator gave up".
+        logger.warning("interrupted by operator")
+        print("\nERROR: interrupted", file=sys.stderr)
+        _telemetry_error(command_name, exc, level="WARNING")
+        return 130
+    except Exception as exc:
+        # GAP-MED-01. Last-resort handler. Filesystem conditions (ENOSPC, EACCES,
+        # EISDIR) and provider exceptions outside the modelled types used to
+        # escape as an interpreter traceback with exit code 1 — the code the
+        # guide reserves for "no command". An operator cannot act on a
+        # traceback, so it is logged in full and summarised on stderr.
+        #
+        # The traceback goes to the log, not to stdout: the operator gets an
+        # actionable line, and `-v` (or ORCHESTRATOR_LOG_LEVEL=DEBUG) keeps the
+        # frames available for diagnosis.
+        logger.exception("unhandled %s in %s", type(exc).__name__, command_name)
+        print(
+            f"ERROR: {type(exc).__name__}: {exc}\n"
+            f"hint: this is an unhandled internal error; re-run with -v for the "
+            f"traceback, or report it with the state files",
+            file=sys.stderr,
+        )
+        _telemetry_error(command_name, exc, unhandled=True)
+        return 2
+    config.emit_telemetry(
+        config.TELEMETRY_EVENT_COMMAND_DONE,
+        command=command_name,
+        level="INFO",
+        exit_code=exit_code,
+    )
+    return exit_code
+
+
+def _telemetry_error(
+    command_name: str,
+    exc: BaseException,
+    level: str = "ERROR",
+    unhandled: bool = False,
+) -> None:
+    """Record a command failure as one structured event (GAP-MED-01).
+
+    Split out so every failure path records the same shape, and so a failure
+    cannot be added without also being made observable.
+    """
+    config.emit_telemetry(
+        config.TELEMETRY_EVENT_ERROR,
+        command=command_name,
+        level=level,
+        exc_type=type(exc).__name__,
+        message=str(exc),
+        unhandled=bool(unhandled),
+    )
 
 
 if __name__ == "__main__":
