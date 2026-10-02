@@ -529,7 +529,17 @@ class TestEditsAuthoring:
         assert output.status == config.AGENT_STATUS_FAILED
         assert any("project-relative" in item for item in output.errors)
 
-    def test_missing_edit_target_fails(self, test_project: Path) -> None:
+    def test_missing_edit_target_is_created_with_a_warning(
+        self, test_project: Path
+    ) -> None:
+        """A patch aimed at a file that is not there is a creation, not a failure.
+
+        Behaviour change: this previously failed the dispatch with "edits target
+        does not exist", discarding content the agent had actually delivered.
+        There is nothing to patch and nothing to overwrite, so `replace` is
+        written as the file body. The mistyped-path case is still visible --
+        as a warning -- rather than being lost with the error.
+        """
         task = self._dummy_task(test_project)
         answer = _answer(
             "TASK-002",
@@ -537,8 +547,11 @@ class TestEditsAuthoring:
             edits={"no_such_file.txt": {"search": "a", "replace": "b"}},
         )
         output = self._dummy(test_project, answer).run(task)
-        assert output.status == config.AGENT_STATUS_FAILED
-        assert any("does not exist" in item for item in output.errors)
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert (test_project / "no_such_file.txt").read_text(encoding="utf-8") == "b"
+        assert any("created missing file" in item for item in output.warnings), (
+            output.warnings
+        )
 
     def test_list_of_edits_applies_in_order(self, test_project: Path) -> None:
         target = test_project / "target.txt"

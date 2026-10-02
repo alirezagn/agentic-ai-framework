@@ -47,7 +47,7 @@ agentic-ai-framework/
 │   ├── GETTING_STARTED.md
 │   ├── WORKFLOW.md
 │   └── TROUBLESHOOTING.md
-└── test_*.py, tests/       # pytest suite (927 passing)
+└── test_*.py, tests/       # pytest suite (957 passing)
 ```
 
 > `projects/kid-robot-face/` ships the seven state files and a small worked
@@ -313,7 +313,7 @@ See [meta/GETTING_STARTED.md](meta/GETTING_STARTED.md) for detailed walkthroughs
 **Last Updated:** 2026-10-02  
 **Framework Version:** 2.0.0  
 **Status:** STABLE — state engine + LLM-backed agent policy layer  
-**Test suite:** 927 passing (`python3 -m pytest -q`), hermetic and offline
+**Test suite:** 957 passing (`python3 -m pytest -q`), hermetic and offline
 
 ## Runtime at a glance
 

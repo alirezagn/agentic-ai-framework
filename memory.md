@@ -14,7 +14,7 @@
 
 - **Runtime is v2.0.0** (`pyproject.toml`, `cli.py --version`). `ORCHESTRATOR_GUIDE.md`
   is the technical reference; `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 927 tests, all passing, hermetic** (`python3 -m pytest -q`).
+- **Suite: 957 tests, all passing, hermetic** (`python3 -m pytest -q`).
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -144,7 +144,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~180 s, 927 tests).
+- Run full pytest after every change: `python3 -m pytest -q` (~210 s, 957 tests).
 - YOLO mode: no approval prompts, no TODO stubs, relative paths, autonomous execution.
 - LLM backend is stdlib-only; tests inject `FakeLLMClient` / `transport`.
   **The suite must stay offline-safe** — do not add a test that dials out.
@@ -251,6 +251,7 @@ suites added during remediation:
 | `tests/test_concurrent_appends.py` | CRIT-06 — concurrent append + id allocation |
 | `tests/test_medium_gaps.py` | MED-01/02/03, HIGH-14, LOW-10 — telemetry, cycles, compaction, README, counts |
 | `tests/test_final_critical_gaps.py` | CRIT-04/07/09 — review DoD threading, `.env` containment, prompt schema |
+| `tests/test_materializer.py` | edits materialization — full write when nothing to patch |
 | `tests/test_cli_init.py` | init destination resolution, name validation, traversal refusal |
 | `tests/test_dependency_automation.py` | dependency contract — declaration, install ordering, honest refusal, `sys_mon` regression |
 | `tests/test_final_high_gaps.py` | audit HIGH-01..04 — pinned-agent isolation, checkpoint trigger evaluation, off-lock DoD repair, deep validation + reachability |

@@ -837,8 +837,25 @@ class BaseAgent:
         The post-edit content is mirrored into ``data.documents`` so the
         normal ``docs/`` materialization (and the DoD existence check) sees
         the actual file body instead of a fallback wrapper. Any problem
-        (path escape, missing/ambiguous search, unreadable file) fails the
-        output with a precise error instead of silently delivering a stub.
+        (path escape, ambiguous search, unreadable file) fails the output with
+        a precise error instead of silently delivering a stub.
+
+        When there is nothing to patch, the edit is a full write rather than a
+        failure. Two cases, because both are requests whose intent is
+        unambiguous:
+
+        * ``search`` is empty, absent or ``null`` — the caller is describing
+          the whole file, so ``replace`` becomes the entire content. This also
+          works on a file that *does* exist, which makes it a deliberate reset.
+        * the target is missing or empty — there is no content to search in and
+          nothing to overwrite, so the first step's ``replace`` is written as a
+          creation. Subsequent steps then patch that content normally, so a
+          later ambiguous search is still reported honestly instead of being
+          papered over.
+
+        A missing target used to raise ``FileNotFoundError`` and an empty
+        ``search`` a ``ValueError``, either of which failed the whole dispatch
+        for content the agent had in fact delivered.
         """
         edits = output.data.get("edits")
         if not isinstance(edits, dict) or not edits:
@@ -862,8 +879,6 @@ class BaseAgent:
                 resolved = resolved.resolve()
                 if not resolved.is_relative_to(project_root):
                     raise OSError(f"path escapes project: {rel}")
-                if not resolved.is_file():
-                    raise FileNotFoundError(f"edits target does not exist: {rel}")
                 steps = spec if isinstance(spec, list) else [spec]
                 if not steps:
                     raise ValueError(f"edits[{rel!r}] is an empty list")
@@ -875,19 +890,41 @@ class BaseAgent:
                         )
                     search = step.get("search")
                     replace = step.get("replace")
-                    if not isinstance(search, str) or not search or not isinstance(replace, str):
+                    # An absent or null 'search' is a request to write the file
+                    # rather than patch it, and is treated exactly like
+                    # search="". Rejecting it outright used to fail the whole
+                    # dispatch for a request with an obvious intent.
+                    if search is None:
+                        search = ""
+                    if not isinstance(search, str):
                         raise ValueError(
-                            f"edits[{rel!r}][{index}] needs a non-empty string "
-                            "'search' and a string 'replace'"
+                            f"edits[{rel!r}][{index}] needs a string 'search' "
+                            "(empty means a full write) and a string 'replace'"
+                        )
+                    if not isinstance(replace, str):
+                        raise ValueError(
+                            f"edits[{rel!r}][{index}] needs a string 'replace'"
                         )
                     parsed.append({"search": search, "replace": replace})
-                content = resolved.read_text(encoding="utf-8")
+                # A missing file reads as empty instead of raising: there is
+                # nothing to patch, so the edit is a creation.
+                existed = resolved.is_file()
+                content = resolved.read_text(encoding="utf-8") if existed else ""
             except (OSError, UnicodeDecodeError, ValueError) as exc:
                 output.status = config.AGENT_STATUS_FAILED
                 output.errors.append(str(exc))
                 return
             updated = content
+            # True only while real content exists to patch. An empty or absent
+            # file offers nothing to search in and has nothing to lose, so
+            # writing over it is the honest reading of the edit -- previously a
+            # "matched 0 times" failure that discarded the delivered content.
+            patchable = bool(content)
             for index, step in enumerate(parsed):
+                if not step["search"] or not patchable:
+                    updated = step["replace"]
+                    patchable = True
+                    continue
                 matches = updated.count(step["search"])
                 if matches != 1:
                     output.status = config.AGENT_STATUS_FAILED
@@ -898,11 +935,25 @@ class BaseAgent:
                     return
                 updated = updated.replace(step["search"], step["replace"], 1)
             try:
+                # A creation may name a path whose parent does not exist yet;
+                # the atomic writer needs that directory to stage its temp file.
+                if not resolved.parent.is_dir():
+                    resolved.parent.mkdir(parents=True, exist_ok=True)
                 save_text_file(resolved, updated)
             except OSError as exc:
                 output.status = config.AGENT_STATUS_FAILED
                 output.errors.append(f"edits[{rel!r}] write failed: {exc}")
                 return
+            # The old code failed this output outright; the whole point of the
+            # graceful path is that delivered content is not discarded. Record
+            # it instead, so a patch aimed at a file that was not there stays
+            # visible (a mistyped path is the likely cause).
+            if not existed or not content:
+                output.warnings.append(
+                    f"edits[{rel!r}] created {'missing' if not existed else 'empty'} "
+                    f"file with {len(parsed)} step(s); the requested content was "
+                    "written rather than patched into existing text"
+                )
             documents.setdefault(rel, updated)
             output.artifacts.append(rel)
 
