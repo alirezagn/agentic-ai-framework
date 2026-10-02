@@ -548,17 +548,38 @@ class CheckpointManager:
         checkpoint_id: str,
         notes: str = "",
         source_path: Optional[str | Path] = None,
+        *,
+        overwrite: bool = False,
     ) -> Checkpoint:
-        """Snapshot every state file of the project into an isolated directory."""
+        """Snapshot every state file of the project into an isolated directory.
+
+        With ``overwrite=True`` an existing directory for the same id is
+        replaced instead of raising. Bookkeeping snapshots (``cp-risk-*``,
+        ``cp-phase-*``, ``cp-auto-*``) must never stop a dispatch: a risk id
+        comes back whenever ``RISKS.md`` is rewritten by a fresh plan while
+        the old checkpoint directory is still on disk, and that collision used
+        to fail the task with an error about the checkpoint rather than about
+        the task. The default stays strict for callers that mean to reuse an
+        id by accident.
+        """
         if not checkpoint_id:
             raise CheckpointError("checkpoint_id must be a non-empty string")
         target_dir = self.checkpoint_dir(checkpoint_id)
-        if target_dir.exists():
-            raise CheckpointExistsError(f"Checkpoint '{checkpoint_id}' already exists at {target_dir}")
 
         source = Path(source_path).expanduser().resolve() if source_path else self.project_path
         if not source.exists():
             raise CheckpointError(f"Snapshot source does not exist: {source}")
+
+        if target_dir.exists():
+            if not overwrite:
+                raise CheckpointExistsError(
+                    f"Checkpoint '{checkpoint_id}' already exists at {target_dir}"
+                )
+            logger.warning(
+                "checkpoint '%s' already exists — replacing it (overwrite=True)",
+                checkpoint_id,
+            )
+            shutil.rmtree(target_dir)
 
         target_dir.mkdir(parents=True, exist_ok=False)
 

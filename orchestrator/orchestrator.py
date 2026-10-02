@@ -569,10 +569,22 @@ class MasterOrchestrator:
                         f"{risk_id} recorded in RISKS.md for {task_id}"
                     ]
                     if self.auto_checkpoint:
-                        self.create_checkpoint(
-                            f"cp-risk-{risk_id}",
-                            notes=f"Failure risk {risk_id} recorded for {task_id}",
+                        # Best-effort: the task is already FAILED with its own
+                        # error text. Failing it again with a checkpoint
+                        # collision would hide the real cause behind
+                        # bookkeeping (the exact `cp-risk-RISK-001 already
+                        # exists` failure that stopped a whole run).
+                        risk_checkpoint = self._safe_auto_checkpoint(
+                            lambda: self.create_checkpoint(
+                                f"cp-risk-{risk_id}",
+                                notes=f"Failure risk {risk_id} recorded for {task_id}",
+                            ),
+                            "risk",
                         )
+                        if risk_checkpoint:
+                            output.warnings = list(output.warnings) + [
+                                f"checkpoint: {risk_checkpoint}"
+                            ]
 
             self._record_loop_signals(task_id, task, output)
             self._ingest_output_tasks(output)
@@ -591,7 +603,9 @@ class MasterOrchestrator:
             self.state.recompute_derived_state()
             # Side effect first, then pick the *reported* id: compaction >
             # milestone > phase (every check must run — no short-circuit).
-            phase_checkpoint = self._checkpoint_phase_advance(previous_phase)
+            phase_checkpoint = self._safe_auto_checkpoint(
+                lambda: self._checkpoint_phase_advance(previous_phase), "phase"
+            )
             self._record_fingerprint()
             loop_now = None
             for detection in self.supervisor.detect_loops([after]):
@@ -611,8 +625,12 @@ class MasterOrchestrator:
             # merely a value, so evaluating all of them is correct; only one
             # checkpoint is then created, because a compaction and a milestone
             # completing in the same instant are the same event.
-            auto_checkpoint_id = self._maybe_auto_checkpoint(after)
-            milestone_checkpoint_id = self.check_milestones()
+            auto_checkpoint_id = self._safe_auto_checkpoint(
+                lambda: self._maybe_auto_checkpoint(after), "auto"
+            )
+            milestone_checkpoint_id = self._safe_auto_checkpoint(
+                self.check_milestones, "milestone"
+            )
             checkpoint_id = (
                 auto_checkpoint_id
                 or milestone_checkpoint_id
@@ -2372,12 +2390,37 @@ class MasterOrchestrator:
         self.state.append_changelog(f"Auto checkpoint {checkpoint_id} ({reason})")
         return checkpoint_id
 
-    def create_checkpoint(self, checkpoint_id: str, notes: str = "") -> str:
+    def create_checkpoint(
+        self, checkpoint_id: str, notes: str = "", *, overwrite: bool = True
+    ) -> str:
+        """Snapshot the project under ``checkpoint_id``.
+
+        An existing id is **replaced** by default (``overwrite=True``): these
+        are bookkeeping snapshots — ``cp-risk-*`` comes back whenever a fresh
+        plan rewrites ``RISKS.md`` while the old directory is still on disk —
+        and a name collision must never fail the task that triggered it. Pass
+        ``overwrite=False`` to keep the strict "id must be new" behaviour.
+        """
         self.state.record_checkpoint(checkpoint_id)
-        self.checkpoints.create_checkpoint(checkpoint_id, notes=notes)
+        self.checkpoints.create_checkpoint(
+            checkpoint_id, notes=notes, overwrite=overwrite
+        )
         self.state.append_changelog(f"Checkpoint {checkpoint_id} saved. {notes}".strip())
         logger.info("checkpoint '%s' saved", checkpoint_id)
         return checkpoint_id
+
+    def _safe_auto_checkpoint(self, maker: Callable[[], Optional[str]], label: str) -> Optional[str]:
+        """Run an auto-checkpoint trigger; a snapshot must never fail a task.
+
+        Every caller is in the dispatch finalize path: the task's work is
+        already done and persisted, so an I/O error while snapshotting may
+        only cost the snapshot — not the dispatch, and not the wave.
+        """
+        try:
+            return maker()
+        except Exception as exc:  # noqa: BLE001 - bookkeeping is best-effort
+            logger.warning("%s checkpoint skipped: %s", label, exc)
+            return None
 
     def resume_from_checkpoint(self, checkpoint_id: str, isolated: bool = False) -> Path:
         if isolated:
