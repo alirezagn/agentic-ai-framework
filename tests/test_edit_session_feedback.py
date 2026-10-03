@@ -190,6 +190,119 @@ class TestDoDFeedbackCarriesFileContent:
 
 
 # ===========================================================================
+# The session's delivery scope is cumulative across turns
+# ===========================================================================
+
+
+class TestSessionDeliveryScopeIsCumulative:
+    """A later turn must not narrow the scope the session is judged against.
+
+    Failure this pins (sys-usage TASK-005, rerun 3): turn 2 of the session
+    delivered ``collector.py`` / ``processor.py`` / ``formatter.py`` and the
+    checker flagged ``processor.py``'s undeclared ``typing_extensions``
+    import; turn 3 answered with a *different* clean file only, its own
+    per-turn delivery set had no problems, and the session returned COMPLETED
+    with the import defect forgotten — the dispatch-level DoD re-read only
+    turn 3's keys, so nothing short of the executed-verification gate could
+    catch it.
+    """
+
+    BAD_IMPORT_BODY = "from typing_extensions import TypedDict\n\n\n"
+    FIXED_BODY = "from typing import TypedDict\n\n\n"
+    APP_BODY = "import processor\n\n\ndef main():\n    return 0\n"
+
+    def _task(self, outputs):
+        return _collect_task(outputs)
+
+    def test_turn2_cannot_close_over_turn1s_undeclared_import(
+        self, tmp_path: Path
+    ) -> None:
+        project = build_test_project(tmp_path / "p")
+        turn1 = _answer(
+            "TASK-003",
+            "software_agent",
+            "Delivered the processor module",
+            documents={"processor.py": self.BAD_IMPORT_BODY},
+        )
+        turn2 = _answer(
+            "TASK-003",
+            "software_agent",
+            "Delivered the expected app entry point",
+            documents={"src/app.py": self.APP_BODY},
+        )
+        turn3 = _answer(
+            "TASK-003",
+            "software_agent",
+            "Replaced the undeclared typing_extensions import",
+            edits={
+                "processor.py": {
+                    "search": "from typing_extensions import TypedDict",
+                    "replace": "from typing import TypedDict",
+                }
+            },
+        )
+        agent, client = _agent(project, [turn1, turn2, turn3])
+
+        output = agent.run(self._task(["src/app.py"]))
+
+        assert output.status == config.AGENT_STATUS_COMPLETED, output.errors
+        assert len(client.calls) == 3, (
+            "turn 2 delivered a clean file while turn 1's undeclared import "
+            "was still on disk — the session must keep asking, not close"
+        )
+        # the scope the completed session claims covers every turn's files,
+        # so the dispatch-level DoD re-checks the whole delivery, not just
+        # the last reply's keys
+        touched = set(output.data.get("edits_applied") or []) | set(
+            output.data.get("documents") or {}
+        )
+        assert "processor.py" in touched
+        assert "src/app.py" in touched
+        fixed = (project / "processor.py").read_text(encoding="utf-8")
+        assert "typing_extensions" not in fixed
+
+    def test_unfixed_earlier_defect_fails_the_session(
+        self, tmp_path: Path
+    ) -> None:
+        """When later turns never repair the earlier file, the session fails
+        honestly with the original problem still attached — the turn budget
+        does not launder a defect out of the delivery contract."""
+        project = build_test_project(tmp_path / "p")
+        turn1 = _answer(
+            "TASK-003",
+            "software_agent",
+            "Delivered the processor module",
+            documents={"processor.py": self.BAD_IMPORT_BODY},
+        )
+        turn2 = _answer(
+            "TASK-003",
+            "software_agent",
+            "Delivered the expected app entry point",
+            documents={"src/app.py": self.APP_BODY},
+        )
+        turn3 = _answer(
+            "TASK-003",
+            "software_agent",
+            "Touched only the app entry point again",
+            edits={
+                "src/app.py": {
+                    "search": "def main():",
+                    "replace": "def main():  # untouched defect",
+                }
+            },
+        )
+        agent, client = _agent(project, [turn1, turn2, turn3])
+
+        output = agent.run(self._task(["src/app.py"]))
+
+        assert output.status == config.AGENT_STATUS_FAILED, output.status
+        assert any(
+            "typing_extensions" in err for err in output.errors
+        ), output.errors
+        assert len(client.calls) == 3
+
+
+# ===========================================================================
 # The helper behind the feedback
 # ===========================================================================
 

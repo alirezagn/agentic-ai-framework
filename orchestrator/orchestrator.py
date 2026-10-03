@@ -32,6 +32,7 @@ from .agents.base_agent import (
     delivery_problems,
     normalize_agent_name,
     preexisting_expected,
+    widen_delivery_scope,
 )
 from .auto_plan import PLANNING_RULES, expand_implementation_stages
 from .checkpoint_manager import CheckpointManager
@@ -522,6 +523,14 @@ class MasterOrchestrator:
                     logger.info("DoD auto-repair succeeded for %s", task_id)
                     original_output = output
                     output = repaired
+                    # The repair must not narrow the checked scope: files the
+                    # original delivery touched stay under the delivery/import
+                    # contract even when the repair reply does not mention
+                    # them (sys-usage TASK-005: the repair rewrote main.py and
+                    # the undeclared typing_extensions import in processor.py
+                    # would have dropped out of the re-evaluation — only the
+                    # executed-verification re-run still caught it).
+                    widen_delivery_scope(original_output, repaired)
                     # Ground truth must follow the repair: records from before
                     # it judge the pre-repair workspace (sys-usage TASK-006:
                     # a pytest exit 2 recorded at 16:48:12 was re-checked

@@ -248,6 +248,38 @@ def delivery_problems(
     return problems
 
 
+def widen_delivery_scope(original: "AgentOutput", repaired: "AgentOutput") -> None:
+    """Fold the original delivery's touched set into the repaired output.
+
+    A repair reply naturally mentions only the files it changed. Without the
+    fold, the DoD re-evaluation after ``repair_delivery`` would check a
+    *narrower* set than the one that was rejected, and a defect in a file the
+    repair did not rewrite would silently drop out of the contract
+    (sys-usage TASK-005: the repair rewrote ``main.py`` and the undeclared
+    ``typing_extensions`` import in ``processor.py`` left the checked scope).
+    The union lands in ``data.edits_applied``, which is the channel
+    :func:`delivery_problems` already treats as "files this delivery touched".
+    """
+    original_data = original.data if isinstance(original.data, dict) else {}
+    touched: set = set()
+    for channel in (
+        original_data.get("documents"),
+        original_data.get("edits"),
+        original_data.get("edits_applied"),
+    ):
+        if isinstance(channel, dict):
+            touched.update(str(key) for key in channel)
+        elif isinstance(channel, list):
+            touched.update(str(key) for key in channel)
+    if not touched:
+        return
+    data = dict(repaired.data) if isinstance(repaired.data, dict) else {}
+    current = data.get("edits_applied")
+    current = [str(key) for key in current] if isinstance(current, list) else []
+    data["edits_applied"] = sorted(set(current) | touched)
+    repaired.data = data
+
+
 def _repair_json_candidate(candidate: str) -> Optional[Dict[str, Any]]:
     r"""Best-effort parse of LLM JSON with common escape mistakes.
 

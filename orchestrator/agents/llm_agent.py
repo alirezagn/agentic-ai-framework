@@ -267,6 +267,14 @@ class LLMAgent(BaseAgent):
         share no history and the base prompt is frozen at session start, so
         without the quote a later turn could not see the file it is told to
         fix. At most ``EDIT_SESSION_TURNS`` model calls.
+
+        The delivery scope is *cumulative*: every turn's verdict and the
+        returned output cover all files the session has touched, not only the
+        current reply's keys. Otherwise a turn that delivers a clean file
+        while an earlier turn's defect is still on disk closes the session
+        with the defect forgotten (sys-usage TASK-005: turn 2 flagged the
+        undeclared ``typing_extensions`` import in ``processor.py``, turn 3
+        delivered a different file, and the session returned COMPLETED).
         """
         base_prompt = build_prompt(payload, agent_spec=self.spec_text())
         system = render_system_prompt(self.system_rules(), self.spec_text())
@@ -274,6 +282,7 @@ class LLMAgent(BaseAgent):
         snapshot = getattr(self, "_delivery_snapshot", None)
         if snapshot is None:
             snapshot = preexisting_expected(self.project_path, task)
+        session_touched: set = set()
         feedback = "(first turn — no previous feedback)"
         for turn in range(1, max_turns + 1):
             logger.info(
@@ -339,6 +348,10 @@ class LLMAgent(BaseAgent):
                     output.data["edits_applied"] = applied
                     output.data.pop("edits", None)
                 self._materialize_artifacts(task, output)
+                session_touched.update(applied)
+                documents = output.data.get("documents")
+                if isinstance(documents, dict):
+                    session_touched.update(str(key) for key in documents)
             if output.status != config.AGENT_STATUS_COMPLETED:
                 if turn >= max_turns:
                     return output
@@ -350,6 +363,21 @@ class LLMAgent(BaseAgent):
                 )
                 continue
 
+            if session_touched:
+                # Cumulative scope: this turn is judged against everything the
+                # session touched, so a clean reply here cannot launder an
+                # earlier turn's defect out of the contract. The widened keys
+                # stay on the returned output, which is what dispatch-level
+                # DoD re-reads.
+                current = output.data.get("edits_applied")
+                current = (
+                    [str(key) for key in current]
+                    if isinstance(current, list)
+                    else []
+                )
+                output.data["edits_applied"] = sorted(
+                    set(current) | session_touched
+                )
             delivery = delivery_problems(self.project_path, task, output, preexisting=snapshot)
             if not delivery:
                 output.warnings.append(

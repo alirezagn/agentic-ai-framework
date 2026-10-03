@@ -379,3 +379,72 @@ class TestDispatchReRunsDeployEvidenceAfterRepair:
         task = orch.get_task("TASK-002")
         assert task["status"] == config.TASK_DONE
         assert task["execution"]["last_error"] is None
+
+
+class TestRepairCannotNarrowDeliveryScope:
+    """The repair round is judged against the union, not its own reply.
+
+    Failure this pins (sys-usage TASK-005, rerun 3): the original delivery
+    touched ``processor.py`` (undeclared ``typing_extensions`` import, flagged
+    by the delivery checker) plus the expected outputs; the repair reply only
+    rewrote ``main.py``, its own delivery set had no problems, and the DoD
+    re-evaluation — which read the repaired output alone — declared the
+    delivery clean. The one gate that still caught the defect was the
+    executed-verification re-run; a task whose DoD has no deploy would have
+    gone DONE with the broken import on disk.
+    """
+
+    def test_untouched_defect_survives_the_repair_round(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = build_test_project(tmp_path / "p")
+        document = yaml.safe_load((project / "TASKS.yaml").read_text(encoding="utf-8"))
+        for entry in document["tasks"]:
+            if entry.get("id") == "TASK-002":
+                entry["expected_outputs"] = ["docs/REPORT.md"]
+                entry["acceptance_criteria"] = [
+                    "report summarizes the captured requirements"
+                ]
+        (project / "TASKS.yaml").write_text(
+            yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+        )
+
+        report = "# REPORT\n\nREQ-001 -> metrics summary\n"
+        bad_module = "from typing_extensions import TypedDict\n\n\n"
+        first = _answer(
+            "TASK-002",
+            "software_agent",
+            "Delivered the report and a helper module",
+            documents={
+                "docs/REPORT.md": report,
+                "processor.py": bad_module,
+            },
+        )
+        second = _answer(
+            "TASK-002",
+            "software_agent",
+            "Regenerated the report only",
+            documents={"docs/REPORT.md": report},
+        )
+        client = FakeLLMClient([first, second])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "software_agent"
+
+        dummy = Dummy(project_path=project, llm_client=client)
+        orch = MasterOrchestrator(
+            project, checkpoints_root=tmp_path / "ck", auto_checkpoint=False
+        )
+        monkeypatch.setattr(orch, "resolve_agent", lambda owner, fresh=False: dummy)
+
+        result = orch.dispatch("TASK-002")
+
+        assert result.new_status == config.TASK_FAILED, (
+            "the repair reply did not touch processor.py, so its undeclared "
+            "import must still be under contract in the re-evaluation",
+            result.output.summary,
+            result.output.errors,
+        )
+        assert len(client.calls) == 2, "one rejection, one repair round"
+        task = orch.get_task("TASK-002")
+        assert "typing_extensions" in str(task["execution"]["last_error"])
