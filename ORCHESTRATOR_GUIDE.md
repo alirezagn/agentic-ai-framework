@@ -287,7 +287,7 @@ is never written to a real file, and the DoD rejects content delivered only
 to `docs/` when the real file is missing (`expected output missing from the
 project`). Files the task itself created mid-session are therefore not
 mistaken for pre-existing project files — redelivery inside the session
-converges instead of looping. Two more facts reach the model up front: every existing expected output is inlined into the payload as `expected_output:<path>` (budgeted 32K per file / 40K total, rendered without middle-truncation) so `data.edits` search snippets are quoted, never guessed; and when an apply still fails, the edit-session feedback includes each target file's current body (`current content of <path> (authoritative)`).
+converges instead of looping. Two more facts reach the model up front: every existing expected output is inlined into the payload as `expected_output:<path>` (budgeted 32K per file / 40K total, rendered without middle-truncation) so `data.edits` search snippets are quoted, never guessed; and the edit-session feedback quotes each touched file's current body (`current content of <path> (authoritative)`) on **both** feedback branches — a failed apply *and* remaining DoD problems, covering `data.edits`, `data.edits_applied` and `data.documents` targets (capped at 8 files / 12K chars per body) — because the turns share no history and the base prompt is frozen at session start, when the file was still MISSING. Without that quote a later turn cannot see the file it is told to fix: the `sys-usage` TASK-003 replay, where a broken `from .architecture import …` in a file the model itself had written one turn earlier was unfixable and burned all three turns.
 
 **Derived-state recompute** (`StateManager.recompute_derived_state`) runs after
 every status mutation and on `refresh_ready_states()`:
@@ -866,7 +866,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1238 passed
+python3 -m pytest -q          # full suite — 1245 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)
