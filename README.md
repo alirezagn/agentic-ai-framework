@@ -47,7 +47,7 @@ agentic-ai-framework/
 │   ├── GETTING_STARTED.md
 │   ├── WORKFLOW.md
 │   └── TROUBLESHOOTING.md
-└── test_*.py, tests/       # pytest suite (1213 passing)
+└── test_*.py, tests/       # pytest suite (1224 passing)
 ```
 
 > `projects/kid-robot-face/` ships the seven state files and a small worked
@@ -238,6 +238,13 @@ cp -r projects/my-project checkpoints/my-project-checkpoint-001
 6. Retry within limits
 7. If alternatives fail → create HUMAN_DECISION_REQUIRED
 
+**Validation circuit-breaker (auto-waive):** two consecutive *validation*
+rejections — `DoD unmet` or a schema/structural violation, never a crash —
+auto-waive the task to `WAIVED` (terminal, satisfies dependents) with a
+WARNING in `CURRENT_STATE.md`, so a structural failure cannot park the
+project in HUMAN_DECISION_REQUIRED. Runtime failures reset the streak and
+keep the escalation path above.
+
 **Meaningful progress** means at least one of:
 - A requirement satisfied
 - A blocker removed
@@ -268,7 +275,8 @@ A task is DONE only when ALL applicable criteria pass:
 1. ✓ Requirement exists
 2. ✓ Implementation exists
 3. ✓ Testing/validation exists
-4. ✓ Acceptance criteria pass
+4. ✓ Acceptance criteria pass (a missing list falls back to owner-scoped
+   defaults, which dispatch persists into `TASKS.yaml`)
 5. ✓ Interfaces resolve — every intra-project import names a file that exists
    and a name it really defines (static `ast` check, no code is executed)
 6. ✓ Independent review passes
@@ -281,6 +289,12 @@ Possible completion states:
 - `BLOCKED` — Waiting on dependency or decision
 - `FAILED` — Unresolvable failure after recovery attempts
 - `CANCELLED` — Formally cancelled
+- `WAIVED` — Auto-waived after two consecutive DoD/schema rejections;
+  dependents proceed without a human decision (`reopen --reason` to redo it)
+
+A rejected turn keeps its analysis: `data.findings`/`data.analysis` are
+harvested to `docs/findings/<task-id>.md` and `data.risks` entries are
+mirrored into `RISKS.md`.
 
 An agent must NOT mark its own significant work DONE solely because it generated code, text, or design.
 
@@ -315,7 +329,7 @@ See [meta/GETTING_STARTED.md](meta/GETTING_STARTED.md) for detailed walkthroughs
 **Last Updated:** 2026-10-02  
 **Framework Version:** 2.0.0  
 **Status:** STABLE — state engine + LLM-backed agent policy layer  
-**Test suite:** 1213 passing (`python3 -m pytest -q`), hermetic and offline
+**Test suite:** 1224 passing (`python3 -m pytest -q`), hermetic and offline
 
 ## Runtime at a glance
 

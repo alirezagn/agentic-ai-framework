@@ -268,6 +268,14 @@ the loop counters and puts the task back to READY), or change strategy
 materially (`data.strategy_changed`), replan, or escalate to a human — never
 retry identically.
 
+Validation circuit-breaker (auto-waive): two consecutive *validation*
+rejections — `DoD unmet: ...`, schema/structural violations, unparseable
+JSON — auto-waive the task instead of escalating: status `WAIVED` (terminal,
+satisfies dependents, dependents promoted to READY in the same wave), a
+`WARNING` line in `CURRENT_STATE.md`. Crashes and connection failures never
+waive: they reset the streak and keep the retry path above. `retry`/`reopen`
+clear the streak; `reopen --reason "..."` is the human path back to READY.
+
 ---
 
 ## 6. Handle decisions and risks
@@ -531,7 +539,9 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | `agent output looks truncated` / reply cut mid-stream | local recovery runs first: a reassembled reply continues with a `recovered from a truncated payload` warning, a cut inside a file body returns `blocked` with a partial `data.edit_buffers` (nothing written to disk), and only an unsalvageable reply falls through to the one repair re-ask. Raise `ORCHESTRATOR_LLM_MAX_TOKENS` (§8) for data-heavy replies, then `retry TASK-00X` |
 | memory/context grows forever | compaction folds MEMORY.md and resets utilization at the 70% threshold |
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
-| `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings — the first rejection triggers **one automatic repair call**; if it still fails, `retry TASK-003 --reason "use data.edits on <file>"` (the reason reaches the next prompt) |
+| `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings — the first rejection triggers **one automatic repair call**; if it still fails, `retry TASK-003 --reason "use data.edits on <file>"` (the reason reaches the next prompt). Two consecutive DoD/schema rejections auto-waive the task (see below); an empty `acceptance_criteria` list no longer fails — default criteria are ingested and persisted |
+| task shows `WAIVED` | the validation circuit-breaker fired after two consecutive DoD/schema rejections (crashes never waive) so dependents could proceed without a human — the WARNING is in `CURRENT_STATE.md`. `reopen TASK-00X --reason "..."` puts it back to READY (counters cleared) if you want the work finished |
+| a rejected turn produced useful analysis | findings are harvested anyway: `docs/findings/<task-id>.md` keeps `data.findings`/`data.analysis` from every non-compliant turn (de-duplicated across retries), and `data.risks` entries are mirrored into `RISKS.md` as `<task-id>: <title>` |
 | `DoD unmet: delivered docs/X shares no line with existing Y` | the model returned prose metadata instead of editing — the auto-repair call already fed this back once; retry with a more specific `--reason` if it repeated |
 | `Checkpoint 'cp-risk-RISK-001' already exists at …` | a stale snapshot from an earlier plan (its `RISKS.md` entry was rewritten away). Saving now **replaces** the directory and auto-checkpoints are best-effort, so this cannot fail a task anymore; on a project that failed before the fix, just `retry TASK-00X` |
 | `FileNotFoundError: checkpoints/<project>/cp-…/metadata.json` | the index named a directory a failed overwrite had already removed (rows dated before the staging fix). Saves are now staged-then-swapped and delete clears the row first, so this cannot recur — re-save that id (`orchestrator checkpoint save <id>`) to rebuild the directory and refresh the row |
@@ -553,6 +563,6 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1213 passed
+python3 -m pytest -q      # 1224 passed
 ruff check .              # lint — 0 errors (install: python3 -m pip install -e .[dev])
 ```

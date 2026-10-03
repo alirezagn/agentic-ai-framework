@@ -103,7 +103,7 @@ orchestrator [--project PATH] [--version] <command>
 | `phase show\|set [PHASE]` | Show the current/derived lifecycle phase, or set it explicitly (validated against the phase vocabulary; forward moves checkpoint as `cp-phase-<name>`) |
 | `waive TASK --dep ID [--reason TEXT]` | Human unblock: drop one dependency edge (deadlock relief) and record it in `CHANGELOG.md` |
 | `retry TASK [--reason TEXT]` | Human recovery: clear a failed/stalled/loop-limited task's counters (`same_strategy`, `no_progress`, evidence stalls), put it back to READY when its dependencies are met, and record it in `CHANGELOG.md`. The reason (or, absent one, the previous failure) is stored as `execution.retry_reason` and surfaced to the next attempt as `recovery_feedback_from_previous_attempt` in the prompt — without it the model is blind to why earlier attempts failed |
-| `reopen TASK --reason TEXT` | Conscious overturn of a **terminal** task (`DONE`, `DONE WITH ACCEPTED LIMITATION`, `CANCELLED`) back to READY — the alternative to hand-editing TASKS.yaml. `--reason` is required and feeds the next prompt; refused for non-terminal statuses (use `retry`) |
+| `reopen TASK --reason TEXT` | Conscious overturn of a **terminal** task (`DONE`, `DONE WITH ACCEPTED LIMITATION`, `CANCELLED`, `WAIVED`) back to READY — the alternative to hand-editing TASKS.yaml. `--reason` is required and feeds the next prompt; refused for non-terminal statuses (use `retry`) |
 | `agents` | List registered specialist agents |
 | `checkpoint save\|list\|restore` | Checkpoint management (`--checkpoint ID`, `--notes TEXT`) |
 
@@ -329,7 +329,13 @@ dispatch batch, `_run_pending_reviews()` routes them to `dispatch_review()`:
 
 `definition_of_done(task, output, deploy_records=…)` requires:
 
-- DoD criteria present
+- measurable acceptance criteria — a missing/empty `acceptance_criteria` list
+  is **not** a failure: the DoD falls back to owner-scoped default criteria
+  (`_fallback_acceptance_criteria`, e.g. "Tests map to requirements and pass"
+  for `test_agent`, `Complete task analysis and produce structured markdown
+  outputs` otherwise), and dispatch phase 3 persists those defaults into
+  `TASKS.yaml` (`StateManager.set_acceptance_criteria`), so a reviewer or a
+  resumed session sees measurable criteria instead of a planning omission
 - all `expected_outputs` materialized on disk
 - **content plausibility** — when an expected output already exists in the
   project, its `docs/` mirror must share at least one meaningful line with the
@@ -360,6 +366,13 @@ note used to answer *every* rejection, so a model told to fix evidence with
 file edits re-delivered files, never set the field, and a legitimate `NOT RUN`
 task failed. The DoD rejection is stored as the task note (not the claiming
 summary) so the next attempt sees honest context.
+
+A rejected turn's analysis is not lost either: before the failure is
+recorded, `BaseAgent.harvest_findings()` appends `data.findings` and
+`data.analysis` to `docs/findings/<task-id>.md` (de-duplicated across
+retries) and mirrors up to five `data.risks` entries into `RISKS.md` as
+`<task-id>: <risk title>` — a schema-rejected research turn keeps its
+findings on disk.
 
 #### Why an unevidenced claim becomes `NOT RUN`
 
@@ -403,8 +416,10 @@ here.
 ### Dependency gating
 
 A task is READY only when every dependency is in a satisfied status
-(`DONE`, `DONE WITH ACCEPTED LIMITATION`, `CANCELLED`). `refresh_ready_states()`
-promotes `TODO`/`BLOCKED` tasks whose dependencies just became satisfied.
+(`DONE`, `DONE WITH ACCEPTED LIMITATION`, `CANCELLED`, `WAIVED` — the last
+one set only by the supervisor's validation circuit-breaker).
+`refresh_ready_states()` promotes `TODO`/`BLOCKED` tasks whose dependencies
+just became satisfied.
 
 ---
 
@@ -449,6 +464,35 @@ When a loop is exceeded:
 `state_oscillation` is checked **first** in the dispatch gate and applies to the
 whole project (task id `PROJECT`); the fingerprint history is cleared on
 checkpoint restore.
+
+### Validation circuit-breaker (auto-waive)
+
+Not every rejection deserves a human. Supervisor failures are classified
+(`supervisor.is_validation_failure`):
+
+- **validation-class** — `DoD unmet: …` and schema/shape violations
+  (`Output summary must not be empty`, `Output data must be a dictionary`,
+  unparseable JSON, mismatched agent/task id): counted in
+  `execution.validation_failure_streak`.
+- **code/runtime-class** — tracebacks, `connection refused`/backend
+  failures, exit codes: always **reset** the streak and keep the normal
+  retry/escalation path (a crashing agent is never silently waived).
+
+After `validation_waive_after` (default **2**) consecutive validation
+failures — on the second rejection itself — the supervisor flips the task
+to `WAIVED`: a terminal status that satisfies dependencies, announced as
+`WARNING: <task-id> auto-waived after N consecutive Definition-of-Done/
+schema rejections …` in CURRENT_STATE.md, followed by an automatic
+`refresh_ready_states()` so dependents dispatch in the same wave. Because a
+waived task is terminal, it never trips `same_strategy` and cannot park the
+project in `HUMAN_DECISION_REQUIRED` over a purely structural rejection.
+`sync_project_health()` also sweeps for struck-out FAILED tasks before every
+health computation (idempotent safety net for any path that records a
+streak). `orchestrator retry` and `reopen` reset the streak; `reopen
+TASK-00X --reason "…"` is the conscious human path back to READY.
+
+Threshold: `LoopThresholds.validation_waive_after` (YAML key
+`validation_waive_after`, override via `loop_thresholds({...})`).
 
 ---
 
@@ -816,7 +860,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1213 passed
+python3 -m pytest -q          # full suite — 1224 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)
