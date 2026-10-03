@@ -1,12 +1,12 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 evening (project-1 rerun 2 status: **5/6 DONE —
-> TASK-003 recovered live via the edit-session fix; TASK-006 FAILED** on a
-> missing `models` module the import contract's third-party carve-out let
-> through plus stale deploy evidence after auto-repair; operator directive
-> recorded: **never install libraries — declare in requirements.txt + setup
-> instructions only**; fixes F1–F4 in progress; suite at **1245 green**,
-> `ruff check .` at 0)
+> Last updated: 2026-10-03 night (project-1 rerun 2 fixes F1–F4 **done and
+> pushed** — fix `1588d8a`, docs `0cfc7fe`: the runner now refuses every
+> install-shaped invocation (declare in requirements.txt + document the setup
+> command instead), the import contract checks declarations + stdlib, dispatch
+> re-runs deploy evidence after a DoD repair, and non-expected `data.documents`
+> land on disk; suite at **1263 green** (+18), `ruff check .` at 0; next:
+> restart project 1 from the beginning)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -141,53 +141,50 @@ kept as the record of what was wrong, not as current state.
   `SATISFIED_DEPENDENCY_STATUSES`), so "terminal task another task waits on" is
   the normal path, not a stall.
 
-### Open items (verified 2026-10-03 evening — project-1 rerun 2)
+### Closed this pass (project-1 rerun 2 — F1–F4, fix `1588d8a`, docs `0cfc7fe`)
 
-- **Run result:** fresh `init` (6 tasks, `--dest /media/alireza/microos/projects`)
-  → waves 1–5 DONE, wave 6 FAILED: **5/6, `run --all` stopped at TASK-006.**
-  **Batch-14 fix proven live:** TASK-003 hit the same class of import error as
-  before and recovered in **2 turns** ("delivered via 2-turn edit session"),
-  where the pre-fix run burned all 3 and FAILED.
-- **F2 — root cause of TASK-006 (`DoD unmet: executed verification failed:
-  pytest exited 2`):** `src/collector.py` does `from models import …` and
-  **`models.py` was never created** (verified by running the delivered suite:
-  `ModuleNotFoundError: No module named 'models'` → collection interrupted →
-  exit 2). The import contract let it through: its absolute-import branch
-  treats any first component absent from the project as "third-party or stdlib
-  — not ours to verify" (`_in_project` false), so turn-2 of TASK-003 could
-  convert a *flagged* relative import into an *unflagged* absolute one. The
-  contract has no knowledge of `requirements.txt` declarations and no stdlib
-  list, so `models` and `psutil` are indistinguishable to it.
-- **F3 — second root cause (why the repair could not save it):** dispatch
-  phase 2b re-evaluates DoD after `repair_delivery` **with the original
-  `deploy_records`** (pytest exit 2 from *before* the repair). Ground truth
-  never follows the repair, so a fixed test file can never clear the evidence
-  gate — the RISK-001 note "the task may stay failed until re-planned" was the
-  predictable outcome. Repair did change the files (`tests/test_metrics.py`
-  rewritten at 16:48:34); the evidence still read 16:48:12.
-- **F1 — operator directive (2026-10-03):** the framework **must never
-  install libraries or applications** — `deploy_runner` ran `pip install -r
-  requirements.txt --break-system-packages` twice (TASK-005 16:47:38, TASK-006
-  16:48:10), writing `psutil` into the *system* Python under PEP 668.
-  New policy: declare in `requirements.txt`, document the setup command in
-  README/setup instructions, request tests only against dependencies already
-  present (else honest `NOT RUN` naming the packages) — the runner refuses
-  install invocations outright. Note: `python` was refused under allowlist
-  `*` because bare `python` is not on PATH (only `python3`); the refusal
-  *message* blamed the allowlist (misleading, cosmetic).
-- **F4 — `data.documents` for a NON-expected path is never written:**
-  `_materialize_artifacts` loops only over `expected_outputs`, so a mid-plan
-  `data.documents["requirements.txt"]` (not in TASK-003's expected list)
-  lands nowhere. The dependency contract tells agents to deliver exactly that
-  file — the remedy for F2's "declare the dependency" nudge does not work
-  until the materializer writes missing non-expected deliveries to their real
-  path (safe-path guarded, never clobbering an existing file).
-- **Planned fix set:** F1 runner/policy + prompt rewrite · F2 stdlib +
-  `requirements.txt`-aware absolute-import check · F3 re-run deploy evidence
-  after auto-repair · F4 materialize missing non-expected documents.
-  Tests to update: `tests/test_dependency_automation.py` (pins the old
-  install-ordered contract), `tests/test_import_contract.py`
-  (`test_third_party_imports_are_never_checked` fixture declares nothing).
+- **Run result (kept for history):** fresh `init` (6 tasks, `--dest
+  /media/alireza/microos/projects`) → waves 1–5 DONE, wave 6 FAILED: **5/6,
+  `run --all` stopped at TASK-006.** **Batch-14 fix proven live:** TASK-003
+  hit the same class of import error as before and recovered in **2 turns**
+  ("delivered via 2-turn edit session"), where the pre-fix run burned all 3
+  and FAILED.
+- **F2 — FIXED (`import_contract`):** TASK-006's root cause was
+  `from models import …` with no `models.py` (verified: `ModuleNotFoundError`
+  → collection interrupted → pytest exit 2); the absolute-import branch
+  waved everything absent from the project through as "third-party or
+  stdlib". It now checks `sys.stdlib_module_names` + the project's
+  `requirements.txt` (plus a `_DISTRIBUTION_ALIASES` map for yaml/pillow/…)
+  and flags undeclared external imports with "deliver the module or declare
+  the dependency". Tests: `TestUndeclaredExternalImportIsReported` (+6).
+- **F3 — FIXED (`orchestrator` phase 2b):** after `repair_delivery`,
+  dispatch re-runs the verification the repaired output declares (falling
+  back to the original declaration) via `_run_requested_deploys` and
+  re-evaluates the DoD with the fresh records — the stale pre-repair exit
+  code can no longer block a repair that fixed the files. Test:
+  `TestDispatchReRunsDeployEvidenceAfterRepair` (SequencedRunner 1 → 0).
+- **F1 — FIXED (`deploy_runner.install_refusal_reason` + prompt rewrite):**
+  the runner ran `pip install -r requirements.txt --break-system-packages`
+  twice (TASK-005 16:47:38, TASK-006 16:48:10) into the system Python.
+  Refusal now sits after the allowlist and after the satisfied-requirements
+  skip (a skip performs no install and stays truthful), before anything
+  spawns an installer: pip/python -m pip installs, install-only tools
+  (apt, brew, dnf, ...), and install-shaped subcommands of multi-tools
+  (`npm install`, `go get`, `uv pip install`); `pip list`/`npm test` still
+  run. `DEPENDENCY_AUTOMATION_INSTRUCTIONS`, `DATA_DEPLOY_CONTRACT` and the
+  `02`/`07`/`08` templates now say declare + document the README setup
+  command, never request installs. Tests: `TestInstallRefusedByPolicy` (+8)
+  and the three PEP 668 run_one tests flipped to refusal (the
+  `--break-system-packages` append is unreachable while the policy stands;
+  helpers stay unit-tested).
+- **F4 — FIXED (`_materialize_artifacts`):** non-expected `data.documents`
+  (the mid-plan `requirements.txt` of TASK-003) now land at their real path
+  — safe-path guarded (relative, no `..`, inside the project), never
+  clobbering an existing file, no `docs/` mirror, skipping expected
+  names/basenames. Tests: `TestNonExpectedDocumentsLand` (+3).
+- **Suite: 1263 green (1245 → 1263), `ruff check .` 0.** Known cosmetic
+  issue left: bare `python` is refused under allowlist `*` because it is not
+  on PATH (only `python3`), and the message blames the allowlist.
 
 ### Open items (verified 2026-10-02 night)
 
@@ -241,16 +238,31 @@ kept as the record of what was wrong, not as current state.
 
 ## Dependency management (never regress)
 
-- Agents introducing a non-stdlib import must **declare** it in
-  `requirements.txt` at the project root and **install** it via a `data.deploy`
-  `pip install -r requirements.txt` entry placed *before* any test step. Single
-  source of truth: `prompt_builder.DEPENDENCY_AUTOMATION_INSTRUCTIONS`, surfaced
-  through `base_agent.AUTHORING_CONTRACT` and the `02`/`07`/`08` templates.
-- The refusal path is load-bearing: `pip` is **not** allowlisted by default, so
-  the contract must keep saying "report `NOT RUN`, never claim an install".
-  `tests/test_dependency_automation.py` asserts the channel stays closed.
-- `projects/sys_mon` is the regression: it imported `psutil` with no
-  declaration, so collection died and **the whole suite was interrupted**
+- **Operator directive (2026-10-03): the framework never installs libraries
+  or applications.** Agents must **declare** the dependency in
+  `requirements.txt` at the project root (deliver it — `data.documents` /
+  `data.edits` — and put it in `expected_outputs`) and **document** the setup
+  command `pip install -r requirements.txt` in the README for the human.
+  Single source of truth: `prompt_builder.DEPENDENCY_AUTOMATION_INSTRUCTIONS`,
+  surfaced through `base_agent.AUTHORING_CONTRACT` and the `02`/`07`/`08`
+  templates; `DATA_DEPLOY_CONTRACT` repeats the refusal rule.
+- Enforcement is in the runner, not the prompt:
+  `deploy_runner.install_refusal_reason` (checked after the allowlist and
+  after the satisfied-requirements skip) refuses pip/python -m pip installs,
+  install-only tools and install-shaped subcommands with
+  `status: refused, executed: false` and a policy reason. `pip list`,
+  `npm test` etc. still run; the PEP 668 `--break-system-packages` append is
+  unreachable while the refusal stands.
+- The refusal path is load-bearing: report `NOT RUN` naming the missing
+  packages + setup command, never claim an install. `pip` stays out of
+  `config.DEPLOY_ALLOWLIST`; `tests/test_dependency_automation.py` asserts
+  both the prompt contract and the runner policy.
+- The import contract closes the loop: absolute imports leaving the project
+  must be stdlib or declared in `requirements.txt` (`_DISTRIBUTION_ALIASES`
+  covers yaml/pillow/…), so a hallucinated module like `models` fails delivery
+  instead of the test run.
+- `projects/sys_mon` is the historical regression: it imported `psutil` with
+  no declaration, so collection died and **the whole suite was interrupted**
   (0 tests ran). Its module now imports `psutil` lazily and
   `test_sys_mon.py` installs via `setUpModule`.
 - Root `conftest.py` sets `collect_ignore_glob = ["*/docs/*"]`: the materializer
@@ -584,7 +596,7 @@ kept as the record of what was wrong, not as current state.
       fresh `src/` used to hit a swallowed ENOENT). Report artifacts with no
       delivered content keep the legacy mirror-only acceptance — dropping
       that gate broke 5 tests that pin it by design. Tests:
-      `tests/test_delivery_normalization.py` (14).
+      `tests/test_delivery_normalization.py` (17).
   14. **Edit-session feedback quotes file bodies** (2026-10-03, fix for the
       second `sys-usage` stall) — TASK-003's 3-turn session wrote
       `src/metrics_collector.py` in turn 1 with `from .architecture import …`
@@ -636,14 +648,14 @@ suites added during remediation:
 | `tests/test_materializer.py` | edits materialization — full write when nothing to patch |
 | `tests/test_state_io_and_contracts.py` | also: lock-descriptor hygiene (`release_file_locks`) |
 | `tests/test_cli_init.py` | init destination resolution, name validation, traversal refusal |
-| `tests/test_dependency_automation.py` | dependency contract — declaration, install ordering, honest refusal, `sys_mon` regression |
+| `tests/test_dependency_automation.py` | 47 tests — dependency contract: declare + document (never install), prompt/template reach, runner install-refusal policy (`TestInstallRefusedByPolicy`), honest `NOT RUN`, `sys_mon` regression |
 | `tests/test_final_high_gaps.py` | audit HIGH-01..04 — pinned-agent isolation, checkpoint trigger evaluation, off-lock DoD repair, deep validation + reachability |
-| `tests/test_architecture_redesign.py` | 52 tests — truncation/chunked-JSON recovery, PEP 668 `--break-system-packages` + satisfied-install skip, skip-vs-DoD evidence, decomposition scope/chains/starter seeding |
-| `tests/test_import_contract.py` | 25 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, DoD wiring, prompt promise |
+| `tests/test_architecture_redesign.py` | 52 tests — truncation/chunked-JSON recovery, install-policy refusal (PEP 668 append unreachable behind it) + satisfied-install skip, skip-vs-DoD evidence, decomposition scope/chains/starter seeding |
+| `tests/test_import_contract.py` | 31 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, DoD wiring, prompt promise, undeclared-external-import rule (stdlib + `requirements.txt`) |
 | `tests/test_checkpoint_overwrite.py` | 10 tests — `cp-risk-*` collision replaces instead of raising; strict default kept; staged `.staging-<id>-<pid>` swap keeps the old snapshot when the new one fails (empty source / copy error); delete clears the row first; crash leftovers cleaned; dispatch keeps its own error and best-effort snapshotting |
-| `tests/test_repair_remedies.py` | 15 tests — problem-aware repair note (evidence/import/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE |
+| `tests/test_repair_remedies.py` | 16 tests — problem-aware repair note (evidence/import/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE, deploy evidence re-run after repair |
 | `tests/test_supervisor_auto_recovery.py` | 11 tests — DoD fallback ingestion (defaults pass DoD + persisted to TASKS.yaml), validation circuit-breaker (2-strike `WAIVED` for DoD and schema rejections, runtime failures never waive, sync sweep, WAIVED vocab + threshold), findings harvest (write to docs/ + RISKS.md, dedupe across retries, no-findings skip) |
-| `tests/test_delivery_normalization.py` | 14 tests — dotted/flat `data.*` key folding at `AgentOutput.from_dict`, list-form `documents`/`edits` → dict, dotted delivery materializes the real file (the `sys-usage` replay), channel-visible missing file rejected, report-artifact legacy mirror-only acceptance preserved, dotted `acceptance_results` still gate DoD |
+| `tests/test_delivery_normalization.py` | 17 tests — dotted/flat `data.*` key folding at `AgentOutput.from_dict`, list-form `documents`/`edits` → dict, dotted delivery materializes the real file (the `sys-usage` replay), channel-visible missing file rejected, report-artifact legacy mirror-only acceptance preserved, dotted `acceptance_results` still gate DoD, non-expected documents land on disk (no clobber, no escape) |
 | `tests/test_edit_session_feedback.py` | 7 tests — DoD-branch feedback quotes touched file bodies (turn-2 prompt carries body + problem), honest final-turn failure, `_touched_files_current_content` channels (edits/edits_applied/documents) + absolute/`..`/missing skips + 8-file cap, apply-failure quote regression |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
