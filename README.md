@@ -47,7 +47,7 @@ agentic-ai-framework/
 │   ├── GETTING_STARTED.md
 │   ├── WORKFLOW.md
 │   └── TROUBLESHOOTING.md
-└── test_*.py, tests/       # pytest suite (1245 passing)
+└── test_*.py, tests/       # pytest suite (1263 passing)
 ```
 
 > `projects/kid-robot-face/` ships the seven state files and a small worked
@@ -329,7 +329,7 @@ See [meta/GETTING_STARTED.md](meta/GETTING_STARTED.md) for detailed walkthroughs
 **Last Updated:** 2026-10-02  
 **Framework Version:** 2.0.0  
 **Status:** STABLE — state engine + LLM-backed agent policy layer  
-**Test suite:** 1245 passing (`python3 -m pytest -q`), hermetic and offline
+**Test suite:** 1263 passing (`python3 -m pytest -q`), hermetic and offline
 
 ## Runtime at a glance
 
@@ -361,11 +361,13 @@ ORCHESTRATOR_DEPLOY_ENABLED=1
 ORCHESTRATOR_DEPLOY_ALLOWLIST=ctest,cmake,python3
 ```
 
-Transcripts land in `docs/evidence/<task>/`. On a PEP 668 "externally managed"
-interpreter the runner appends `--break-system-packages` when pip targets its
-own environment, and skips installs whose requirements are already satisfied —
-a `status: skipped` record is not evidence and can never back a claim that
-tests passed. Full schema, security properties
-and operator guidance: [ORCHESTRATOR_GUIDE.md § Evidence and
+Transcripts land in `docs/evidence/<task>/`. Installation commands are
+**refused by policy** — the framework never installs libraries or
+applications; dependencies go in `requirements.txt` with the setup command
+documented in the README. Read-only queries like `pip list` still run, and an
+install whose requirements are already provably satisfied comes back as
+`status: skipped` ahead of the refusal — a skipped or refused record is not
+evidence and can never back a claim that tests passed. Full schema, security
+properties and operator guidance: [ORCHESTRATOR_GUIDE.md § Evidence and
 execution](ORCHESTRATOR_GUIDE.md#evidence-and-execution) and
 [HOW_TO_USE.md §8b](HOW_TO_USE.md#8b-enable-the-execution-channel-optional).

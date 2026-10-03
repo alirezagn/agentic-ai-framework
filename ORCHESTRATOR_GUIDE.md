@@ -718,41 +718,48 @@ Both deploy variables are required: setting `ORCHESTRATOR_DEPLOY_ENABLED=1` with
 an empty allowlist stays inert, because a flag that appears live and does
 nothing is worse than one that is off. See [Evidence and execution](#evidence-and-execution).
 
-### Dependency installation is an operator decision
+### Dependencies are declared, never installed
 
 Agents that introduce a third-party import are instructed to (1) declare it in
-`requirements.txt` at the project root and (2) request
-`pip install -r requirements.txt` through `data.deploy` **before** any test step
-(`orchestrator.prompt_builder.DEPENDENCY_AUTOMATION_INSTRUCTIONS`). Declaring is
-a file the Definition of Done can verify; installing is an execution request.
+`requirements.txt` at the project root, (2) document the setup command
+(`pip install -r requirements.txt`) in the README for the human operator, and
+(3) request verification only against the environment as it is
+(`orchestrator.prompt_builder.DEPENDENCY_AUTOMATION_INSTRUCTIONS`). Declaring
+is a file the Definition of Done can verify; installing is the operator's job.
 
-Because the channel is closed by default, `pip` is normally refused. That is the
-intended behaviour, not a bug — the agent then keeps `requirements.txt` as its
-deliverable, reports `data.test_status = "NOT RUN"` and names the packages it
-could not install. To let the install actually run:
+The runner enforces it. `install_refusal_reason` — checked after the
+allowlist and after the satisfied-requirements skip, before anything would
+spawn an installer — refuses `pip install`, `python -m pip install`,
+install-only tools (`apt`, `brew`, `dnf`, ...) and install-shaped subcommands
+of multi-tools (`npm install`, `go get`, `uv pip install`) with
+`status: refused`, `executed: false` and a policy reason that flows into the
+DoD message, **even when the command is allowlisted and the channel is
+enabled**. Read-only queries (`pip list`, `npm test`, `go build`) still
+execute normally. An invocation whose requirements are already provably
+satisfied (bare names and exact `==` pins resolvable through
+`importlib.metadata`) comes back `status: skipped` first — nothing would have
+been installed anyway, and the skip says so truthfully. The PEP 668
+`--break-system-packages` append still exists in `run_one` but is unreachable
+while the policy refusal stands.
+
+A refusal is a legitimate finding: the agent keeps `requirements.txt` as its
+deliverable, reports `data.test_status = "NOT RUN"` and names the missing
+packages plus the setup command. To let anything execute at all:
 
 ```bash
 export ORCHESTRATOR_DEPLOY_ENABLED=1
-export ORCHESTRATOR_DEPLOY_ALLOWLIST=python3,pip,pytest
+export ORCHESTRATOR_DEPLOY_ALLOWLIST=python3,pytest
 ```
 
-Allowlisting `pip` lets an agent install arbitrary packages from an index, which
-is a real supply-chain decision — scope it to the projects that need it rather
-than adding it globally. On a PEP 668 "externally managed" interpreter the
-runner no longer fails by design: before spawning pip it appends
-`--break-system-packages` when the invocation targets *that same* environment
-(`pip_targets_running_environment` — a `--target`/`--root`/`--prefix` pip, or a
-different interpreter, is left alone), and it **skips** the install entirely
-when the interpreter is externally managed and every requirement is already
-provably satisfied (bare names and exact `==` pins resolvable through
-`importlib.metadata`; `--upgrade`, `--force-reinstall`, `-e` and friends always
-run). A skip is recorded as `status: skipped`, `executed: false`, no exit code.
-It is not ground truth: the DoD accepts an all-skipped result **only** when the
-output claims nothing and names no test-like expected output (a genuine
-"nothing was left to install"), while a summary that claims tests passed over
-skipped records alone is still refused — the agent must report
-`test_status: NOT RUN` or really run the command. Prefer a project virtualenv
-for anything that must really install.
+Note there is no `pip` in that allowlist: installing is refused by policy
+regardless of the allowlist — the allowlist only decides which *non-install*
+commands may run. The DoD accepts an all-skipped result **only** when the
+output claims nothing and names no test-like expected output, while a summary
+that claims tests passed over skipped records alone is still refused — the
+agent must report `test_status: NOT RUN` or really run the command. On a PEP
+668 system interpreter the point is moot for agents, but it still matters for
+the operator: install dependencies yourself (in a virtualenv) before a run
+that needs them.
 
 See [Snapshot integrity](#snapshot-integrity) for the four verdicts
 (`VERIFIED` / `UNSIGNED` / `TAMPERED` / `UNVERIFIABLE`) and how they are decided.
@@ -866,7 +873,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1245 passed
+python3 -m pytest -q          # full suite — 1263 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)

@@ -552,9 +552,9 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | run finished `HEALTHY` but the ESP32 shows no change | the execution channel is **off by default** — nothing is built or flashed. Enable it (§8b) and let the task request `data.deploy`, or close the loop yourself: `source /media/alireza/PROJECTS/esp-idf-v6.1-beta1/export.sh && idf.py build && idf.py -p /dev/ttyACM0 flash` |
 | `docs/*.log` or docs "Verification Results" claim tests ran | with the channel **off** an agent cannot execute, so any such claim is unverified — the DoD now rejects it and the task is `FAILED` rather than silently `DONE`. Enable the channel (§8b) so the claim can be backed by a transcript, or have the agent report `NOT RUN` |
 | `DoD unmet: output claims an executed verification … report test_status=NOT RUN` | the task produced a test-like report without saying what ran. `data.test_status = "NOT RUN"` (or a summary that plainly says `NOT RUN`) satisfies it — the one repair round now shows the model exactly that JSON instead of the old "deliver file content" text; `retry TASK-00X` if the reply predates the fix |
-| `task declared data.deploy but nothing was executed` | the executable is not on `ORCHESTRATOR_DEPLOY_ALLOWLIST`, or `ORCHESTRATOR_DEPLOY_ENABLED` is unset. The refusal reason is in the task note; add the basename to the allowlist and `retry TASK-00X` |
-| deploy record shows `status: skipped` with reason `requirements already satisfied: …` | the interpreter is PEP 668 externally managed and the packages are already installed — pip was never spawned, so nothing ran. An all-skip result passes only when the task claims nothing and has no test-like outputs; a claim of passing tests over skipped records alone is still rejected (`NOT RUN` or a real run) |
-| `error: externally-managed-environment` from pip | the runner appends `--break-system-packages` only when pip targets the orchestrator's own environment — for `--target`/`--root` installs or another interpreter, use a project virtualenv instead |
+| `task declared data.deploy but nothing was executed` | the executable is not on `ORCHESTRATOR_DEPLOY_ALLOWLIST`, `ORCHESTRATOR_DEPLOY_ENABLED` is unset, or the invocation is an install refused by policy. The refusal reason is in the task note; fix the cause (allowlist the *non-install* command, or drop the install and declare the dependency) and `retry TASK-00X` |
+| `package installation is refused by policy: …` | by design — the framework never installs libraries or applications. Declare the dependency in `requirements.txt`, document `pip install -r requirements.txt` in the README for yourself, and request tests only against packages already present (report `NOT RUN` when they are not) |
+| deploy record shows `status: skipped` with reason `requirements already satisfied: …` | every requirement is provably already installed — pip was never spawned, so nothing ran (this check sits ahead of the policy refusal). An all-skip result passes only when the task claims nothing and has no test-like outputs; a claim of passing tests over skipped records alone is still rejected (`NOT RUN` or a real run) |
 | `executed verification failed: ctest exited 8` | the command really ran and really failed — this is ground truth. Fix the underlying failure, then `retry TASK-00X` |
 | `declared expectation did not match reality` | the agent predicted `PASS` but the real exit code disagreed. Re-run with an honest `expect`; the mismatch is recorded in `docs/evidence/<task>/` |
 | `LLM backend unavailable` | set provider env vars (§8) |
@@ -563,6 +563,6 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1245 passed
+python3 -m pytest -q      # 1263 passed
 ruff check .              # lint — 0 errors (install: python3 -m pip install -e .[dev])
 ```
