@@ -520,7 +520,24 @@ class MasterOrchestrator:
                 if repaired is not None:
                     repaired.task_id = task_id
                     logger.info("DoD auto-repair succeeded for %s", task_id)
+                    original_output = output
                     output = repaired
+                    # Ground truth must follow the repair: records from before
+                    # it judge the pre-repair workspace (sys-usage TASK-006:
+                    # a pytest exit 2 recorded at 16:48:12 was re-checked
+                    # against a test file rewritten at 16:48:34, so the repair
+                    # could never clear the evidence gate). Re-run whatever
+                    # the repaired output declares — falling back to the
+                    # original declaration when the repair dropped it — and
+                    # evaluate the DoD against the fresh records.
+                    repaired_data = (
+                        repaired.data if isinstance(repaired.data, dict) else {}
+                    )
+                    rerun = repaired if repaired_data.get("deploy") else original_output
+                    logger.info(
+                        "re-running deploy evidence for %s after auto-repair", task_id
+                    )
+                    deploy_records = self._run_requested_deploys(task_id, rerun)
                     dod_problems = self.definition_of_done(
                         task, output,
                         preexisting=delivery_snapshot,

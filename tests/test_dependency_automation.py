@@ -6,11 +6,18 @@ need to install psutil" **in prose**. No ``requirements.txt`` was created and no
 ``data.deploy`` step was requested, so the next turn — the test run — died at
 import time and the framework's own suite could not be collected at all.
 
-A warning in ``summary`` installs nothing. The contract therefore has to reach
-the model on every code-producing path, say three specific things, and — just as
-important — stay *honest*: the execution channel is closed by default, so a
-contract that merely said "always install" would invite a fabricated
-execution record, trading a missing file for a worse defect.
+The opposite failure was equally real: in the ``projects/sys-usage`` rerun the
+model *did* ask ``data.deploy`` to pip-install, and the runner executed it —
+twice, into a PEP 668 system interpreter. Operator directive recorded
+2026-10-03: **never install libraries or applications**. So the contract says
+declare + document, and this module pins both halves: the prompt text every
+code-producing path carries, and the runner policy
+(``install_refusal_reason``) that refuses the install even when the channel
+is open and the command allowlisted.
+
+A warning in ``summary`` installs nothing; a refused install proves nothing.
+Both routes end in the same honest place: a delivered ``requirements.txt``, a
+documented setup command, and ``NOT RUN`` when the environment cannot verify.
 
 Layout note: the suite lives at the repository root
 (``conftest.py`` supplies ``build_test_project``).
@@ -30,6 +37,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from orchestrator import config  # noqa: E402
+from orchestrator.deploy_runner import (  # noqa: E402
+    STATUS_EXECUTED,
+    STATUS_REFUSED,
+    DeployRunner,
+    install_refusal_reason,
+)
 from orchestrator.prompt_builder import (  # noqa: E402
     DEPENDENCY_AUTOMATION_INSTRUCTIONS,
     build_prompt,
@@ -93,16 +106,20 @@ class TestDependencyContractContent:
             "the declaration must be verifiable by the Definition of Done"
         )
 
-    def test_requires_an_explicit_install_command(self) -> None:
+    def test_forbids_installs_in_the_deploy_channel(self) -> None:
+        """Operator directive: declare and document, never install."""
         text = DEPENDENCY_AUTOMATION_INSTRUCTIONS
-        assert '"pip"' in text and '"install"' in text
-        assert "-r" in text
-        assert "data.deploy" in text, "the install must be a real execution request"
+        assert "data.deploy" in text, "the rule must name the execution channel"
+        assert "never installs" in text.lower(), "the policy must be explicit"
+        assert "refused" in text, "an install request is refused by the runner"
+        assert "-r" in text, "the setup command stays concrete: pip install -r ..."
 
-    def test_states_the_install_precedes_the_verification(self) -> None:
-        text = DEPENDENCY_AUTOMATION_INSTRUCTIONS.lower()
-        assert "before" in text, "ordering must be stated, not implied"
-        assert "order" in text
+    def test_states_where_installation_happens(self) -> None:
+        """The human runs the setup command; the framework never does."""
+        text = DEPENDENCY_AUTOMATION_INSTRUCTIONS
+        assert "pip install -r requirements.txt" in text
+        assert "README" in text
+        assert "operator" in text.lower()
 
     def test_requires_checking_dependencies_before_concluding(self) -> None:
         text = DEPENDENCY_AUTOMATION_INSTRUCTIONS.lower()
@@ -148,6 +165,113 @@ class TestContractStaysHonest:
 
 
 # ===========================================================================
+# The runner enforces it — prompts alone are not the policy
+# ===========================================================================
+
+
+class TestInstallRefusedByPolicy:
+    """`install_refusal_reason` fires even with the channel open and pip allowlisted.
+
+    The sys-usage rerun proved prompts are not enough: pip ran twice into the
+    system interpreter. These tests pin the runner-level refusal, and the
+    boundary around it — read-only queries and satisfied installs still get
+    their honest records.
+    """
+
+    @staticmethod
+    def _fake_tool(project: Path, name: str) -> None:
+        tool = project / name
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+
+    def _project(self, tmp_path: Path) -> Path:
+        project = tmp_path / "p"
+        project.mkdir()
+        return project
+
+    @staticmethod
+    def _runner(project: Path, *tools: str) -> DeployRunner:
+        return DeployRunner(project, enabled=True, allowlist=tools)
+
+    def test_pip_install_is_refused_even_when_allowlisted(self, tmp_path: Path) -> None:
+        project = self._project(tmp_path)
+        self._fake_tool(project, "pip")
+        record = self._runner(project, "pip").run_one(
+            {"command": "./pip", "args": ["install", "-r", "requirements.txt"]}
+        )
+        assert record.status == STATUS_REFUSED
+        assert record.executed is False
+        assert "never installs" in record.reason
+        assert "requirements.txt" in record.reason
+
+    def test_python_m_pip_install_is_refused(self, tmp_path: Path) -> None:
+        project = self._project(tmp_path)
+        self._fake_tool(project, "python3")
+        record = self._runner(project, "python3").run_one(
+            {
+                "command": "./python3",
+                # A package that is definitely absent, so the satisfied-skip
+                # above the policy refusal cannot swallow this case.
+                "args": ["-m", "pip", "install", "definitely-not-a-real-package-xyz"],
+            }
+        )
+        assert record.status == STATUS_REFUSED
+        assert record.executed is False
+
+    def test_multi_tool_install_subcommand_is_refused(self, tmp_path: Path) -> None:
+        project = self._project(tmp_path)
+        self._fake_tool(project, "npm")
+        record = self._runner(project, "npm").run_one(
+            {"command": "./npm", "args": ["install", "left-pad"]}
+        )
+        assert record.status == STATUS_REFUSED
+        assert record.executed is False
+
+    def test_install_only_tool_is_refused_whatever_it_was_asked(
+        self, tmp_path: Path
+    ) -> None:
+        project = self._project(tmp_path)
+        self._fake_tool(project, "apt")
+        record = self._runner(project, "apt").run_one(
+            {"command": "./apt", "args": ["update"]}
+        )
+        assert record.status == STATUS_REFUSED
+        assert record.executed is False
+
+    def test_non_install_commands_still_execute(self, tmp_path: Path) -> None:
+        project = self._project(tmp_path)
+        self._fake_tool(project, "npm")
+        record = self._runner(project, "npm").run_one(
+            {"command": "./npm", "args": ["test"]}
+        )
+        assert record.status == STATUS_EXECUTED
+        assert record.executed is True
+        assert record.exit_code == 0
+
+    def test_pip_queries_still_execute(self, tmp_path: Path) -> None:
+        project = self._project(tmp_path)
+        self._fake_tool(project, "pip")
+        record = self._runner(project, "pip").run_one(
+            {"command": "./pip", "args": ["list"]}
+        )
+        assert record.status == STATUS_EXECUTED
+        assert record.executed is True
+
+    def test_refusal_reason_names_the_remedy(self) -> None:
+        reason = install_refusal_reason("pip", ["install", "-r", "requirements.txt"])
+        assert reason is not None
+        assert "requirements.txt" in reason
+        assert "README" in reason
+        assert "never installs" in reason
+
+    def test_read_only_invocations_are_not_refused(self) -> None:
+        assert install_refusal_reason("pytest", ["-q"]) is None
+        assert install_refusal_reason("go", ["build", "./..."]) is None
+        assert install_refusal_reason("uv", ["run", "pytest"]) is None
+        assert install_refusal_reason("pip", ["list"]) is None
+
+
+# ===========================================================================
 # Reach: every code-producing path must carry it
 # ===========================================================================
 
@@ -179,7 +303,7 @@ class TestContractReachesEveryAgent:
     def test_user_message_carries_it(self) -> None:
         prompt = build_prompt({"task": {"id": "TASK-001", "owner": "software_agent"}})
         assert "requirements.txt" in prompt
-        assert '"pip"' in prompt
+        assert "never installs" in prompt.lower()
 
     def test_contract_is_stated_near_the_required_output(self) -> None:
         """Placed after the task, where "what must I deliver" is answered."""
@@ -191,20 +315,21 @@ class TestCodeAgentTemplatesDocumentIt:
     @pytest.mark.parametrize("name", CODE_AGENT_TEMPLATES)
     def test_template_has_a_dependencies_section(self, name: str) -> None:
         text = (PROMPT_DIR / name).read_text(encoding="utf-8")
-        assert "## Dependencies (automated, never announced)" in text, name
+        assert "## Dependencies (declared and documented, never installed)" in text, name
 
     @pytest.mark.parametrize("name", CODE_AGENT_TEMPLATES)
-    def test_template_states_declaration_and_installation(self, name: str) -> None:
+    def test_template_states_declaration_and_documentation(self, name: str) -> None:
         text = (PROMPT_DIR / name).read_text(encoding="utf-8")
         assert "requirements.txt" in text, name
-        assert '"pip"' in text and '"install"' in text, name
+        assert "pip install -r requirements.txt" in text, name
         assert "data.deploy" in text, name
+        assert "refused" in text, name
 
     @pytest.mark.parametrize("name", CODE_AGENT_TEMPLATES)
-    def test_template_states_ordering_and_honesty(self, name: str) -> None:
+    def test_template_stays_honest(self, name: str) -> None:
         text = (PROMPT_DIR / name).read_text(encoding="utf-8")
-        assert "before" in text.lower(), name
         assert "NOT RUN" in text, name
+        assert "never claim an install" in text, name
 
     def test_software_template_covers_the_reported_failure(self) -> None:
         text = (PROMPT_DIR / "07_SOFTWARE_FIRMWARE.md").read_text(encoding="utf-8")

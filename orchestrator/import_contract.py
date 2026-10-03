@@ -17,6 +17,13 @@ in the Definition of Done and in the one automatic repair round):
   must be a name that file actually defines at module level (definitions,
   assignments, imports — plus submodules for packages);
 - ``import a.b`` inside the project must point at a file that exists;
+- an absolute import that leaves the project must name the Python standard
+  library or a package declared in ``requirements.txt`` — otherwise the file
+  imports a module that exists nowhere, which is exactly how
+  ``projects/sys-usage`` shipped ``from models import ...`` with no
+  ``models.py`` in the tree (the dependency contract's remedy is a
+  *declaration*; without this check the import looked third-party and was
+  never questioned);
 - a delivered file must at least parse — a file that does not compile can
   never be imported, whatever it claims to contain.
 
@@ -32,6 +39,8 @@ unrelated task.
 from __future__ import annotations
 
 import ast
+import re
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set
 
@@ -56,6 +65,71 @@ _SKIP_DIRS = frozenset(
 #: How many exported names to name in a failure message (keeps the note that
 #: the repair round feeds back to the model readable).
 _MAX_NAMES_IN_MESSAGE = 8
+
+#: Import name -> distribution name, for the few packages whose PyPI name
+#: differs from the name in code. Without this, declaring ``pyyaml`` would
+#: still flag ``import yaml`` and send the repair round in a circle.
+_DISTRIBUTION_ALIASES = {
+    "yaml": "pyyaml",
+    "cv2": "opencv-python",
+    "pil": "pillow",
+    "attr": "attrs",
+    "sklearn": "scikit-learn",
+    "dateutil": "python-dateutil",
+    "dotenv": "python-dotenv",
+    "usb": "pyusb",
+    "serial": "pyserial",
+    "gi": "pygobject",
+}
+
+
+def _stdlib_modules() -> Set[str]:
+    """Top-level names of the running interpreter's standard library."""
+    return set(getattr(sys, "stdlib_module_names", ()))
+
+
+def _declared_dependencies(project: Path) -> Set[str]:
+    """Top-level package names declared in the project's ``requirements.txt``.
+
+    The dependency contract owns third-party imports: undeclared ones are
+    exactly the hallucinated-module failure (``from models import ...`` with
+    no ``models.py`` anywhere), so the import contract verifies the
+    declaration instead of guessing "third-party" from absence alone. An
+    unreadable or missing file simply declares nothing.
+    """
+    try:
+        text = (project / "requirements.txt").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return set()
+    declared: Set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "-")):
+            continue
+        stripped = stripped.split(";", 1)[0].strip()
+        match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", stripped)
+        if match:
+            declared.add(match.group(1).lower())
+    return declared
+
+
+def _is_known_external(
+    first: str, stdlib: Set[str], declared: Set[str]
+) -> bool:
+    """True when the top-level name is stdlib or declared in requirements.txt.
+
+    Only called after the name proved absent from the project: such an import
+    is either legitimate (we can name where it comes from) or the
+    hallucinated-module failure this checker exists to catch.
+    """
+    if first in stdlib:
+        return True
+    lowered = first.lower()
+    if lowered in declared:
+        return True
+    return _DISTRIBUTION_ALIASES.get(lowered) in declared
 
 
 class _Target:
@@ -94,6 +168,8 @@ def import_contract_problems(
 
     trees: Dict[str, ast.Module] = {}
     problems: List[str] = []
+    stdlib = _stdlib_modules()
+    declared = _declared_dependencies(project)
     for rel, path in _project_py_files(project).items():
         try:
             source = path.read_text(encoding="utf-8", errors="replace")
@@ -123,12 +199,14 @@ def import_contract_problems(
             if isinstance(node, ast.ImportFrom):
                 problems.extend(
                     _from_problems(project, importer_rel, node, touched,
-                                   importer_touched, target_for)
+                                   importer_touched, target_for,
+                                   stdlib=stdlib, declared=declared)
                 )
             elif isinstance(node, ast.Import):
                 problems.extend(
                     _import_problems(project, importer_rel, node, touched,
-                                     importer_touched, target_for)
+                                     importer_touched, target_for,
+                                     stdlib=stdlib, declared=declared)
                 )
     return sorted(set(problems))
 
@@ -299,6 +377,9 @@ def _from_problems(
     touched: Set[str],
     importer_touched: bool,
     target_for,
+    *,
+    stdlib: Set[str],
+    declared: Set[str],
 ) -> List[str]:
     module = node.module or ""
     level = node.level or 0
@@ -331,7 +412,19 @@ def _from_problems(
             return []
         parts = module.split(".")
         if not _in_project(project, parts[0]):
-            return []  # third-party or stdlib — not ours to verify
+            if _is_known_external(parts[0], stdlib, declared):
+                return []  # standard library or a declared dependency
+            if importer_touched:
+                # The failure class of the sys-usage rerun: `from models
+                # import ...` with no models.py and no declaration — looks
+                # third-party, exists nowhere, and was never questioned.
+                return [
+                    f"{importer_rel} imports {module}, which is not a project "
+                    "module, not in the Python standard library, and not "
+                    "declared in requirements.txt — deliver the module or "
+                    "declare the dependency"
+                ]
+            return []  # pre-existing breakage in a file this task did not touch
         target = target_for(".", parts)
         if target is None:
             if importer_touched:
@@ -384,6 +477,9 @@ def _import_problems(
     touched: Set[str],
     importer_touched: bool,
     target_for,
+    *,
+    stdlib: Set[str],
+    declared: Set[str],
 ) -> List[str]:
     if not importer_touched:
         return []
@@ -392,7 +488,15 @@ def _import_problems(
         parts = alias.name.split(".")
         first = parts[0]
         if not (project / first).exists() and not (project / f"{first}.py").exists():
-            continue  # third-party or stdlib — not ours to verify
+            if _is_known_external(first, stdlib, declared):
+                continue  # standard library or a declared dependency
+            problems.append(
+                f"{importer_rel} imports {alias.name}, which is not a project "
+                "module, not in the Python standard library, and not declared "
+                "in requirements.txt — deliver the module or declare the "
+                "dependency"
+            )
+            continue
         target = target_for(".", parts)
         if target is None:
             problems.append(

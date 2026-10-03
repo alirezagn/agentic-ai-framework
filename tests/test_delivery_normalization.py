@@ -282,3 +282,91 @@ class TestDottedAcceptanceResults:
         )
         problems = orchestrator.definition_of_done(task, output, preexisting=set())
         assert any("acceptance check failed: tool runs" in item for item in problems)
+
+
+# ---------------------------------------------------------------------------
+# Non-expected documents land at their real path (sys-usage TASK-003)
+# ---------------------------------------------------------------------------
+
+
+class TestNonExpectedDocumentsLand:
+    """A delivered file the plan never named is still a delivery.
+
+    Failure this pins: TASK-003 delivered ``requirements.txt`` through
+    ``data.documents`` — exactly what the dependency contract asks for — but
+    ``expected_outputs`` never named it, so ``_materialize_artifacts``
+    returned without writing anything and the remedy vanished silently.
+    """
+
+    def test_non_expected_document_writes_its_real_path(
+        self, test_project: Path
+    ) -> None:
+        agent = RequirementsAgent(project_path=test_project)
+        agent._delivery_snapshot = set()
+        task = {"id": "TASK-003", "expected_outputs": ["src/formatter.py"]}
+        output = agent.completed(
+            "TASK-003",
+            "delivered formatter and its declaration",
+            data={
+                "documents": {
+                    "src/formatter.py": "def format_metrics():\n    return ''\n",
+                    "requirements.txt": "psutil>=5.9\n",
+                }
+            },
+        )
+        agent._materialize_artifacts(task, output)
+
+        real = test_project / "src" / "formatter.py"
+        declaration = test_project / "requirements.txt"
+        assert real.is_file()
+        assert declaration.is_file(), (
+            "a non-expected document must land on disk — the dependency "
+            "contract tells the model to deliver exactly this file"
+        )
+        assert "psutil>=5.9" in declaration.read_text(encoding="utf-8")
+        assert not (test_project / "docs" / "requirements.txt").exists(), (
+            "only expected outputs get the docs/ mirror"
+        )
+
+    def test_existing_file_is_never_clobbered(self, test_project: Path) -> None:
+        keep = test_project / "requirements.txt"
+        keep.write_text("original\n", encoding="utf-8")
+        agent = RequirementsAgent(project_path=test_project)
+        agent._delivery_snapshot = set()
+        task = {"id": "TASK-003", "expected_outputs": ["docs/report.md"]}
+        output = agent.completed(
+            "TASK-003",
+            "re-delivered the declaration",
+            data={
+                "documents": {
+                    "docs/report.md": "# report\n",
+                    "requirements.txt": "attacker>=1.0\n",
+                }
+            },
+        )
+        agent._materialize_artifacts(task, output)
+
+        assert keep.read_text(encoding="utf-8") == "original\n", (
+            "pre-existing files belong to data.edits, never to the "
+            "non-expected write path"
+        )
+
+    def test_paths_escaping_the_project_are_ignored(self, test_project: Path) -> None:
+        agent = RequirementsAgent(project_path=test_project)
+        agent._delivery_snapshot = set()
+        task = {"id": "TASK-003", "expected_outputs": ["docs/report.md"]}
+        output = agent.completed(
+            "TASK-003",
+            "escape attempt",
+            data={
+                "documents": {
+                    "docs/report.md": "# report\n",
+                    "../evil.py": "X = 1\n",
+                    "/tmp/evil_non_expected.py": "X = 1\n",
+                }
+            },
+        )
+        agent._materialize_artifacts(task, output)
+
+        assert not (test_project.parent / "evil.py").exists()
+        assert not Path("/tmp/evil_non_expected.py").exists()

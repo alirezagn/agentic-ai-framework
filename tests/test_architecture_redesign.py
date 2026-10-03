@@ -10,7 +10,11 @@
    requirements are already satisfied in the running environment is skipped
    with a ``status=skipped`` record instead of re-running pip. The
    Definition of Done accepts a plan whose only deploy records are skips —
-   but never lets a skip back a claim that tests passed.
+   but never lets a skip back a claim that tests passed. Since the operator
+   directive of 2026-10-03 the flag append sits behind the install policy:
+   every unsatisfied install is refused (``install_refusal_reason``) after
+   the skip, so it is unreachable while the policy stands; the PEP 668
+   helpers remain unit-tested here.
 3. **Goal-driven decomposition** — a GUI or multi-module goal may not ship
    as one "implement everything" task: ``orchestrator.auto_plan`` expands it
    into the stage chain (data layer -> canvas/interfaces -> launcher) in
@@ -45,7 +49,7 @@ from orchestrator.auto_plan import (
     should_decompose,
 )
 from orchestrator.deploy_runner import (
-    STATUS_EXECUTED,
+    STATUS_REFUSED,
     STATUS_SKIPPED,
     DeployRecord,
     DeployRunner,
@@ -267,32 +271,37 @@ class TestPep668InstallHandling:
             **kwargs,
         )
 
-    def test_externally_managed_install_gets_break_system_packages(
+    def test_install_is_refused_whatever_the_pep668_state(
         self, fake_pip_project: Path
     ) -> None:
+        """Policy refusal precedes the flag append: no environment is touched."""
         record = self._runner(fake_pip_project, externally_managed=True).run_one(
             {"command": "./pip", "args": ["install", "some-uninstalled-pkg"]}
         )
-        assert record.status == STATUS_EXECUTED
-        assert record.executed is True
-        assert record.args.count("--break-system-packages") == 1
-        assert record.args[:2] == ["install", "some-uninstalled-pkg"]
+        assert record.status == STATUS_REFUSED
+        assert record.executed is False
+        assert "never installs" in record.reason
 
-    def test_unmanaged_install_is_left_alone(self, fake_pip_project: Path) -> None:
+    def test_unmanaged_install_is_refused_too(self, fake_pip_project: Path) -> None:
+        """Not externally managed changes nothing: installing is the policy line."""
         record = self._runner(fake_pip_project, externally_managed=False).run_one(
             {"command": "./pip", "args": ["install", "some-uninstalled-pkg"]}
         )
-        assert record.executed is True
+        assert record.status == STATUS_REFUSED
+        assert record.executed is False
         assert "--break-system-packages" not in record.args
 
-    def test_existing_flag_is_not_duplicated(self, fake_pip_project: Path) -> None:
+    def test_flag_bearing_install_never_spawns_pip(
+        self, fake_pip_project: Path
+    ) -> None:
         record = self._runner(fake_pip_project, externally_managed=True).run_one(
             {
                 "command": "./pip",
                 "args": ["install", "--break-system-packages", "some-uninstalled-pkg"],
             }
         )
-        assert record.args.count("--break-system-packages") == 1
+        assert record.status == STATUS_REFUSED
+        assert record.executed is False
 
     def test_non_pip_commands_never_get_the_flag(
         self, fake_pip_project: Path

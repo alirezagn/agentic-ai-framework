@@ -51,18 +51,17 @@ deliver it — the Definition of Done checks the file on disk.
 - Build the whole interface described above; do not ship the minimum that satisfies one sentence
 - Declare every cross-module method exactly — name, positional args, and return type as a `TypedDict`/Pydantic model or a documented scalar; no fallback-key guessing
 - Cast or reshape metrics at the boundary into a view layer, and deliver a tested `main.py` that runs the whole system end to end
-- - Declare and install every third-party import before requesting the test run
+- - Declare every third-party import in `requirements.txt` before requesting the test run
 - A bounded multi-turn edit session is active: each turn returns only the next change set, small enough to avoid truncation
 - EXISTS deliverables go through `data.edits`; MISSING ones through `data.documents`
 - Request every build and every test through `data.deploy` — a claimed result with no executed record is rejected by the Definition of Done
 - Report `data.acceptance_results`; an honest FAIL is always better than an omitted field
 
-## Dependencies (automated, never announced)
-- Any non-standard-library import you introduce makes you responsible for the install
+## Dependencies (declared and documented, never installed)
+- Any non-standard-library import you introduce makes you responsible for the declaration
 - **Declare**: create or update `requirements.txt` in the project root, one pinned requirement per line, and add it to `expected_outputs` so the Definition of Done checks it on disk. Deliver a missing file via `data.documents["requirements.txt"]`, an existing one via `data.edits["requirements.txt"]`
-- **Install**: add `{"command": "pip", "args": ["install", "-r", "requirements.txt"], "expect": "PASS"}` to `data.deploy` — placed **before** the pytest/unittest/verification entry, because `data.deploy` runs in list order
-- **Verify** only after the install returns `executed: true`; a `ModuleNotFoundError` in a later step means the declaration or the install step is missing, not that the environment is broken
-- If the install is refused or the channel is disabled, keep `requirements.txt` as the deliverable and report `data.test_status = "NOT RUN"` with the reason — never claim an install you have no executed record for
+- **Document**: put the setup command `pip install -r requirements.txt` in the README's installation section, for the human operator. The framework NEVER installs libraries or applications: install invocations in `data.deploy` (pip, apt, npm, ...) are refused by the runner with a policy reason
+- **Verify honestly**: request test steps against the environment as it is; a `ModuleNotFoundError` means a package is missing on this machine — report `data.test_status = "NOT RUN"` naming the missing packages and the setup command that provides them, and never claim an install you have no executed record for
 - Say plainly in `summary` when the standard library was sufficient and no dependency was added
 
 ## Data contract (shapes crossing components)

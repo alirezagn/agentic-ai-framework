@@ -18,6 +18,11 @@ Two independent escapes are tested here:
    in the summary is accepted without the structured field, because a
    fabricated "NOT RUN" only loses information while a fabricated pass still
    needs a ground-truth record.
+3. **Evidence follows the repair** (`TestDispatchReRunsDeployEvidenceAfterRepair`):
+   dispatch re-runs the verification the repaired output declares before
+   re-evaluating the DoD. Replaying the sys-usage TASK-006 failure, the old
+   code re-checked a *pre*-repair pytest exit 2 against the fixed files, so
+   the one automatic repair round could never clear the evidence gate.
 
 Layout note: the suite lives at the repository root (``conftest.py`` supplies
 ``build_test_project`` / ``FakeLLMClient``).
@@ -37,7 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from conftest import FakeLLMClient, build_test_project  # noqa: E402
+from conftest import FakeDeployRunner, FakeLLMClient, build_test_project  # noqa: E402
 from orchestrator import config  # noqa: E402
 from orchestrator.agents.llm_agent import LLMAgent, repair_remedies  # noqa: E402
 from orchestrator.orchestrator import MasterOrchestrator  # noqa: E402
@@ -289,6 +294,88 @@ class TestDispatchRepairsEvidenceRejection:
         assert len(client.calls) == 2, "one rejection, one repair round"
         prompt = client.calls[-1]["messages"][-1]["content"]
         assert "EVIDENCE problem" in prompt
+        task = orch.get_task("TASK-002")
+        assert task["status"] == config.TASK_DONE
+        assert task["execution"]["last_error"] is None
+
+
+class TestDispatchReRunsDeployEvidenceAfterRepair:
+    """The repair round must be judged against the repaired workspace.
+
+    Failure this pins (sys-usage TASK-006, rerun 2): the first turn's pytest
+    exited 2 because the test file itself was broken; the repair fixed the
+    file at 16:48:34; dispatch then re-evaluated the DoD with the deploy
+    record from 16:48:12 — the pre-repair failure — so the repair could never
+    be accepted and the task failed with a stale ``pytest exited 2``.
+
+    The old behaviour is exactly one assertion here: without the re-run the
+    task stays FAILED and the runner was asked exactly once.
+    """
+
+    def test_repaired_evidence_replaces_the_stale_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = build_test_project(tmp_path / "p")
+        document = yaml.safe_load((project / "TASKS.yaml").read_text(encoding="utf-8"))
+        for entry in document["tasks"]:
+            if entry.get("id") == "TASK-002":
+                entry["expected_outputs"] = ["docs/TEST_REPORT.md"]
+        (project / "TASKS.yaml").write_text(
+            yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+        )
+
+        body = "# TEST_REPORT\n\nREQ-001 -> test_monitor\n"
+        deploy = [{"command": "pytest", "args": ["-q"], "expect": "PASS"}]
+        first = _answer(
+            "TASK-002",
+            "software_agent",
+            "Generated TEST_REPORT.md for the mapped requirements",
+            documents={"docs/TEST_REPORT.md": body},
+            deploy=deploy,
+        )
+        second = _answer(
+            "TASK-002",
+            "software_agent",
+            "Repaired the failing test module and regenerated the report",
+            documents={"docs/TEST_REPORT.md": body},
+            deploy=deploy,
+        )
+        client = FakeLLMClient([first, second])
+
+        class Dummy(LLMAgent):
+            AGENT_ID = "software_agent"
+
+        dummy = Dummy(project_path=project, llm_client=client)
+
+        class SequencedRunner(FakeDeployRunner):
+            """First run fails (the broken file), the post-repair run passes."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.codes = [1, 0]
+
+            def run_one(self, invocation: Dict[str, Any]) -> Any:
+                self.exit_code = self.codes.pop(0) if self.codes else 0
+                return super().run_one(invocation)
+
+        runner = SequencedRunner()
+        orch = MasterOrchestrator(
+            project, checkpoints_root=tmp_path / "ck", auto_checkpoint=False
+        )
+        orch.deploy_runner = runner
+        monkeypatch.setattr(orch, "resolve_agent", lambda owner, fresh=False: dummy)
+
+        result = orch.dispatch("TASK-002")
+
+        assert result.new_status == config.TASK_DONE, (
+            result.output.summary,
+            result.output.errors,
+        )
+        assert len(client.calls) == 2, "one rejection, one repair round"
+        assert len(runner.requests) == 2, (
+            "the repaired workspace must be re-verified, not judged by the "
+            "pre-repair record"
+        )
         task = orch.get_task("TASK-002")
         assert task["status"] == config.TASK_DONE
         assert task["execution"]["last_error"] is None

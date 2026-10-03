@@ -104,34 +104,35 @@ OUTPUT_FORMAT_INSTRUCTIONS = (
 
 #: Dependency-management contract for any agent that introduces an import.
 #:
-#: The failure this prevents is specific and was observed in
-#: ``projects/sys_mon``: the agent delivered correct code importing ``psutil``,
-#: wrote the imports, and reported "you may need to install psutil" **in prose**.
-#: No ``requirements.txt`` was created and no ``data.deploy`` step was requested,
-#: so the very next turn — the test run — died at import with
-#: ``ModuleNotFoundError``, and the orchestrator's own suite could not even be
-#: collected. A warning in ``summary`` installs nothing.
+#: Two different failures shaped it. In ``projects/sys_mon`` the agent
+#: delivered correct code importing ``psutil`` and reported "you may need to
+#: install psutil" **in prose** — no ``requirements.txt``, no ``data.deploy``
+#: step, so the very next turn died at import with ``ModuleNotFoundError``.
+#: A warning in ``summary`` installs nothing.
 #:
-#: Two obligations, and the ordering between them is the point:
+#: In the ``projects/sys-usage`` rerun the opposite failure appeared: the
+#: model asked ``data.deploy`` to ``pip install -r requirements.txt`` and the
+#: runner executed it twice into a PEP 668 system interpreter
+#: (``--break-system-packages``). Operator directive, recorded 2026-10-03:
+#: **never install libraries or applications — declare them and document the
+#: setup command.** :func:`orchestrator.deploy_runner.install_refusal_reason`
+#: enforces it; install invocations come back ``executed: false`` with a
+#: policy reason.
+#:
+#: So the contract has exactly two obligations, in this order:
 #:
 #: 1. **Declare** the dependency as a file the Definition of Done can see.
-#: 2. **Install** it through ``data.deploy``, ordered *before* the test or
-#:    verification step that needs it.
+#: 2. **Document** the setup command for the human operator (README), and
+#:    verify only against the environment as it is.
 #:
-#: Declaring without installing is what happens today; installing without
-#: declaring is unreproducible. Both, in that order, is the deliverable.
-#:
-#: The honest-failure clause is load-bearing and mirrors the existing deploy
-#: contract: the execution channel is opt-in and closed by default
-#: (:data:`config.DEPLOY_ENABLED` is False and :data:`config.DEPLOY_ALLOWLIST` is
-#: empty), so ``pip`` is normally **not** allowlisted. An instruction that
-#: merely said "always install" would push the model to claim an install it could
-#: not perform — trading a missing file for a fabricated execution record, which
-#: this framework treats as the more serious defect.
+#: The honest-failure clause stays load-bearing: a refusal (policy, disabled
+#: channel, missing allowlist) is a legitimate finding — ``NOT RUN`` plus the
+#: named packages beats a fabricated execution record, which this framework
+#: treats as the more serious defect.
 DEPENDENCY_AUTOMATION_INSTRUCTIONS = (
-    "Dependency contract — third-party imports must be automated, not announced:\n"
+    "Dependency contract — declare and document, never install:\n"
     "- The moment your code imports a package that is not in the Python standard "
-    "library, you OWN the install. Mentioning it in `summary` or `warnings` "
+    "library, you OWN the declaration. Mentioning it in `summary` or `warnings` "
     "installs nothing.\n"
     "- STEP 1 — DECLARE: create or update `requirements.txt` in the PROJECT ROOT, "
     "one requirement per line, pinned with `>=` (e.g. `psutil>=5.9`). Deliver it "
@@ -140,21 +141,23 @@ DEPENDENCY_AUTOMATION_INSTRUCTIONS = (
     "the task's `expected_outputs` so the Definition of Done verifies it is on "
     "disk. Read-only imports you did not introduce (already declared) need no "
     "new entry.\n"
-    "- STEP 2 — INSTALL: emit the install as an explicit `data.deploy` entry — "
-    '{"command": "pip", "args": ["install", "-r", "requirements.txt"], '
-    '"expect": "PASS", "rationale": "install declared dependencies"}. '
-    "ORDER MATTERS: `data.deploy` runs in list order, so the install entry must "
-    "come BEFORE any pytest, unittest or verification-script entry, or those run "
-    "against an environment that lacks the package.\n"
-    "- STEP 3 — VERIFY: only after the install has returned `executed: true`, "
-    "request the tests. If a test step fails with `ModuleNotFoundError`, that is "
-    "a missing STEP 1 or STEP 2 on your side, not an environment problem to report.\n"
-    "- `pip` is allowlisted only when the operator enabled execution. If the "
-    "install comes back `executed: false` (channel disabled, command refused, or "
-    "no network), that is a legitimate finding: keep `requirements.txt` as your "
-    "deliverable, set `data.test_status = \"NOT RUN\"`, and state in `warnings` "
-    "exactly which packages could not be installed and why. Never report a "
-    "dependency as installed without a matching executed record.\n"
+    "- STEP 2 — DOCUMENT: add the setup command to the README's installation "
+    "section — `pip install -r requirements.txt` — for the HUMAN operator to "
+    "run. The framework NEVER installs libraries or applications: an install "
+    "invocation you put in `data.deploy` (pip, apt, npm, cargo, ...) is "
+    "refused by the runner with a policy reason, and a refused entry proves "
+    "nothing about your code.\n"
+    "- STEP 3 — VERIFY: request the tests against the environment as it is. "
+    "If a step fails with `ModuleNotFoundError`, the package is simply not "
+    "installed on this machine: that is a missing STEP 1 or STEP 2, not an "
+    "environment bug — report `data.test_status = \"NOT RUN\"` and state in "
+    "`warnings` exactly which packages are missing and the setup command that "
+    "provides them.\n"
+    "- Refusals are findings too: when an invocation comes back "
+    "`executed: false` (policy refusal, channel disabled, command not on the "
+    "allowlist), keep `requirements.txt` as your deliverable and report "
+    "`NOT RUN` with the record's reason. Never report a dependency as "
+    "installed — you have no executed record that could ever prove it.\n"
     "- Prefer the standard library when it genuinely suffices, and say so in "
     "`summary`; a dependency you do not need is not a dependency to manage."
 )

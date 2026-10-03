@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -62,13 +62,26 @@ CONSUMER_DRIFTED = (
 )
 
 
-def _project(root: Path, files: Dict[str, str]) -> Path:
+#: Declared by default so the existing fixtures (``import psutil``,
+#: ``requests``, ``numpy``, ``ujson``) keep their meaning: they exercise the
+#: drift checks, not the declaration rule. Pass ``requirements=None`` to
+#: simulate a project that has never heard of declarations.
+_DEFAULT_REQUIREMENTS = "psutil>=5.9\nrequests>=2.31\nnumpy>=1.26\nujson>=5\n"
+
+
+def _project(
+    root: Path,
+    files: Dict[str, str],
+    requirements: Optional[str] = _DEFAULT_REQUIREMENTS,
+) -> Path:
     project = root / "p"
     project.mkdir(parents=True, exist_ok=True)
     for rel, body in files.items():
         path = project / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
+    if requirements is not None:
+        (project / "requirements.txt").write_text(requirements, encoding="utf-8")
     return project
 
 
@@ -174,7 +187,8 @@ class TestScopeIsLimitedToTheTask:
         # This task delivered something else entirely (a doc).
         assert import_contract_problems(project, ["docs/REPORT.md"]) == []
 
-    def test_third_party_imports_are_never_checked(self, tmp_path: Path) -> None:
+    def test_declared_third_party_imports_are_not_checked(self, tmp_path: Path) -> None:
+        """Declared in requirements.txt (or stdlib) — nowhere near this checker."""
         project = _project(
             tmp_path,
             {
@@ -199,6 +213,80 @@ class TestScopeIsLimitedToTheTask:
     def test_empty_delivery_checks_nothing(self, tmp_path: Path) -> None:
         project = _project(tmp_path, {"main.py": "from nope import missing\n"})
         assert import_contract_problems(project, []) == []
+
+
+# ===========================================================================
+# The declaration rule: what leaves the project must be nameable
+# ===========================================================================
+
+
+class TestUndeclaredExternalImportIsReported:
+    """The sys-usage TASK-006 failure: ``from models import ...``, no models.py.
+
+    The absolute-import branch used to skip anything absent from the project
+    ("third-party or stdlib — not ours to verify"), so a hallucinated module
+    looked exactly like a legitimate dependency — and the delivered file
+    died at import with ``ModuleNotFoundError`` during the test run.
+    """
+
+    def test_undeclared_third_party_import_is_reported(self, tmp_path: Path) -> None:
+        project = _project(
+            tmp_path,
+            {"src/collector.py": "from models import Metric\n"},
+            requirements=None,
+        )
+        problems = import_contract_problems(project, ["src/collector.py"])
+        assert len(problems) == 1
+        assert "models" in problems[0]
+        assert "not in the Python standard library" in problems[0]
+        assert "requirements.txt" in problems[0]
+        assert "deliver the module or declare the dependency" in problems[0]
+
+    def test_declared_third_party_import_passes(self, tmp_path: Path) -> None:
+        project = _project(
+            tmp_path,
+            {"src/collector.py": "import psutil\n"},
+            requirements="psutil>=5.9\n",
+        )
+        assert import_contract_problems(project, ["src/collector.py"]) == []
+
+    def test_stdlib_imports_pass_without_any_declaration(self, tmp_path: Path) -> None:
+        project = _project(
+            tmp_path,
+            {"src/collector.py": "import os\nfrom json import dumps\n"},
+            requirements=None,
+        )
+        assert import_contract_problems(project, ["src/collector.py"]) == []
+
+    def test_distribution_alias_is_understood(self, tmp_path: Path) -> None:
+        """``pyyaml`` is the distribution; ``yaml`` is what the code imports."""
+        project = _project(
+            tmp_path,
+            {"src/collector.py": "import yaml\n"},
+            requirements="pyyaml>=6.0\n",
+        )
+        assert import_contract_problems(project, ["src/collector.py"]) == []
+
+    def test_plain_import_of_the_missing_module_is_reported(self, tmp_path: Path) -> None:
+        project = _project(
+            tmp_path,
+            {"src/collector.py": "import models\n"},
+            requirements=None,
+        )
+        problems = import_contract_problems(project, ["src/collector.py"])
+        assert len(problems) == 1
+        assert "requirements.txt" in problems[0]
+
+    def test_pre_existing_undeclared_import_is_not_this_tasks_fault(
+        self, tmp_path: Path
+    ) -> None:
+        project = _project(
+            tmp_path,
+            {"src/old.py": "import ghost_package\n"},
+            requirements=None,
+        )
+        # This task delivered a doc, not src/old.py: scope stays symmetric.
+        assert import_contract_problems(project, ["docs/REPORT.md"]) == []
 
 
 # ===========================================================================

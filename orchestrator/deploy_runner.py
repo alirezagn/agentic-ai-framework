@@ -483,6 +483,123 @@ def _install_tail(executable: Optional[str], args: Sequence[str]) -> Optional[Li
     return rest[1:]
 
 
+# ---------------------------------------------------------------------------
+# Policy: the framework never installs packages
+# ---------------------------------------------------------------------------
+#
+# Operator directive (2026-10-03, after the sys-usage rerun pip-installed
+# twice into a PEP 668 system interpreter): dependencies are DECLARED in
+# requirements.txt and DOCUMENTED as setup instructions; the framework never
+# installs libraries or applications. Install-shaped invocations therefore
+# come back as an honest ``refused`` record — the model gets the policy
+# reason, the DoD gets evidence that nothing ran, and the environment is
+# untouched. The PEP 668 append below still exists for a future policy
+# change, but is unreachable while this refusal stands.
+
+#: Refusal reason handed to the model (flows into the DoD message verbatim).
+_INSTALL_POLICY_REASON = (
+    "package installation is refused by policy: the framework never installs "
+    "libraries or applications — declare the dependency in requirements.txt "
+    "and document the setup command (pip install -r requirements.txt) in the "
+    "README; request verification only against dependencies already present"
+)
+
+#: Executables whose every invocation manipulates the package environment.
+_INSTALL_ONLY_TOOLS = frozenset(
+    {
+        "apt",
+        "apt-get",
+        "aptitude",
+        "dnf",
+        "yum",
+        "apk",
+        "pacman",
+        "zypper",
+        "brew",
+        "port",
+        "pipx",
+        "easy_install",
+        "snap",
+        "flatpak",
+        "choco",
+        "winget",
+        "dpkg",
+        "rpm",
+    }
+)
+
+#: Multi-purpose tools: only the install/remove-shaped subcommands are
+#: refused, so ``npm test``, ``go build``, ``uv run pytest`` still execute.
+_PACKAGE_MANAGERS = frozenset(
+    {
+        "pip",
+        "pip3",
+        "poetry",
+        "pipenv",
+        "npm",
+        "yarn",
+        "pnpm",
+        "bun",
+        "cargo",
+        "go",
+        "gem",
+        "composer",
+        "conda",
+        "mamba",
+        "micromamba",
+        "uv",
+    }
+)
+#: Subcommands that make a package manager change what is installed.
+#: The check covers the first two argument positions, which is where every
+#: real CLI puts its verb (``dnf -y install pkg``, ``uv pip install pkg``).
+_INSTALL_SUBCOMMANDS = frozenset(
+    {
+        "install",
+        "uninstall",
+        "remove",
+        "add",
+        "update",
+        "upgrade",
+        "sync",
+        "require",
+        "get",
+        "del",
+        "delete",
+        "autoremove",
+        "purge",
+        "dist-upgrade",
+        "ci",
+    }
+)
+
+
+def install_refusal_reason(
+    executable: Optional[str], args: Sequence[str]
+) -> Optional[str]:
+    """Policy reason when this invocation would install or remove packages.
+
+    Covers ``pip install`` / ``python -m pip install`` (via
+    :func:`is_pip_install`), install-only tools (``apt``, ``brew``, ... — any
+    invocation), and install-shaped subcommands of multi-tools
+    (``npm install``, ``go get``, ``uv pip install``). Returns ``None`` for
+    anything else, including read-only queries (``pip list``, ``npm test``).
+    """
+    if is_pip_install(executable, args):
+        return _INSTALL_POLICY_REASON
+    base = os.path.basename(str(executable or "")).lower()
+    for suffix in (".exe", ".bat", ".cmd"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    if base in _INSTALL_ONLY_TOOLS:
+        return _INSTALL_POLICY_REASON
+    if base in _PACKAGE_MANAGERS:
+        head = [str(arg).lower() for arg in list(args)[:2]]
+        if any(token in _INSTALL_SUBCOMMANDS for token in head):
+            return _INSTALL_POLICY_REASON
+    return None
+
+
 def _distribution_version(name: str) -> Optional[str]:
     try:
         from importlib import metadata
@@ -820,9 +937,13 @@ class DeployRunner:
 
         command = os.path.basename(executable) or executable
 
-        # PEP 668 + redundant installs. Skip runs first: a command with
-        # nothing to do gets no flag and no process.
-        if is_pip_install(executable, args):
+        # Redundant installs: a command with nothing to do gets no process.
+        # The skip check runs BEFORE the policy refusal below — it performs
+        # no install (it only proves the requirements are already present),
+        # so its truthful `skipped` record is strictly more informative than
+        # a refusal and the DoD already knows how to read it.
+        pip_install = is_pip_install(executable, args)
+        if pip_install:
             skip_reason = pip_requirements_satisfied(
                 executable, args, project_path=self.project_path
             )
@@ -847,6 +968,27 @@ class DeployRunner:
                     declared_expect=declared_expect,
                     expect_matched=None,
                 )
+
+        # Policy (see install_refusal_reason): the framework never installs
+        # libraries or applications. Reached only after the allowlist and the
+        # satisfied-skip, so when this fires an install really would have run.
+        refusal = install_refusal_reason(executable, args)
+        if refusal:
+            logger.info("deploy: refusing '%s' — %s", command, refusal)
+            return DeployRecord(
+                command=command,
+                args=args,
+                cwd=str(self.project_path),
+                executed=False,
+                status=STATUS_REFUSED,
+                reason=refusal,
+                declared_expect=declared_expect,
+                expect_matched=None,
+            )
+
+        # PEP 668 flagging for the installs a future policy may allow again
+        # (currently unreachable: every unsatisfied install is refused above).
+        if pip_install:
             managed = (
                 self._explicit_externally_managed
                 if self._explicit_externally_managed is not None

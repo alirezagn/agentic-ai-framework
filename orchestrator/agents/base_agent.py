@@ -537,6 +537,11 @@ DATA_DEPLOY_CONTRACT = (
     "- Request execution EARLY, before writing your summary: results come back in "
     'data.deploy_results with {executed, exit_code, stdout_tail, stderr_tail}, '
     "and a transcript is saved under docs/evidence/<task>/.\n"
+    "- Package-installation commands (pip install, python -m pip install, apt, "
+    "npm install, ...) are REFUSED BY POLICY: the framework never installs "
+    "libraries or applications. Declare dependencies in requirements.txt and "
+    "document the setup command in the README instead — never list an install "
+    "in data.deploy.\n"
     "- If execution is unavailable or refused, that is a legitimate finding: set "
     'data.test_status = "NOT RUN" and say what you could not verify and why. An '
     "honest NOT RUN completes the task on its other merits.\n"
@@ -696,8 +701,10 @@ class BaseAgent:
         # Single source of truth: the same constant the prompt templates embed
         # and that tests/test_dependency_automation.py asserts on. Restated
         # here because this contract is what every agent's system_rules()
-        # actually delivers, and a dependency announced in prose rather than
-        # installed is what leaves the next turn unable to run the tests.
+        # actually delivers, and a dependency left undeclared — or "installed"
+        # only in prose — is what leaves the next turn unable to run the
+        # tests. Installs are refused by policy; the declaration is the
+        # deliverable.
         + DEPENDENCY_AUTOMATION_INSTRUCTIONS
         # Same reasoning for cross-component data shapes: an agent that returns
         # a nested mapping while its consumer expects a flat scalar is not
@@ -1380,17 +1387,27 @@ class BaseAgent:
             output.artifacts.append(rel)
 
     def _materialize_artifacts(self, task: Dict[str, Any], output: AgentOutput) -> None:
-        """Write every expected output of the task into ``docs/``."""
+        """Write every expected output of the task into ``docs/``.
+
+        Delivered documents that are *not* among ``expected_outputs`` are
+        written to their real path as well (never clobbering an existing
+        file, never escaping the project): a mid-plan ``requirements.txt`` or
+        a module the plan did not foresee is still a real delivery, and the
+        dependency contract explicitly tells the model to deliver exactly
+        that file — writing it nowhere silently discarded the remedy.
+        """
         from ..state_manager import save_text_file
 
         expected = task.get("expected_outputs") or []
-        if not isinstance(expected, list) or not expected:
-            return
+        if not isinstance(expected, list):
+            expected = []
         # Fold dotted/list-form channels so delivered content is written to
         # the real path instead of degrading into a rendered docs/ wrapper.
         output.data = normalize_delivery_data(output.data)
         documents = output.data.get("documents")
         documents = documents if isinstance(documents, dict) else {}
+        if not expected and not documents:
+            return
         docs_dir = self.docs_dir()
         snapshot = getattr(self, "_delivery_snapshot", None)
         if snapshot is None:
@@ -1398,7 +1415,8 @@ class BaseAgent:
         project_root = self.project_path.resolve()
         written: List[str] = []
         try:
-            docs_dir.mkdir(parents=True, exist_ok=True)
+            if expected:
+                docs_dir.mkdir(parents=True, exist_ok=True)
             for raw_name in expected:
                 if not isinstance(raw_name, str) or not raw_name.strip():
                     continue
@@ -1442,6 +1460,41 @@ class BaseAgent:
                     save_text_file(real_path, content)
                 except OSError:
                     continue
+            # Non-expected deliveries land at their real path too (see the
+            # method docstring): same containment and no-clobber rules as
+            # above, but no docs/ mirror — the mirror belongs to outputs the
+            # plan actually declared.
+            expected_names = {
+                str(item).strip()
+                for item in expected
+                if isinstance(item, str) and str(item).strip()
+            }
+            expected_basenames = {Path(name).name for name in expected_names}
+            for raw_name, body in documents.items():
+                name = str(raw_name).strip()
+                if (
+                    not name
+                    or not isinstance(body, str)
+                    or not body.strip()
+                    or name in expected_names
+                    or Path(name).name in expected_basenames
+                ):
+                    continue  # the expected-output loop above owns these
+                if name.split("/")[0] == "docs":
+                    continue
+                real_target = Path(name)
+                if real_target.is_absolute() or ".." in real_target.parts:
+                    continue
+                try:
+                    real_path = (project_root / real_target).resolve()
+                    if not real_path.is_relative_to(project_root) or real_path.exists():
+                        continue  # escaping the project, or data.edits territory
+                    if not real_path.parent.is_dir():
+                        real_path.parent.mkdir(parents=True, exist_ok=True)
+                    save_text_file(real_path, body)
+                except OSError:
+                    continue
+                written.append(name)
         except OSError as exc:
             output.status = config.AGENT_STATUS_FAILED
             output.errors.append(f"Artifact emission failed: {exc}")
