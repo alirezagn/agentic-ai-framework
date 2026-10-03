@@ -24,7 +24,19 @@ import re
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Optional, Set, Type
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+)
 
 from .. import config
 from ..context_monitor import payload_chars
@@ -153,7 +165,9 @@ def delivery_problems(
     project = Path(project_path)
     data: Dict[str, Any] = {}
     if output is not None and isinstance(output.data, dict):
-        data = output.data
+        # Re-read through the normalizer: outputs built outside from_dict
+        # (tests, recovery shims) may still carry dotted/list channel shapes.
+        data = normalize_delivery_data(output.data)
     documents = data.get("documents") if isinstance(data.get("documents"), dict) else {}
     edits = data.get("edits") if isinstance(data.get("edits"), dict) else {}
     applied = data.get("edits_applied") if isinstance(data.get("edits_applied"), list) else []
@@ -191,6 +205,9 @@ def delivery_problems(
             # Dispatch-context checks (snapshot provided) require the real
             # file whenever the output delivered real content for it — a
             # docs/ mirror alone is not a delivery (the TASK-004 pattern).
+            # Content hidden by a key-shape variant (dotted ``data.documents``,
+            # list-form records) is folded by ``normalize_delivery_data``
+            # before this runs, so those deliveries count as visible too.
             # Outputs with no delivered content (rendered report artifacts)
             # keep the legacy mirror-only acceptance.
             if (
@@ -278,6 +295,141 @@ class AgentOutputError(AgentError):
     """The agent produced output that could not be parsed or validated."""
 
 
+def _strip_data_prefix(key: Any) -> Tuple[str, bool]:
+    """Normalise one payload key, reporting whether it was dotted.
+
+    Models sometimes emit channel names literally — ``"data.documents"``
+    inside ``data`` (or even at the payload top level) instead of nesting
+    under the ``data`` object. Every reader looks up ``data["documents"]``,
+    so a dotted key hides the delivery: the docs/ mirror gets rendered but
+    the real file is never written and no delivery channel is visible.
+    """
+    text = str(key)
+    dotted = False
+    while text.startswith("data."):
+        text = text[len("data.") :]
+        dotted = True
+    return text, dotted
+
+
+def _record_path(record: Mapping[str, Any]) -> str:
+    for field_name in ("path", "file", "filename", "target"):
+        value = record.get(field_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _documents_from_records(records: Sequence[Any]) -> Dict[str, str]:
+    """``data.documents`` as a list of ``{path, content}`` records → dict.
+
+    The list form shows up in truncation recovery (``data.documents[0]``
+    carries its own ``path`` field) and from models that mirror the JSON
+    examples as arrays; materialization and the delivery checks only
+    understand the keyed-dict shape, so the list must be folded or the
+    content is invisible there too.
+    """
+    out: Dict[str, str] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        path = _record_path(record)
+        if not path or path in out:
+            continue
+        content = record.get("content")
+        if not isinstance(content, str):
+            content = record.get("text") if isinstance(record.get("text"), str) else None
+        if content is None:
+            continue
+        out[path] = content
+    return out
+
+
+def _edits_from_records(records: Sequence[Any]) -> Dict[str, Any]:
+    """``data.edits`` as a list of step records → the keyed dict shape.
+
+    Accepts ``{path, search, replace}`` step records (repeated paths become
+    an ordered step list) and ``{path, steps: [...]}`` bundles, matching the
+    shapes :meth:`BaseAgent._apply_edits` already understands once the
+    records are keyed by path.
+    """
+    out: Dict[str, Any] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        path = _record_path(record)
+        if not path:
+            continue
+        raw_spec = record.get("steps")
+        if not isinstance(raw_spec, list) or not raw_spec:
+            if "search" in record or "replace" in record:
+                raw_spec = [
+                    {
+                        "search": record.get("search"),
+                        "replace": record.get("replace"),
+                    }
+                ]
+            elif isinstance(record.get("content"), str):
+                raw_spec = [{"search": "", "replace": record["content"]}]
+            else:
+                continue
+        steps = [step for step in raw_spec if isinstance(step, dict)]
+        if not steps:
+            continue
+        if path not in out:
+            out[path] = steps if len(steps) > 1 else steps[0]
+        else:
+            existing = out[path]
+            existing_list = existing if isinstance(existing, list) else [existing]
+            out[path] = existing_list + steps
+    return out
+
+
+def normalize_delivery_data(data: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Fold model key-shape variants into the channels every reader expects.
+
+    Two silent-loss shapes produced by real model runs:
+
+    * dotted keys — ``data = {"data.documents": {"src/x.py": "..."}}`` (or
+      the flat payload-level form ``{"data.documents": ...}`` handled by
+      :meth:`AgentOutput.from_dict`), which no reader ever sees;
+    * ``documents``/``edits`` as lists of path records instead of the
+      keyed dicts the contract shows.
+
+    Properly-named keys always win over dotted duplicates; only missing
+    entries are filled in from the dotted variant.
+    """
+    items = list((data or {}).items())
+    plain: Dict[str, Any] = {}
+    dotted: Dict[str, Any] = {}
+    for raw_key, value in items:
+        key, was_dotted = _strip_data_prefix(raw_key)
+        if not key:
+            continue
+        if not was_dotted:
+            plain[key] = value
+            continue
+        if key not in dotted:
+            dotted[key] = value
+            continue
+        existing = dotted[key]
+        if isinstance(existing, dict) and isinstance(value, dict):
+            dotted[key] = {**value, **existing}
+    merged = dict(plain)
+    for key, value in dotted.items():
+        if key not in merged:
+            merged[key] = value
+        elif isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = {**value, **merged[key]}
+    documents = merged.get("documents")
+    if isinstance(documents, list):
+        merged["documents"] = _documents_from_records(documents)
+    edits = merged.get("edits")
+    if isinstance(edits, list):
+        merged["edits"] = _edits_from_records(edits)
+    return merged
+
+
 @dataclass
 class AgentOutput:
     """Structural output returned by every agent execution."""
@@ -322,12 +474,30 @@ class AgentOutput:
     def from_dict(cls, payload: Dict[str, Any]) -> "AgentOutput":
         if not isinstance(payload, dict):
             raise AgentOutputError("Agent output payload must be a dictionary")
+        # Single choke point for model-shaped payloads: fold dotted
+        # ``data.*`` keys (payload level and inside ``data``) and list-form
+        # channels into the shapes materialization/DoD read. Without this a
+        # delivery under a dotted key renders only the docs/ wrapper — the
+        # real file is never written and the channel reads as empty, which
+        # used to let the task pass as DONE with the expected output missing.
+        data = dict(payload.get("data") or {})
+        flat: Dict[str, Any] = {}
+        for raw_key, value in payload.items():
+            key, was_dotted = _strip_data_prefix(raw_key)
+            if not was_dotted or not key:
+                continue
+            if key in data or key in flat:
+                continue
+            flat[key] = value
+        if flat:
+            flat.update(data)
+            data = flat
         return cls(
             agent_id=str(payload.get("agent_id", "")),
             task_id=str(payload.get("task_id", "")),
             status=str(payload.get("status", "")),
             summary=str(payload.get("summary", "")),
-            data=dict(payload.get("data") or {}),
+            data=normalize_delivery_data(data),
             artifacts=[str(item) for item in (payload.get("artifacts") or [])],
             errors=[str(item) for item in (payload.get("errors") or [])],
             warnings=[str(item) for item in (payload.get("warnings") or [])],
@@ -1071,6 +1241,9 @@ class BaseAgent:
         ``search`` a ``ValueError``, either of which failed the whole dispatch
         for content the agent had in fact delivered.
         """
+        # Fold dotted/list-form channels first: a list-form data.edits would
+        # otherwise read as "no edits" and the delivered content dropped.
+        output.data = normalize_delivery_data(output.data)
         edits = output.data.get("edits")
         if not isinstance(edits, dict) or not edits:
             return
@@ -1178,6 +1351,9 @@ class BaseAgent:
         expected = task.get("expected_outputs") or []
         if not isinstance(expected, list) or not expected:
             return
+        # Fold dotted/list-form channels so delivered content is written to
+        # the real path instead of degrading into a rendered docs/ wrapper.
+        output.data = normalize_delivery_data(output.data)
         documents = output.data.get("documents")
         documents = documents if isinstance(documents, dict) else {}
         docs_dir = self.docs_dir()
@@ -1222,6 +1398,12 @@ class BaseAgent:
                     real_path = (project_root / real_target).resolve()
                     if not real_path.is_relative_to(project_root):
                         continue
+                    # The atomic writer stages a temp file next to the
+                    # target; a first delivery into a fresh subdirectory
+                    # (src/ on a new project) needs the directory created
+                    # first, exactly like _apply_edits does.
+                    if not real_path.parent.is_dir():
+                        real_path.parent.mkdir(parents=True, exist_ok=True)
                     save_text_file(real_path, content)
                 except OSError:
                     continue
