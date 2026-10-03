@@ -237,7 +237,15 @@ DATA_CONTRACT_INSTRUCTIONS = (
     "capitalisation, parameters in order, keyword-only arguments, return type. Do "
     "not reconstruct it from domain vocabulary, and do not write the call site "
     "first and then fit the definition to it. A signature you have not read is an "
-    "assumption, and assumptions at the seam are what break the integration."
+    "assumption, and assumptions at the seam are what break the integration.\n"
+    "- RUN THE SUITE SO THE PROJECT CAN LOAD IT. The bare `pytest` console "
+    "script does not put the PROJECT ROOT on sys.path, so `import src...` dies "
+    "with ModuleNotFoundError before a single test executes. Request "
+    "`python3 -m pytest <paths>` in data.deploy (the -m form puts the current "
+    "directory on sys.path), or ship a tests/conftest.py that inserts the "
+    "project root into sys.path — and declare pytest in requirements.txt like "
+    "any other third-party import: a test runner you cannot import is a "
+    "missing declaration, not an environment bug."
 )
 
 

@@ -25,7 +25,12 @@ in the Definition of Done and in the one automatic repair round):
   *declaration*; without this check the import looked third-party and was
   never questioned);
 - a delivered file must at least parse — a file that does not compile can
-  never be imported, whatever it claims to contain.
+  never be imported, whatever it claims to contain;
+- a delivered file must not *use* a name it never binds: a module-level
+  read of a name that is neither imported nor defined is a ``NameError``
+  waiting at run time (two reruns shipped exactly this — ``CpuMetrics``
+  used but never imported, then ``TypedDict`` never imported — while
+  every import in the file resolved cleanly, so nothing above fired).
 
 Deliberately *no* subprocess is spawned: the check is pure ``ast`` work on
 files already on disk, so the suite stays offline and hermetic, and the
@@ -39,7 +44,9 @@ unrelated task.
 from __future__ import annotations
 
 import ast
+import builtins
 import re
+import symtable
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set
@@ -65,6 +72,25 @@ _SKIP_DIRS = frozenset(
 #: How many exported names to name in a failure message (keeps the note that
 #: the repair round feeds back to the model readable).
 _MAX_NAMES_IN_MESSAGE = 8
+
+#: Names a file module can always read: the builtins plus the globals the
+#: interpreter itself binds for every module. Never flagged as undefined.
+_BUILTIN_NAMES = frozenset(dir(builtins)) | {
+    "__file__",
+    "__name__",
+    "__package__",
+    "__doc__",
+    "__spec__",
+    "__loader__",
+    "__builtins__",
+    "__qualname__",
+    "__module__",
+    "__debug__",
+    "__annotations__",
+    "__class__",
+    "__dict__",
+    "__path__",
+}
 
 #: Import name -> distribution name, for the few packages whose PyPI name
 #: differs from the name in code. Without this, declaring ``pyyaml`` would
@@ -184,6 +210,8 @@ def import_contract_problems(
                     "it cannot be imported; deliver valid Python"
                 )
             continue
+        if _is_touched(rel, touched):
+            problems.extend(_undefined_name_problems(rel, source, trees[rel]))
 
     cache: Dict[str, Optional[_Target]] = {}
 
@@ -224,6 +252,92 @@ def _is_touched(rel: str, touched: Set[str]) -> bool:
     # Mirrors delivery_problems' has_channel(): the payload may name a file by
     # its project-relative path or by its bare filename.
     return rel in touched or Path(rel).name in touched
+
+
+def _undefined_name_problems(rel: str, source: str, tree: ast.Module) -> List[str]:
+    """Names the module reads but never binds — the ``NameError`` class.
+
+    Conservative by construction, because a delivery check that cries wolf
+    fails healthy tasks:
+
+    - a module with a star import is skipped entirely (any name could come
+      from it, so guessing would be wrong);
+    - only bindings visible in a *global* scope count as defined: function
+      and class locals never satisfy a module-level read, ``global``
+      statements in nested scopes do, and module-level assignment order is
+      irrelevant (a module defines its names when the import finishes, not
+      statement by statement);
+    - the interpreter's own names (builtins plus module dunders) are never
+      flagged, and a walrus bound at module scope — including inside a
+      top-level comprehension, which binds the *module* scope per PEP 572 —
+      counts as a definition even though ``symtable`` records the assignment
+      in the comprehension's table.
+
+    Scope rules come from :mod:`symtable`, so they are CPython's, not a
+    re-implementation of them: the class-body read of an unimported
+    ``TypedDict`` is exactly the shape the rerun-5 ``src/collector.py``
+    shipped, and symtable already marks it as a global reference.
+    """
+    if any(
+        isinstance(node, ast.ImportFrom)
+        and any(alias.name == "*" for alias in node.names)
+        for node in ast.walk(tree)
+    ):
+        return []  # a star import could define any name: no verdict
+    try:
+        table = symtable.symtable(source, rel, "exec")
+    except (SyntaxError, ValueError):
+        return []  # the parse problem already reports this file
+
+    defined: Set[str] = set()
+    referenced: Set[str] = set()
+    for symbol in table.get_symbols():
+        name = symbol.get_name()
+        if symbol.is_assigned() or symbol.is_imported():
+            defined.add(name)
+        elif symbol.is_referenced():
+            referenced.add(name)
+
+    def visit(scope: "symtable.SymbolTable") -> None:
+        for symbol in scope.get_symbols():
+            if not symbol.is_global():
+                continue
+            name = symbol.get_name()
+            if symbol.is_assigned() or symbol.is_imported():
+                defined.add(name)
+            if symbol.is_referenced():
+                referenced.add(name)
+        for child in scope.get_children():
+            visit(child)
+
+    for child in table.get_children():
+        visit(child)
+
+    def module_walrus_targets(node: ast.AST) -> None:
+        # NamedExpr targets whose enclosing non-comprehension scope is the
+        # module bind module scope; anything under a def/class/lambda does
+        # not. Comprehensions are transparent for this purpose.
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+            ):
+                continue
+            if isinstance(child, ast.NamedExpr) and isinstance(child.target, ast.Name):
+                defined.add(child.target.id)
+            module_walrus_targets(child)
+
+    module_walrus_targets(tree)
+
+    undefined = sorted(referenced - defined - _BUILTIN_NAMES)
+    if not undefined:
+        return []
+    shown = undefined[:_MAX_NAMES_IN_MESSAGE]
+    suffix = ", ..." if len(undefined) > len(shown) else ""
+    return [
+        f"{rel} uses {', '.join(shown)}{suffix}, which the module never "
+        "imports or defines — Python would raise NameError; add the import "
+        "or define it"
+    ]
 
 
 def _project_py_files(project: Path) -> Dict[str, Path]:

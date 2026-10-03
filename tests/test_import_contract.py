@@ -498,10 +498,20 @@ class TestDeliveryIntegration:
         (src / "gui_controller.py").write_text(CONSUMER_OK, encoding="utf-8")
 
         orch = MasterOrchestrator(project, checkpoints_root=tmp_path / "ck")
+        # The controller already exists on disk, so the delivery claims it
+        # through data.edits — the only channel that modifies an existing
+        # file (a documents claim would be rejected as a silent drop).
         output = orch.resolve_agent("software_agent").completed(
             "TASK-001",
             "wired the controller to the collector",
-            data={"documents": {"src/gui_controller.py": CONSUMER_OK}},
+            data={
+                "edits": {
+                    "src/gui_controller.py": {
+                        "search": "def refresh():",
+                        "replace": "def refresh():",
+                    }
+                }
+            },
         )
         problems = orch.definition_of_done(
             {
@@ -527,3 +537,97 @@ class TestPromptPromisesTheCheck:
 
         assert "statically verified" in INTERFACE_ALIGNMENT_CONTRACT
         assert "Definition of Done" in INTERFACE_ALIGNMENT_CONTRACT
+
+
+# ===========================================================================
+# Undefined names: the CpuMetrics / TypedDict failure class
+# ===========================================================================
+
+
+class TestUndefinedNameIsCaught:
+    """A name a module reads but never binds is a NameError at run time.
+
+    Two reruns shipped exactly this: ``CpuMetrics`` used but never imported
+    (rerun 4, TASK-006) and ``TypedDict`` never imported (rerun 5,
+    TASK-007's ``src/collector.py``). Both parsed cleanly and both imported
+    nothing wrong, so the existing checks stayed silent while the project
+    could never run. The check is conservative: a module with a star import
+    is skipped entirely, and only names bound in a global scope are judged.
+    """
+
+    def test_undefined_name_in_a_delivered_file_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        project = _project(
+            tmp_path,
+            {"src/collector.py": "class Metrics(TypedDict):\n    cpu: float\n"},
+        )
+        problems = import_contract_problems(project, ["src/collector.py"])
+        assert problems, "a never-imported name must fail the delivery"
+        message = problems[0]
+        assert "TypedDict" in message
+        assert "src/collector.py" in message
+        assert "never imports or defines" in message
+        assert "NameError" in message
+
+    def test_imported_name_is_not_reported(self, tmp_path: Path) -> None:
+        project = _project(
+            tmp_path,
+            {
+                "src/collector.py": (
+                    "from typing import TypedDict\n\n"
+                    "class Metrics(TypedDict):\n    cpu: float\n"
+                )
+            },
+        )
+        assert import_contract_problems(project, ["src/collector.py"]) == []
+
+    def test_function_local_names_are_not_reported(
+        self, tmp_path: Path
+    ) -> None:
+        project = _project(
+            tmp_path,
+            {
+                "src/collector.py": (
+                    "def snapshot():\n"
+                    "    total = 0\n"
+                    "    return total + offset()\n"
+                    "def offset():\n"
+                    "    return 1\n"
+                )
+            },
+        )
+        assert import_contract_problems(project, ["src/collector.py"]) == []
+
+    def test_undefined_name_elsewhere_is_not_this_tasks_fault(
+        self, tmp_path: Path
+    ) -> None:
+        """Scope symmetry holds: a file this task did not deliver keeps its
+        own breakage out of this task's verdict."""
+        project = _project(
+            tmp_path,
+            {
+                "src/collector.py": "class Metrics(TypedDict):\n    cpu: float\n",
+                "src/other.py": "def ok():\n    return 1\n",
+            },
+        )
+        assert import_contract_problems(project, ["src/other.py"]) == []
+
+    def test_star_import_module_is_skipped(self, tmp_path: Path) -> None:
+        """A star import can define anything: judging names would be guesswork."""
+        project = _project(
+            tmp_path,
+            {"src/generated.py": "from helpers import *\n\nrun_everything()\n"},
+            requirements=_DEFAULT_REQUIREMENTS + "helpers>=1\n",
+        )
+        assert import_contract_problems(project, ["src/generated.py"]) == []
+
+    def test_undefined_name_in_an_fstring_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        project = _project(
+            tmp_path,
+            {"src/report.py": "line = f'cpu: {totl}'\n"},
+        )
+        problems = import_contract_problems(project, ["src/report.py"])
+        assert problems and "totl" in problems[0]

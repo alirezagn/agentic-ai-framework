@@ -58,6 +58,15 @@ IMPORT_PROBLEM = (
     "(src/metrics_collector.py); it defines: get_system_metrics"
 )
 FILE_PROBLEM = "delivered docs/x shares no line with existing x"
+DECLARATION_PROBLEM = (
+    "src/test_metrics.py imports pytest, which is not a project module, "
+    "not in the Python standard library, and not declared in "
+    "requirements.txt — deliver the module or declare the dependency"
+)
+FAILED_RUN_PROBLEM = (
+    "executed verification failed: pytest exited 2 — output: NameError: "
+    "name 'TypedDict' is not defined"
+)
 
 
 def _answer(task_id: str, agent_id: str, summary: str, **data: Any) -> str:
@@ -115,6 +124,35 @@ class TestRemedySelection:
     def test_unclassified_problem_gets_the_generic_remedy(self) -> None:
         text = repair_remedies(["no acceptance criteria defined"])
         assert "Address exactly what the problems say" in text
+
+    def test_declaration_problem_gets_the_declaration_remedy(self) -> None:
+        """Rerun-5 TASK-007: the model answered "not declared in
+        requirements.txt" by re-delivering requirements.txt through
+        data.documents — which never modifies an existing file — so the
+        declaration silently did not land. The remedy must name the right
+        channel up front."""
+        text = repair_remedies([DECLARATION_PROBLEM])
+        assert "DECLARATION problem" in text
+        assert "requirements.txt" in text
+        assert "data.edits" in text
+        assert "data.documents" in text, "the wrong channel must be named"
+        assert "Address exactly what the problems say" not in text
+
+    def test_failed_run_problem_gets_the_run_remedy(self) -> None:
+        """The traceback IS the instruction: with the output quoted in the
+        problem, the remedy must point the model at patching the code the
+        output names — not at reporting NOT RUN."""
+        text = repair_remedies([FAILED_RUN_PROBLEM])
+        assert "FAILED RUN" in text
+        assert "quoted in the problem above" in text
+        assert "data.edits" in text
+        assert "EVIDENCE problem" not in text
+        assert "Address exactly what the problems say" not in text
+
+    def test_declaration_and_failed_run_get_both_remedies(self) -> None:
+        text = repair_remedies([DECLARATION_PROBLEM, FAILED_RUN_PROBLEM])
+        assert "DECLARATION problem" in text
+        assert "FAILED RUN" in text
 
     def test_mixed_problems_get_every_applicable_remedy(self) -> None:
         text = repair_remedies([EVIDENCE_PROBLEM, FILE_PROBLEM])

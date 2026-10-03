@@ -252,6 +252,32 @@ def _reports_not_run(output: Optional["AgentOutput"]) -> bool:
     return bool(_PROSE_NOT_RUN.search(text))
 
 
+#: How much of a failing run's captured output is quoted back to the repair
+#: round: enough to name file, line and exception, small enough that the
+#: repair note stays a note.
+_FAILURE_TAIL_CHARS = 600
+
+
+def _failure_excerpt(record: DeployRecord) -> str:
+    """The captured output of a failing run, quoted into the problem text.
+
+    An exit code alone leaves the repair round blind. Rerun-5's TASK-007
+    failed with ``pytest exited 2`` while the actual error — ``NameError:
+    name 'TypedDict' is not defined`` — sat in the record's captured tails
+    and never reached the one repair round, which then spent itself guessing.
+    The tail window of stderr (stdout when stderr is empty) is quoted,
+    flattened to a single line and bounded so the note stays small: pytest's
+    short summary names file and exception at the end of that window.
+    """
+    raw = (record.stderr_tail or "").strip() or (record.stdout_tail or "").strip()
+    if not raw:
+        return ""
+    flat = " ".join(raw.split())
+    if len(flat) > _FAILURE_TAIL_CHARS:
+        flat = flat[-_FAILURE_TAIL_CHARS:]
+    return f" — output: {flat}"
+
+
 class MasterOrchestrator:
     """Master execution loop linking managers, agents and tracking loops."""
 
@@ -1740,7 +1766,9 @@ class MasterOrchestrator:
         failing = [record for record in ground_truth if record.exit_code != 0]
         if failing:
             detail = ", ".join(
-                f"{record.command} exited {record.exit_code}" for record in failing
+                f"{record.command} exited {record.exit_code}"
+                f"{_failure_excerpt(record)}"
+                for record in failing
             )
             problems.append(f"executed verification failed: {detail}")
 

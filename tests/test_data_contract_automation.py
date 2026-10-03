@@ -88,6 +88,24 @@ class TestContractRequiresSchemaDefinition:
         assert "TclError" in text and "TypeError" in text
 
 
+class TestContractTellsTheModelHowToRunTests:
+    """The invocation half of the test contract (rerun-5 TASK-007).
+
+    ``pytest exited 2`` before collecting anything: the bare console script
+    does not put the project root on ``sys.path``, so ``import src...`` died
+    with ``ModuleNotFoundError`` and no test ever executed — while the
+    repair round, told only the exit code, could not see why."""
+
+    def test_runtime_contract_names_python_m_pytest(self) -> None:
+        assert "python3 -m pytest" in DATA_CONTRACT_INSTRUCTIONS
+        assert "conftest.py" in DATA_CONTRACT_INSTRUCTIONS
+
+    def test_templates_name_python_m_pytest(self) -> None:
+        for name in ("07_SOFTWARE_FIRMWARE.md", "08_TEST.md"):
+            text = (PROMPT_DIR / name).read_text(encoding="utf-8")
+            assert "python3 -m pytest" in text, f"{name} misses the invocation"
+
+
 class TestContractRequiresBoundaryConversion:
     def test_requires_casting_at_the_boundary(self) -> None:
         text = DATA_CONTRACT_INSTRUCTIONS

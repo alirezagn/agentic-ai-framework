@@ -29,7 +29,9 @@ Covered here:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Dict
 
+from orchestrator import config
 from orchestrator.agents.base_agent import (
     AgentOutput,
     delivery_problems,
@@ -370,3 +372,99 @@ class TestNonExpectedDocumentsLand:
 
         assert not (test_project.parent / "evil.py").exists()
         assert not Path("/tmp/evil_non_expected.py").exists()
+
+
+# ===========================================================================
+# A documents claim can never modify a file that already exists
+# ===========================================================================
+
+
+class TestDocumentsClaimOnExistingFileIsRejected:
+    """The TASK-007 failure class (sys-usage rerun 5).
+
+    The repair round was told "not declared in requirements.txt" and
+    answered by re-delivering the whole requirements.txt through
+    ``data.documents``. The materializer deliberately never clobbers an
+    existing real file, so the file on disk never changed, the undeclared
+    import survived the repair, and the task FAILED while the model
+    believed it had delivered the declaration. The claim itself must
+    become a delivery problem, so the repair note names the right channel.
+    """
+
+    @staticmethod
+    def _output(data: Dict[str, Any]) -> AgentOutput:
+        return AgentOutput(
+            agent_id="test_agent",
+            task_id="TASK-007",
+            status=config.AGENT_STATUS_COMPLETED,
+            summary="declared the missing dependency",
+            data=data,
+        )
+
+    def test_documents_on_an_existing_file_is_rejected(
+        self, test_project: Path
+    ) -> None:
+        (test_project / "requirements.txt").write_text(
+            "psutil>=5.9\n", encoding="utf-8"
+        )
+        task = {"id": "TASK-007", "expected_outputs": []}
+        output = self._output(
+            {
+                "documents": {
+                    "requirements.txt": "psutil>=5.9\npytest>=8\n",
+                }
+            }
+        )
+        problems = delivery_problems(
+            test_project, task, output, preexisting=set()
+        )
+        assert problems == [
+            "requirements.txt exists in the project — update it with "
+            "data.edits; data.documents never modifies a file that already "
+            "exists"
+        ]
+
+    def test_edits_on_an_existing_file_stay_accepted(
+        self, test_project: Path
+    ) -> None:
+        (test_project / "requirements.txt").write_text(
+            "psutil>=5.9\n", encoding="utf-8"
+        )
+        task = {"id": "TASK-007", "expected_outputs": []}
+        output = self._output(
+            {
+                "edits": {
+                    "requirements.txt": {
+                        "search": "psutil>=5.9",
+                        "replace": "psutil>=5.9\npytest>=8",
+                    }
+                }
+            }
+        )
+        problems = delivery_problems(
+            test_project, task, output, preexisting=set()
+        )
+        assert problems == []
+
+    def test_documents_on_a_missing_file_still_delivers(
+        self, test_project: Path
+    ) -> None:
+        """The F4 contract must survive: a document for a file that does not
+        exist yet creates it and raises no problem."""
+        task = {"id": "TASK-003", "expected_outputs": []}
+        output = self._output({"documents": {"requirements.txt": "pytest>=8\n"}})
+        problems = delivery_problems(
+            test_project, task, output, preexisting=set()
+        )
+        assert problems == []
+
+    def test_docs_relative_documents_are_not_flagged(
+        self, test_project: Path
+    ) -> None:
+        """A docs/ mirror is created by design, never "modifying" anything."""
+        task = {"id": "TASK-007", "expected_outputs": []}
+        output = self._output({"documents": {"docs/REPORT.md": "# report\n"}})
+        problems = delivery_problems(
+            test_project, task, output, preexisting=set()
+        )
+        assert problems == []

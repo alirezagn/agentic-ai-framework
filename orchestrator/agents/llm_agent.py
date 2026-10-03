@@ -49,12 +49,19 @@ logger = logging.getLogger(__name__)
 # therefore chosen from the problems themselves.
 
 _EVIDENCE_MARKERS = ("test_status", "ground-truth", "ground truth", "nothing was executed")
+#: A missing declaration and a failed run each have a precise fix; routing
+#: them to the generic block is what let rerun-5's repair re-deliver
+#: requirements.txt through the wrong channel and then guess at a bare
+#: "pytest exited 2".
+_DECLARATION_MARKERS = ("not declared in requirements.txt",)
+_RUN_FAILED_MARKERS = ("exited",)
 _INTERFACE_MARKERS = (
     "does not define",
     "does not exist in the project",
     "does not parse",
     "no module exists at that relative path",
     "no such module",
+    "never imports or defines",
 )
 _FILE_MARKERS = (
     "shares no line",
@@ -74,10 +81,29 @@ _REMEDY_EVIDENCE = (
     "and never claim a run you did not perform.\n"
 )
 _REMEDY_INTERFACE = (
-    "This is an IMPORT problem: the producer file does not define a name the "
-    "consumer imports. Read the producer file named in the problem and patch "
-    "the consumer with data.edits (search/replace on the exact import line), "
-    "or deliver the missing module.\n"
+    "This is an IMPORT problem: either a name a file imports does not exist, "
+    "or a module uses a name it never imports or defines (the problem quotes "
+    "the names). Read the file named in the problem and patch it with "
+    "data.edits (search/replace on the exact line): add the missing import, "
+    "point the import at a name the producer really defines, or define the "
+    "name — or deliver the missing module.\n"
+)
+_REMEDY_DECLARE = (
+    "This is a DECLARATION problem: the package exists but is not declared. "
+    "requirements.txt already exists on disk — patch it with data.edits "
+    "(search/replace on an exact line, e.g. add `pytest>=8`). NEVER send "
+    "requirements.txt through data.documents: a file that already exists is "
+    "not modified by documents, so the declaration would silently not land. "
+    "If the name is actually a project module, deliver that file instead.\n"
+)
+_REMEDY_RUN_FAILED = (
+    "This is a FAILED RUN: a command really executed and its output is "
+    "quoted in the problem above — fix the exact code the output points at "
+    "with data.edits (it names the file and the line), then re-declare "
+    "data.deploy with the same command. If the output shows a missing "
+    "third-party package, declare it in requirements.txt with data.edits "
+    "(never data.documents) and document the setup command, or honestly "
+    "report data.test_status=NOT RUN naming the package.\n"
 )
 _REMEDY_FILE = (
     "It was valid JSON but did not deliver real file content: patch the "
@@ -94,10 +120,14 @@ def repair_remedies(problems: Sequence[str]) -> str:
     """The remedy block for this rejection: one block per problem class."""
     text = [str(problem) for problem in problems]
     remedies: List[str] = []
+    if any(any(marker in item for marker in _DECLARATION_MARKERS) for item in text):
+        remedies.append(_REMEDY_DECLARE)
     if any(any(marker in item for marker in _EVIDENCE_MARKERS) for item in text):
         remedies.append(_REMEDY_EVIDENCE)
     if any(any(marker in item for marker in _INTERFACE_MARKERS) for item in text):
         remedies.append(_REMEDY_INTERFACE)
+    if any(any(marker in item for marker in _RUN_FAILED_MARKERS) for item in text):
+        remedies.append(_REMEDY_RUN_FAILED)
     if any(any(marker in item for marker in _FILE_MARKERS) for item in text):
         remedies.append(_REMEDY_FILE)
     if not remedies:

@@ -49,6 +49,7 @@ from orchestrator.auto_plan import (
     should_decompose,
 )
 from orchestrator.deploy_runner import (
+    STATUS_EXECUTED,
     STATUS_REFUSED,
     STATUS_SKIPPED,
     DeployRecord,
@@ -502,6 +503,88 @@ class TestSkippedRecordsInDefinitionOfDone:
         output = self._output("requirements were already present in the environment")
         problems = orch._evidence_problems(task, output, self._skipped())
         assert problems, "a skip is not ground truth for a test artifact"
+
+
+class TestFailedRunQuotesTheOutputTail:
+    """The repair round must SEE why the run failed.
+
+    Failure this pins (sys-usage rerun 5, TASK-007): pytest exited 2 with a
+    ``NameError: name 'TypedDict' is not defined`` traceback, but the
+    evidence problem said only ``pytest exited 2`` — the repair model was
+    blind to the actual error, so it could not fix the code the traceback
+    named. The failing record's captured output belongs in the problem text
+    that the repair note quotes.
+    """
+
+    @staticmethod
+    def _task() -> Dict[str, Any]:
+        return {
+            "id": "TASK-001",
+            "title": "Run the suite",
+            "owner": "test_agent",
+            "expected_outputs": ["docs/TEST_REPORT.md"],
+        }
+
+    @staticmethod
+    def _output() -> AgentOutput:
+        return AgentOutput(
+            agent_id="test_agent",
+            task_id="TASK-001",
+            status=config.AGENT_STATUS_COMPLETED,
+            summary="pytest ran and failed",
+            data={"deploy": [{"command": "pytest", "args": ["-q"], "expect": "PASS"}]},
+        )
+
+    def test_failed_run_problem_includes_the_stderr_tail(
+        self, test_project: Path
+    ) -> None:
+        orch = MasterOrchestrator(test_project)
+        record = DeployRecord(
+            command="pytest",
+            args=["-q"],
+            exit_code=2,
+            executed=True,
+            status=STATUS_EXECUTED,
+            stderr_tail=(
+                "tests/test_metrics.py:4: NameError: name 'TypedDict' "
+                "is not defined"
+            ),
+        )
+        problems = orch._evidence_problems(self._task(), self._output(), [record])
+        assert problems, "a failing run must still produce a problem"
+        assert "exited 2" in problems[0]
+        assert "TypedDict" in problems[0], (
+            "the traceback tail must reach the model: a bare exit code "
+            "leaves the repair round guessing"
+        )
+
+    def test_output_tail_is_bounded(self, test_project: Path) -> None:
+        orch = MasterOrchestrator(test_project)
+        record = DeployRecord(
+            command="pytest",
+            args=["-q"],
+            exit_code=1,
+            executed=True,
+            status=STATUS_EXECUTED,
+            stderr_tail="x" * 5000,
+        )
+        problems = orch._evidence_problems(self._task(), self._output(), [record])
+        assert problems
+        assert len(problems[0]) < 2000, (
+            "the repair note stays small: bound the quoted output"
+        )
+
+    def test_passing_run_has_no_tail_to_quote(self, test_project: Path) -> None:
+        orch = MasterOrchestrator(test_project)
+        record = DeployRecord(
+            command="pytest",
+            args=["-q"],
+            exit_code=0,
+            executed=True,
+            status=STATUS_EXECUTED,
+        )
+        problems = orch._evidence_problems(self._task(), self._output(), [record])
+        assert problems == []
 
 
 # ---------------------------------------------------------------------------

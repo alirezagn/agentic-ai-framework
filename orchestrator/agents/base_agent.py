@@ -147,6 +147,12 @@ def delivery_problems(
     - carrying a file that existed when the task started through
       ``data.documents`` (which never modifies pre-existing real files) is
       rejected outright: such files are changed only with ``data.edits``.
+    - the same rule holds for any file that already exists on disk when the
+      output arrives, expected or not: the materializer skips it, so the
+      claim silently dropped. Outside ``expected_outputs`` that silence was
+      a gap (the TASK-007 repair "declared pytest" by re-delivering
+      requirements.txt through documents and the file never changed) — the
+      claim itself is now a problem naming the right channel.
     - a missing non-``docs/`` expected output is a problem: ``data.documents``
       creates missing expected files at their real path, so by delivery time
       the real file must exist — a ``docs/`` mirror alone is not a delivery.
@@ -244,6 +250,48 @@ def delivery_problems(
                 f"{name} — summary/prose metadata does not deliver the "
                 "file; use data.edits (search/replace) or the full file "
                 "content"
+            )
+
+    # A documents claim for a file that already exists on disk can never
+    # have landed: the materializer skips existing real files, so the old
+    # body stays on disk while the model believes it delivered the new one.
+    # The expected-output loop above owns expected files (its snapshot
+    # semantics are richer); this covers every other claimed path.
+    expected_names = {
+        raw.strip()
+        for raw in expected
+        if isinstance(raw, str) and raw.strip()
+    }
+    expected_filenames = {Path(name).name for name in expected_names}
+    for raw_key in documents:
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.strip()
+        body = documents.get(raw_key)
+        if not key or not isinstance(body, str) or not body.strip():
+            continue
+        if key.startswith("docs/"):
+            continue  # the docs/ mirror is created, never an overwrite
+        if key in expected_names or Path(key).name in expected_filenames:
+            continue  # the expected-output rules above own these files
+        if (
+            key in edits
+            or Path(key).name in edits
+            or key in applied
+            or Path(key).name in applied
+        ):
+            continue  # data.edits already carried it: the file DID change
+        target = project / key
+        try:
+            inside = target.resolve().is_relative_to(project.resolve())
+        except OSError:
+            inside = False
+        if not inside:
+            continue  # escaping/absolute keys are the materializer's refusal
+        if target.is_file():
+            problems.append(
+                f"{key} exists in the project — update it with data.edits; "
+                "data.documents never modifies a file that already exists"
             )
     return problems
 
