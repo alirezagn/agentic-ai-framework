@@ -1,8 +1,8 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (integrity batch: **suite fully green — 1213
-> passed / 0 failed**, OPEN-1 closed by atomic checkpoint writes + repaired
-> indexes; deploy tests hermetic under an operator's exported channel;
+> Last updated: 2026-10-03 (auto-recovery batch: **suite fully green — 1224
+> passed / 0 failed**, three features landed — DoD fallback ingestion,
+> supervisor validation circuit-breaker (`WAIVED`), findings harvesting;
 > `ruff check .` baseline pinned and at 0)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
@@ -19,10 +19,10 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1213 collected, 1213 passed / 0 failed** — `python3 -m pytest -q`,
-  197 s, 2026-10-03, verified in a **clean env and in the operator's shell
+- **Suite: 1224 collected, 1224 passed / 0 failed** — `python3 -m pytest -q`,
+  ~200 s, 2026-10-03, verified in a **clean env and in the operator's shell
   (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`)**. The
-  number the four docs assert is the *collected* count (1213) and is current.
+  number the four docs assert is the *collected* count (1224) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -33,8 +33,9 @@
   `pyproject.toml`; install `python3 -m pip install -e .[dev]`). Never claim
   green from memory — re-run both.
 - **Repo state:** branch `main`, **in sync with `origin/main`** after this
-  batch's push (hashes in the commits list below; this batch is `69bfb72` +
-  its docs commit). The only remaining tree dirt is the **pre-existing
+  batch's push (hashes in the commits list below; this batch is `8b67648`
+  feat + `8013309` docs + this memory commit). The only remaining
+  tree dirt is the **pre-existing
   intentional** dirt: `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`,
   the still-tracked `projects/sys_mon/__pycache__/test_sys_mon…pyc`, and a
   stray **0-byte file named `=`** in the repo root. Do not describe the tree as
@@ -53,7 +54,10 @@
   docs (1185), `b678aa5` checkpoint overwrite + best-effort snapshots (1191),
   `bfafd5c` docs (1191), `bb87543` evidence-repair remedies + prose NOT RUN +
   `*` allowlist, `5b59ee8` docs (1209), `b3199b2` memory, `69bfb72` atomic
-  checkpoint writes + hermetic deploy tests + lint baseline (1213).
+  checkpoint writes + hermetic deploy tests + lint baseline (1213),
+  `5e1a860` docs (1213). Then (auto-recovery batch, 2026-10-03): `8b67648`
+  DoD fallback criteria + supervisor validation circuit-breaker + findings
+  harvesting (1224), `8013309` docs (1224), and this memory commit.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -150,8 +154,8 @@ kept as the record of what was wrong, not as current state.
   genuinely corrupt, not that the code is wrong.
 - **OPEN-2 — counts current.** The four consistency-checked docs
   (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
-  are asserted against `pytest --collect-only` and are at **1213** (1103 →
-  1160 → 1185 → 1191 → 1209 → 1213 as batches added tests), so
+  are asserted against `pytest --collect-only` and are at **1224** (1103 →
+  1160 → 1185 → 1191 → 1209 → 1213 → 1224 as batches added tests), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched).
@@ -204,7 +208,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~200 s, 1213 tests),
+- Run full pytest after every change: `python3 -m pytest -q` (~200 s, 1224 tests),
   and `ruff check .` (0 errors, baseline pinned in `pyproject.toml`).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
@@ -470,6 +474,39 @@ kept as the record of what was wrong, not as current state.
       imports, 10 unused locals, 3 undefined names, `__all__` export,
       E402 ordering). Style rules (UP/I/RUF) are deliberately *not* in the
       baseline.
+  12. **Auto-recovery batch** (2026-10-03, three features) —
+      (a) **DoD fallback ingestion**: `definition_of_done` no longer fails a
+      task for missing `acceptance_criteria` (was a hard
+      "no acceptance criteria defined"). It evaluates owner-scoped defaults
+      (`_fallback_acceptance_criteria`, `orchestrator/orchestrator.py`:
+      requirements/test/documentation wording, generic "Complete task
+      analysis and produce structured markdown outputs" otherwise), and
+      dispatch phase 3 persists them through the new
+      `StateManager.set_acceptance_criteria` — locked phase only, phase 2b
+      stays read-only. Old test `test_done_blocked_without_acceptance_criteria`
+      rewritten → `test_missing_acceptance_criteria_ingests_fallback`.
+      (b) **Supervisor validation circuit-breaker**: `supervisor.is_validation_failure`
+      classifies failures (DoD/schema markers vs tracebacks, connection
+      failures, exit codes — runtime wins and resets); `apply_validation_circuit_breaker`
+      counts consecutive validation failures in
+      `execution.validation_failure_streak` and at
+      `LoopThresholds.validation_waive_after` (default **2**) flips the task
+      to the new terminal `WAIVED` status (in `TASK_STATUSES` /
+      `TERMINAL_TASK_STATUSES` / `SATISFIED_DEPENDENCY_STATUSES`), writes
+      `WARNING: … auto-waived …` to CURRENT_STATE.md and runs
+      `refresh_ready_states()` so dependents dispatch in the same wave.
+      Called from dispatch phase 3 (after `ensure_failure_risk`) and swept by
+      `sync_project_health()` (`sweep_validation_circuit_breakers`, the
+      idempotent safety net); `retry`/`reopen` reset the streak. A waived
+      task is terminal, so it never trips `same_strategy` and cannot park
+      the run in `HUMAN_DECISION_REQUIRED`.
+      (c) **Findings harvesting**: `BaseAgent.harvest_findings()` (called
+      from phase 3 for DoD-rejected or schema-FAILED turns) appends
+      `data.findings`/`data.analysis` to `docs/findings/<task-id>.md` and
+      mirrors up to 5 `data.risks` entries into `RISKS.md` as
+      `<task-id>: <title>`; dedupe is on the *stable section text* (the turn
+      header carries a fresh timestamp, so content-equality on the header
+      appended twice). Tests: `tests/test_supervisor_auto_recovery.py` (11).
 
 
 ---
@@ -501,6 +538,7 @@ suites added during remediation:
 | `tests/test_import_contract.py` | 25 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, DoD wiring, prompt promise |
 | `tests/test_checkpoint_overwrite.py` | 10 tests — `cp-risk-*` collision replaces instead of raising; strict default kept; staged `.staging-<id>-<pid>` swap keeps the old snapshot when the new one fails (empty source / copy error); delete clears the row first; crash leftovers cleaned; dispatch keeps its own error and best-effort snapshotting |
 | `tests/test_repair_remedies.py` | 15 tests — problem-aware repair note (evidence/import/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE |
+| `tests/test_supervisor_auto_recovery.py` | 11 tests — DoD fallback ingestion (defaults pass DoD + persisted to TASKS.yaml), validation circuit-breaker (2-strike `WAIVED` for DoD and schema rejections, runtime failures never waive, sync sweep, WAIVED vocab + threshold), findings harvest (write to docs/ + RISKS.md, dedupe across retries, no-findings skip) |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
 `checkpoints_root`, `FakeLLMClient`, `_task`, `FakeDeployRunner` (+ the
