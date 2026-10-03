@@ -1,10 +1,12 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (project-1 **rerun 4 done after F5** — 8 planned,
-> 5 DONE / 1 FAILED (TASK-006, honest `NameError` ground truth) / 2 BLOCKED,
-> `HUMAN_DECISION_REQUIRED`, stopped as instructed; F5 fix `dd40219` + docs
-> `882a240` + memory `85fd9c6` pushed; suite at **1266 green**, `ruff check .`
-> at 0; next: operator decision — `retry TASK-006` or re-plan, then rerun)
+> Last updated: 2026-10-03 (project-1 **rerun 5 evidence → F6 batch** —
+> operator-run rerun 5 reached 7 DONE / **TASK-007 FAILED** (the
+> undeclared-`pytest` claim silently dropped through `data.documents`, then
+> `pytest exited 2` with an unseen `TypedDict` NameError); F6 fix `48f648e` +
+> docs `18be8b8` + this memory commit; suite at **1284 green**, `ruff check .`
+> at 0; next: restart project 1 from the beginning and run to completion as
+> instructed, then stop)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -20,10 +22,10 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1266 collected, 1266 passed / 0 failed** — `python3 -m pytest -q`,
-  ~205 s, 2026-10-03, verified in the operator's shell
+- **Suite: 1284 collected, 1284 passed / 0 failed** — `python3 -m pytest -q`,
+  ~181 s, 2026-10-03, verified in the operator's shell
   (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`). The
-  number the four docs assert is the *collected* count (1266) and is current.
+  number the four docs assert is the *collected* count (1284) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -68,7 +70,11 @@
    (1263), `c72a18d` memory. Then (rerun 3 / F5 batch, 2026-10-03):
    `dd40219` cumulative delivery scope across session turns and the
    repair round (1266), `882a240` docs (1266), `85fd9c6` memory (rerun 3 +
-   F5), and this memory commit (rerun 4 status).
+   F5), `6717739` memory (rerun 4 status). Then (rerun 5 / F6 batch,
+   2026-10-03): `48f648e` F6a–F6e — existing-file documents rejection +
+   declaration/failed-run repair remedies + symtable undefined-name check +
+   quoted failing-run output + test-invocation contract (1284), `18be8b8`
+   docs (1284), and this memory commit.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -185,8 +191,8 @@ kept as the record of what was wrong, not as current state.
   — safe-path guarded (relative, no `..`, inside the project), never
   clobbering an existing file, no `docs/` mirror, skipping expected
   names/basenames. Tests: `TestNonExpectedDocumentsLand` (+3).
-- **Suite: 1263 green (1245 → 1263) at that batch** (now 1266 — see the
-  rerun 3 section below), `ruff check .` 0. Known cosmetic
+- **Suite: 1263 green (1245 → 1263) at that batch** (now 1284 — see the
+  F6 section below), `ruff check .` 0. Known cosmetic
   issue left: bare `python` is refused under allowlist `*` because it is not
   on PATH (only `python3`), and the message blames the allowlist.
 
@@ -245,6 +251,63 @@ kept as the record of what was wrong, not as current state.
   RISK-001 recorded. Operator next step: `retry TASK-006` or re-plan —
   not a framework fix.
 
+### Run result (project-1 rerun 5, operator-run — the evidence for F6)
+
+- **7 DONE / 1 FAILED (TASK-007) / 2 BLOCKED**, health WARNING; the operator
+  supplied the failure text. TASK-007's failure had two halves, both
+  framework gaps:
+  1. **silent declaration drop (F4 residue):** the import contract flagged
+     `tests/test_metrics.py` importing undeclared `pytest`; the repair
+     claimed to declare it by re-delivering `requirements.txt` through
+     `data.documents` — but the materializer never clobbers an existing
+     real file (by design), so `requirements.txt` on disk still read only
+     `psutil>=5.9` and the problem survived the round. `delivery_problems`
+     never enforced the documents-vs-existing rule for **non-expected**
+     files (the F4 rule covered expected outputs only), and the
+     undeclared-dependency message matched no `_REMEDY_*` marker, so the
+     model got the generic block instead of "patch it with data.edits".
+  2. **blind repair (new):** `pytest exited 2` — bare `pytest` put no
+     project root on `sys.path` (`ModuleNotFoundError: No module named
+     'src'`), and `python3 -m pytest` hit `NameError: name 'TypedDict' is
+     not defined` in `src/collector.py`. The evidence problem said only
+     `pytest exited 2`: the traceback lived in the deploy record's tails
+     and never reached the one repair round.
+- Log: the operator ran it in their shell (no `run5.log` in `/tmp/opencode`).
+
+### Closed this pass (rerun 5 evidence — F6a–F6e, fix `48f648e`, docs `18be8b8`)
+
+- **F6a** — `delivery_problems` now rejects a `data.documents` claim for
+  any file that already exists on disk (expected or not, `docs/` and
+  edit-channel claims excluded): "… exists in the project — update it with
+  data.edits; data.documents never modifies a file that already exists".
+- **F6b** — `repair_remedies` gains `_REMEDY_DECLARE` (marker `not declared
+  in requirements.txt`: patch the existing file with `data.edits`, never
+  documents) and `_REMEDY_RUN_FAILED` (marker `exited`: fix the code the
+  quoted output names, re-declare the deploy); `_REMEDY_INTERFACE` now
+  covers both classes (producer lacks the name / module never binds it).
+- **F6c** — `import_contract` runs a conservative `symtable`
+  undefined-name check on touched files: module-scope reads minus
+  global-scope bindings minus builtins/module dunders; star-import
+  modules skipped wholesale; module-scope walrus (incl. inside
+  top-level comprehensions) counted as a definition; message "uses X,
+  which the module never imports or defines — Python would raise
+  NameError" (marker routed to the interface remedy). This is the
+  `CpuMetrics` (rerun 4) / `TypedDict` (rerun 5) class.
+- **F6e** — `_evidence_problems` quotes a bounded (600-char, flattened)
+  stderr/stdout tail of every failing record into the problem text
+  (`_failure_excerpt`, `orchestrator/orchestrator.py`), so the repair
+  round finally sees the traceback the exit code only implied.
+- **F6d** — `DATA_CONTRACT_INSTRUCTIONS` + `framework/AGENT_PROMPTS/
+  {07_SOFTWARE_FIRMWARE,08_TEST}.md` now say: run `python3 -m pytest`
+  (or ship `tests/conftest.py` bootstrapping `sys.path`) because the bare
+  console script does not put the project root on `sys.path`, and
+  declare `pytest` in `requirements.txt` like any third-party import.
+  (Also fixed the stray `- -` double-bullet in both templates.)
+- Red tests first: +16 (`test_delivery_normalization` +4,
+  `test_repair_remedies` +3, `test_import_contract` +6,
+  `test_architecture_redesign` +3) +2 invocation guards in
+  `test_data_contract_automation` = **1284 green**, `ruff` 0.
+
 ### Open items (verified 2026-10-02 night)
 
 ### Closed this pass (were open)
@@ -266,8 +329,8 @@ kept as the record of what was wrong, not as current state.
   genuinely corrupt, not that the code is wrong.
 - **OPEN-2 — counts current.** The four consistency-checked docs
   (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
-  are asserted against `pytest --collect-only` and are at **1266** (1103 →
-  1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 → 1245 → 1263 → 1266 as
+  are asserted against `pytest --collect-only` and are at **1284** (1103 →
+  1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 → 1245 → 1263 → 1266 → 1284 as
   batches added tests), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
@@ -336,7 +399,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~205 s, 1266 tests),
+- Run full pytest after every change: `python3 -m pytest -q` (~181 s, 1284 tests),
   and `ruff check .` (0 errors, baseline pinned in `pyproject.toml`).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
@@ -518,7 +581,7 @@ kept as the record of what was wrong, not as current state.
      `get_system_metrics`, and prompt text alone ("read the producer first")
      did not stop it — the app was broken at the operator's first launch with
      the task already DONE. Message names the producer file and the names it
-     really defines. Tests: `tests/test_import_contract.py` (25).
+     really defines. Tests: `tests/test_import_contract.py` (37).
   6. **Checkpoint collisions never fail a dispatch** (2026-10-03, user-reported
      live stall) — `orchestrator create_checkpoint` now saves with
      `overwrite=True`: an existing directory for the same id is replaced
@@ -655,7 +718,7 @@ kept as the record of what was wrong, not as current state.
       fresh `src/` used to hit a swallowed ENOENT). Report artifacts with no
       delivered content keep the legacy mirror-only acceptance — dropping
       that gate broke 5 tests that pin it by design. Tests:
-      `tests/test_delivery_normalization.py` (17).
+      `tests/test_delivery_normalization.py` (21).
   14. **Edit-session feedback quotes file bodies** (2026-10-03, fix for the
       second `sys-usage` stall) — TASK-003's 3-turn session wrote
       `src/metrics_collector.py` in turn 1 with `from .architecture import …`
@@ -703,18 +766,18 @@ suites added during remediation:
 | `tests/test_final_critical_gaps.py` | CRIT-04/07/09 — review DoD threading, `.env` containment, prompt schema |
 | `tests/test_agent_contract_enforcement.py` | ENTRYPOINT + INTERFACE_ALIGNMENT contracts, per-agent DATA_CONTRACT_SPEC injection |
 | `tests/test_ui_contract_enforcement.py` | UI/application contract — entrypoint, schema match, signature verification, visual fidelity |
-| `tests/test_data_contract_automation.py` | cross-component data contract — typed schemas, boundary conversion, entrypoint, error paths |
+| `tests/test_data_contract_automation.py` | 48 tests — cross-component data contract — typed schemas, boundary conversion, entrypoint, error paths, test-invocation contract (`python3 -m pytest` in the runtime contract and the 07/08 templates) |
 | `tests/test_materializer.py` | edits materialization — full write when nothing to patch |
 | `tests/test_state_io_and_contracts.py` | also: lock-descriptor hygiene (`release_file_locks`) |
 | `tests/test_cli_init.py` | init destination resolution, name validation, traversal refusal |
 | `tests/test_dependency_automation.py` | 47 tests — dependency contract: declare + document (never install), prompt/template reach, runner install-refusal policy (`TestInstallRefusedByPolicy`), honest `NOT RUN`, `sys_mon` regression |
 | `tests/test_final_high_gaps.py` | audit HIGH-01..04 — pinned-agent isolation, checkpoint trigger evaluation, off-lock DoD repair, deep validation + reachability |
-| `tests/test_architecture_redesign.py` | 52 tests — truncation/chunked-JSON recovery, install-policy refusal (PEP 668 append unreachable behind it) + satisfied-install skip, skip-vs-DoD evidence, decomposition scope/chains/starter seeding |
-| `tests/test_import_contract.py` | 31 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, DoD wiring, prompt promise, undeclared-external-import rule (stdlib + `requirements.txt`) |
+| `tests/test_architecture_redesign.py` | 55 tests — truncation/chunked-JSON recovery, install-policy refusal (PEP 668 append unreachable behind it) + satisfied-install skip, skip-vs-DoD evidence, failing-run output quoted into the repair problem (`TestFailedRunQuotesTheOutputTail`), decomposition scope/chains/starter seeding |
+| `tests/test_import_contract.py` | 37 tests — static import/DoD enforcement: drift on consumer *and* producer side, scope limits, resolver edges, parse failures, undefined-name/`NameError` check (`TestUndefinedNameIsCaught`, symtable + star-import skip), DoD wiring, prompt promise, undeclared-external-import rule (stdlib + `requirements.txt`) |
 | `tests/test_checkpoint_overwrite.py` | 10 tests — `cp-risk-*` collision replaces instead of raising; strict default kept; staged `.staging-<id>-<pid>` swap keeps the old snapshot when the new one fails (empty source / copy error); delete clears the row first; crash leftovers cleaned; dispatch keeps its own error and best-effort snapshotting |
-| `tests/test_repair_remedies.py` | 17 tests — problem-aware repair note (evidence/import/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE, deploy evidence re-run after repair, repair cannot narrow the delivery scope (`TestRepairCannotNarrowDeliveryScope`) |
+| `tests/test_repair_remedies.py` | 20 tests — problem-aware repair note (evidence/import/declaration/failed-run/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE, deploy evidence re-run after repair, repair cannot narrow the delivery scope (`TestRepairCannotNarrowDeliveryScope`) |
 | `tests/test_supervisor_auto_recovery.py` | 11 tests — DoD fallback ingestion (defaults pass DoD + persisted to TASKS.yaml), validation circuit-breaker (2-strike `WAIVED` for DoD and schema rejections, runtime failures never waive, sync sweep, WAIVED vocab + threshold), findings harvest (write to docs/ + RISKS.md, dedupe across retries, no-findings skip) |
-| `tests/test_delivery_normalization.py` | 17 tests — dotted/flat `data.*` key folding at `AgentOutput.from_dict`, list-form `documents`/`edits` → dict, dotted delivery materializes the real file (the `sys-usage` replay), channel-visible missing file rejected, report-artifact legacy mirror-only acceptance preserved, dotted `acceptance_results` still gate DoD, non-expected documents land on disk (no clobber, no escape) |
+| `tests/test_delivery_normalization.py` | 21 tests — dotted/flat `data.*` key folding at `AgentOutput.from_dict`, list-form `documents`/`edits` → dict, dotted delivery materializes the real file (the `sys-usage` replay), channel-visible missing file rejected, report-artifact legacy mirror-only acceptance preserved, dotted `acceptance_results` still gate DoD, non-expected documents land on disk (no clobber, no escape), existing-file documents claim rejected (`TestDocumentsClaimOnExistingFileIsRejected`) |
 | `tests/test_edit_session_feedback.py` | 9 tests — DoD-branch feedback quotes touched file bodies (turn-2 prompt carries body + problem), honest final-turn failure, `_touched_files_current_content` channels (edits/edits_applied/documents) + absolute/`..`/missing skips + 8-file cap, apply-failure quote regression, cumulative delivery scope (`TestSessionDeliveryScopeIsCumulative`: a later clean turn cannot close over an earlier undeclared import) |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
