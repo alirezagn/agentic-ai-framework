@@ -1,9 +1,9 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (delivery-shape normalization: **suite fully
-> green — 1238 passed / 0 failed** — dotted/list `data.*` key variants now
-> fold into the real delivery channels, so a task can no longer pass Done
-> with its expected output missing (the `sys-usage` incident);
+> Last updated: 2026-10-03 (edit-session feedback fix: **suite fully
+> green — 1245 passed / 0 failed** — both edit-session feedback branches
+> now quote the touched files' current on-disk bodies, so a later turn can
+> fix the file it is told to fix (the second `sys-usage` stall, TASK-003);
 > `ruff check .` baseline pinned and at 0)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
@@ -20,10 +20,10 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1238 collected, 1238 passed / 0 failed** — `python3 -m pytest -q`,
-  ~190 s, 2026-10-03, verified in a **clean env and in the operator's shell
+- **Suite: 1245 collected, 1245 passed / 0 failed** — `python3 -m pytest -q`,
+  ~192 s, 2026-10-03, verified in a **clean env and in the operator's shell
   (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`)**. The
-  number the four docs assert is the *collected* count (1238) and is current.
+  number the four docs assert is the *collected* count (1245) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -34,8 +34,8 @@
   `pyproject.toml`; install `python3 -m pip install -e .[dev]`). Never claim
   green from memory — re-run both.
 - **Repo state:** branch `main`, **in sync with `origin/main`** after this
-  batch's push (hashes in the commits list below; this batch is `3d1a593`
-  fix + `e52ee22` docs + this memory commit). The only remaining
+  batch's push (hashes in the commits list below; this batch is `2de0782`
+  fix + `1d6c521` docs + this memory commit). The only remaining
   tree dirt is the **pre-existing
   intentional** dirt: `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`,
   the still-tracked `projects/sys_mon/__pycache__/test_sys_mon…pyc`, and a
@@ -61,6 +61,8 @@
   harvesting (1224), `8013309` docs (1224), `dd423eb` memory. Then
   (delivery-shape batch, 2026-10-03): `3d1a593` normalize delivery key
   shapes — dotted/list `data.*` variants (1238), `e52ee22` docs (1238),
+  `58a99e9` memory. Then (edit-session feedback batch, 2026-10-03):
+  `2de0782` DoD-branch file-body feedback (1245), `1d6c521` docs (1245),
   and this memory commit.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
@@ -158,8 +160,9 @@ kept as the record of what was wrong, not as current state.
   genuinely corrupt, not that the code is wrong.
 - **OPEN-2 — counts current.** The four consistency-checked docs
   (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
-  are asserted against `pytest --collect-only` and are at **1238** (1103 →
-  1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 as batches added tests), so
+  are asserted against `pytest --collect-only` and are at **1245** (1103 →
+  1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 → 1245 as batches added
+  tests), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched).
@@ -212,7 +215,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~200 s, 1238 tests),
+- Run full pytest after every change: `python3 -m pytest -q` (~200 s, 1245 tests),
   and `ruff check .` (0 errors, baseline pinned in `pyproject.toml`).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
@@ -532,6 +535,32 @@ kept as the record of what was wrong, not as current state.
       delivered content keep the legacy mirror-only acceptance — dropping
       that gate broke 5 tests that pin it by design. Tests:
       `tests/test_delivery_normalization.py` (14).
+  14. **Edit-session feedback quotes file bodies** (2026-10-03, fix for the
+      second `sys-usage` stall) — TASK-003's 3-turn session wrote
+      `src/metrics_collector.py` in turn 1 with `from .architecture import …`
+      (the TypedDicts exist only as a code block inside
+      docs/ARCHITECTURE.md; `src/architecture.py` never existed, so the
+      import contract was right). Every turn rebuilds a single fresh prompt
+      (no conversation history) and the base prompt is frozen at session
+      start — when the expected output was still MISSING — so turns 2..3
+      were told "fix the import or deliver the module" about a file they
+      could not see, burned all three turns, and FAILED the task → 4
+      blocked → `HUMAN_DECISION_REQUIRED`. The G22 payload path already
+      inlines existing expected outputs; the gap was mid-session. Fixed at
+      both feedback branches of `LLMAgent._execute_edit_session` via
+      `BaseAgent._touched_files_current_content` (generalizes the old
+      edits-only helper): the on-disk bodies of `edits`/`edits_applied`/
+      `documents` targets are quoted (`current content of <path>
+      (authoritative)`, 8 files × 12K chars, absolute/`..`/missing
+      skipped) into the DoD-problem feedback — previously a problem list
+      only — and the apply-failure branch keeps its quote with documents
+      coverage. Observed, NOT fixed: TASK-001 delivered `requirements: []`
+      ("Parsed 0 requirements") because the deterministic RequirementsAgent
+      only parses `REQ-ID:` blocks/table rows and its sole input was the
+      4-line stub README — an honest open question that did not stall the
+      pipeline (TASK-002 proceeded with a warning); reported to the
+      operator as a planning/input design gap. Tests:
+      `tests/test_edit_session_feedback.py` (7).
 
 
 ---
@@ -565,6 +594,7 @@ suites added during remediation:
 | `tests/test_repair_remedies.py` | 15 tests — problem-aware repair note (evidence/import/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE |
 | `tests/test_supervisor_auto_recovery.py` | 11 tests — DoD fallback ingestion (defaults pass DoD + persisted to TASKS.yaml), validation circuit-breaker (2-strike `WAIVED` for DoD and schema rejections, runtime failures never waive, sync sweep, WAIVED vocab + threshold), findings harvest (write to docs/ + RISKS.md, dedupe across retries, no-findings skip) |
 | `tests/test_delivery_normalization.py` | 14 tests — dotted/flat `data.*` key folding at `AgentOutput.from_dict`, list-form `documents`/`edits` → dict, dotted delivery materializes the real file (the `sys-usage` replay), channel-visible missing file rejected, report-artifact legacy mirror-only acceptance preserved, dotted `acceptance_results` still gate DoD |
+| `tests/test_edit_session_feedback.py` | 7 tests — DoD-branch feedback quotes touched file bodies (turn-2 prompt carries body + problem), honest final-turn failure, `_touched_files_current_content` channels (edits/edits_applied/documents) + absolute/`..`/missing skips + 8-file cap, apply-failure quote regression |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
 `checkpoints_root`, `FakeLLMClient`, `_task`, `FakeDeployRunner` (+ the
