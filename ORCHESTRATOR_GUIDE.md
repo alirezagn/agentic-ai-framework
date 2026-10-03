@@ -354,16 +354,27 @@ dispatch batch, `_run_pending_reviews()` routes them to `dispatch_review()`:
   project, its `docs/` mirror must share at least one meaningful line with the
   real file (summary/prose JSON wrappers rejected: deliver via `data.edits` or
   full file content)
+- **one delivery channel per file state** — `data.documents` creates files
+  that do not exist yet; a documents claim for a file that already exists on
+  disk never lands (the materializer skips it) and is itself a delivery
+  problem naming `data.edits`, expected output or not. The rerun-5 `TASK-007`
+  case: the repair "declared pytest" by re-delivering the whole
+  `requirements.txt` through documents, the file never changed, and the
+  undeclared-import problem survived the round — the wrong-channel claim is
+  now rejected with the right instruction
 - **static import contract** — every file the task delivered is parsed and its
   intra-project imports resolved (`orchestrator/import_contract.py`, via
   `delivery_problems()`): a name the producer module does not define, an import
-  of a project module that does not exist, or a file that does not parse all
-  block delivery. Checked in both directions — the consumer side, and a
-  producer that dropped a still-imported name — and only against files this
-  task touched, so pre-existing breakage never fails an unrelated task. Pure
-  `ast` (no subprocess), so the suite stays hermetic, and the message names
-  the producer file plus the names it really defines, which is exactly what the
-  repair round feeds back to the model.
+  of a project module that does not exist, a file that does not parse, or a
+  name the file reads but never imports/defines (the `NameError` class —
+  `TypedDict` used with no `from typing import …`, caught via `symtable`
+  scope analysis, star-import modules skipped and builtins/module dunders
+  never flagged) all block delivery. Checked in both directions — the consumer
+  side, and a producer that dropped a still-imported name — and only against
+  files this task touched, so pre-existing breakage never fails an unrelated
+  task. Pure `ast`/`symtable` (no subprocess), so the suite stays hermetic,
+  and the message names the producer file plus the names it really defines,
+  which is exactly what the repair round feeds back to the model.
 - **ground truth for any claimed execution** — see below
 - review passed when required
 
@@ -373,8 +384,12 @@ Unmet → task `FAILED` with `DoD unmet: …`. Before failing cold, dispatch mak
 re-ask the model, deterministic agents skip. The note is **problem-aware**
 (`repair_remedies`, `orchestrator/agents/llm_agent.py`): an evidence rejection
 gets the exact JSON that sets `data.test_status`, an import rejection gets
-"patch the consumer with `data.edits`", a content rejection gets the original
-file-content guidance — one hardcoded "it did not deliver real file content"
+patch-the-right-file guidance (both classes: a name the producer does not
+define, and a name the module never imports or defines), a missing declaration
+gets "patch the existing `requirements.txt` with `data.edits` — never
+documents", a failed run gets "fix the code the quoted output names", a
+content rejection gets the original file-content guidance — one hardcoded "it
+did not deliver real file content"
 note used to answer *every* rejection, so a model told to fix evidence with
 file edits re-delivered files, never set the field, and a legitimate `NOT RUN`
 task failed. The DoD rejection is stored as the task note (not the claiming
@@ -417,8 +432,11 @@ When it fires, one of two things must be true:
 - **A record with `executed: true` exists.** The real exit code is then
   authoritative. A non-zero exit blocks completion and routes to repair — a
   genuine failure is ground truth, and losing it is exactly what a fabricated
-  report accomplishes. A declared `expect` that disagrees with the real exit
-  code also blocks.
+  report accomplishes. The record's captured output (stderr tail, stdout when
+  stderr is empty, flattened and bounded to 600 chars) is quoted into the
+  problem so the repair round sees *why* — an exit code alone left it blind,
+  and rerun-5's `NameError` traceback never reached the one repair round. A
+  declared `expect` that disagrees with the real exit code also blocks.
 - **The agent reports `data.test_status = "NOT RUN"`.** An honest negative is
   accepted and the task proceeds on its other merits. "I could not run this" is a
   legitimate outcome; inventing a pass is not. A `NOT RUN` stated in the
@@ -888,7 +906,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1266 passed
+python3 -m pytest -q          # full suite — 1284 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)
