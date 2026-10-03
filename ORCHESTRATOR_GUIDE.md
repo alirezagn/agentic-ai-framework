@@ -253,7 +253,14 @@ with those problems. Successful change sets are recorded in
 `data.edits_applied` and consumed so `run()` never re-applies them.
 Verification is shared: `definition_of_done` delegates its delivery checks to
 the same `delivery_problems()` helper (`orchestrator/agents/base_agent.py`),
-so the session and the DoD can never disagree.
+so the session and the DoD can never disagree. The scope is **cumulative**:
+every turn — and the output the session returns — is judged against *all*
+files the session has touched (`data.edits_applied` is widened to the
+union), so a later turn that delivers a clean file cannot launder an earlier
+turn's defect out of the contract (the `sys-usage` TASK-005 replay: turn 2
+flagged the undeclared `typing_extensions` import in `processor.py`, turn 3
+delivered a different file and the narrowed per-turn check went green — only
+the executed-verification re-run still caught it).
 
 **Truncation recovery:** a reply cut mid-stream (token budget, dropped
 connection) no longer fails the task by default. Before the legacy one-shot
@@ -371,7 +378,15 @@ file-content guidance — one hardcoded "it did not deliver real file content"
 note used to answer *every* rejection, so a model told to fix evidence with
 file edits re-delivered files, never set the field, and a legitimate `NOT RUN`
 task failed. The DoD rejection is stored as the task note (not the claiming
-summary) so the next attempt sees honest context.
+summary) so the next attempt sees honest context. The post-repair DoD is
+judged against the **union** of the original and repaired deliveries —
+`widen_delivery_scope()` (`orchestrator/agents/base_agent.py`) folds the
+original delivery's touched set into the repair's `data.edits_applied`,
+because a repair reply naturally mentions only the files it changed;
+without the fold an untouched defect in a file the repair never rewrote
+silently drops out of the contract (the `sys-usage` TASK-005 replay: the
+repair rewrote `main.py` and the undeclared `typing_extensions` import in
+`processor.py` left the checked scope).
 
 A rejected turn's analysis is not lost either: before the failure is
 recorded, `BaseAgent.harvest_findings()` appends `data.findings` and
@@ -873,7 +888,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1263 passed
+python3 -m pytest -q          # full suite — 1266 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)
