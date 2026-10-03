@@ -262,7 +262,11 @@ class LLMAgent(BaseAgent):
         next change set, the deterministic applier patches the real files,
         ``delivery_problems`` verifies the workspace (not the JSON), and the
         results — apply errors or remaining DoD problems — go back to the
-        model as turn feedback. At most ``EDIT_SESSION_TURNS`` model calls.
+        model as turn feedback. Both feedback branches quote the current
+        on-disk bodies of the files the session already touched: the turns
+        share no history and the base prompt is frozen at session start, so
+        without the quote a later turn could not see the file it is told to
+        fix. At most ``EDIT_SESSION_TURNS`` model calls.
         """
         base_prompt = build_prompt(payload, agent_spec=self.spec_text())
         system = render_system_prompt(self.system_rules(), self.spec_text())
@@ -342,7 +346,7 @@ class LLMAgent(BaseAgent):
                 feedback = (
                     "your edits could not be applied:\n"
                     + "\n".join(f"- {err}" for err in errs[-4:])
-                    + self._edits_current_content(output)
+                    + self._touched_files_current_content(output)
                 )
                 continue
 
@@ -359,6 +363,16 @@ class LLMAgent(BaseAgent):
             feedback = (
                 "your changes were applied; Definition-of-Done problems remain:\n"
                 + "\n".join(f"- {item}" for item in delivery[:6])
+                + self._touched_files_current_content(
+                    output,
+                    intro=(
+                        "Your earlier replies are not in your context and the "
+                        "base prompt was built when these files were still "
+                        "MISSING — the files you already touched are quoted "
+                        "below exactly as they are on disk, edit against this "
+                        "authoritative text"
+                    ),
+                )
             )
         return self.failed(  # unreachable: every loop path returns
             task_id, "edit session exhausted without a deliverable output"

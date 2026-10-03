@@ -29,6 +29,7 @@ from typing import (
     Callable,
     Collection,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -1181,25 +1182,59 @@ class BaseAgent:
         lines.append("")
         return "\n".join(lines)
 
-    def _edits_current_content(self, output: AgentOutput) -> str:
-        """Feedback block: current body of every path ``data.edits`` targets.
+    #: How many touched files one turn's feedback may quote — a wide
+    #: delivery must not turn the turn budget into a prompt bomb.
+    _TOUCHED_FILES_FEEDBACK_MAX = 8
 
-        Applied when an edit fails (e.g. "search matched 0 time(s)") so the
-        model can copy an exact snippet — it must never guess file content
-        it cannot see (target files outside ``expected_outputs`` are not in
-        the payload).
+    def _touched_files_current_content(
+        self, output: AgentOutput, *, intro: str = "Copy the exact search "
+        "snippet from the current content below"
+    ) -> str:
+        """Feedback block: on-disk body of every file this output touched.
+
+        Covers the three channels through which a session turn changes a
+        real file: ``data.edits`` targets, ``data.edits_applied`` edits and
+        ``data.documents`` creations. Missing, absolute and ``..`` paths are
+        skipped; each body is capped at ``_EDITS_FEEDBACK_CAP`` and the block
+        at ``_TOUCHED_FILES_FEEDBACK_MAX`` files.
+
+        Why this exists: edit-session turns are stateless — each turn is a
+        fresh prompt with only the feedback string swapped in, and the base
+        prompt is frozen at session start, when expected outputs were still
+        MISSING (``relevant_context`` skips absent files). From turn 2 on the
+        model therefore cannot see what it just delivered; without the bodies
+        it must guess search snippets for files it cannot see and burns its
+        turns. sys-usage TASK-003 failed all three turns unable to fix a
+        broken import in a file it had itself written one turn earlier.
         """
-        edits = output.data.get("edits")
-        if not isinstance(edits, dict) or not edits:
-            return ""
-        chunks: List[str] = []
-        for raw in edits:
-            rel = str(raw).strip()
-            target = Path(rel)
-            if not rel or target.is_absolute() or ".." in target.parts:
+        data = output.data if isinstance(output.data, dict) else {}
+        ordered: List[str] = []
+        seen = set()
+        for key in ("edits", "edits_applied", "documents"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                items: Iterable[Any] = value.keys()
+            elif isinstance(value, list):
+                items = value
+            else:
                 continue
+            for raw in items:
+                rel = str(raw).strip()
+                target = Path(rel)
+                if not rel or target.is_absolute() or ".." in target.parts:
+                    continue
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                ordered.append(rel)
+        quoted: List[str] = []
+        omitted = 0
+        for rel in ordered:
             real = self.project_path / rel
             if not real.is_file():
+                continue
+            if len(quoted) >= self._TOUCHED_FILES_FEEDBACK_MAX:
+                omitted += 1
                 continue
             try:
                 body = real.read_text(encoding="utf-8", errors="replace")
@@ -1207,13 +1242,13 @@ class BaseAgent:
                 continue
             if len(body) > _EDITS_FEEDBACK_CAP:
                 body = body[:_EDITS_FEEDBACK_CAP] + "\n…[truncated]"
-            chunks.append(f"current content of {rel} (authoritative):\n{body}")
-        if not chunks:
+            quoted.append(f"current content of {rel} (authoritative):\n{body}")
+        if not quoted:
             return ""
-        return (
-            "\nCopy the exact search snippet from the current content below:\n"
-            + "\n\n".join(chunks)
-        )
+        text = f"\n{intro}:\n" + "\n\n".join(quoted)
+        if omitted:
+            text += f"\n…[{omitted} more touched file(s) omitted]"
+        return text
 
     def _apply_edits(self, task: Dict[str, Any], output: AgentOutput) -> None:
         """Apply ``data.edits`` search/replace patches to real project files.
