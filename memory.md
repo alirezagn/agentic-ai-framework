@@ -1,11 +1,10 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (project-1 rerun 3 done + F5 **done and pushed** —
-> fix `dd40219`, docs `882a240`: the delivery scope checked by
-> `delivery_problems` is now cumulative across edit-session turns *and*
-> across the DoD auto-repair round — a later clean reply can no longer
-> launder an earlier defect out of the contract; suite at **1266 green**
-> (+3), `ruff check .` at 0; next: restart project 1 from the beginning)
+> Last updated: 2026-10-03 (project-1 **rerun 4 done after F5** — 8 planned,
+> 5 DONE / 1 FAILED (TASK-006, honest `NameError` ground truth) / 2 BLOCKED,
+> `HUMAN_DECISION_REQUIRED`, stopped as instructed; F5 fix `dd40219` + docs
+> `882a240` + memory `85fd9c6` pushed; suite at **1266 green**, `ruff check .`
+> at 0; next: operator decision — `retry TASK-006` or re-plan, then rerun)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -68,7 +67,8 @@
    after repair + non-expected documents land (1263), `0cfc7fe` docs
    (1263), `c72a18d` memory. Then (rerun 3 / F5 batch, 2026-10-03):
    `dd40219` cumulative delivery scope across session turns and the
-   repair round (1266), `882a240` docs (1266), and this memory commit.
+   repair round (1266), `882a240` docs (1266), `85fd9c6` memory (rerun 3 +
+   F5), and this memory commit (rerun 4 status).
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -220,6 +220,30 @@ kept as the record of what was wrong, not as current state.
   went `DONE` with the broken import).
 - **Suite: 1266 green (1263 → 1266), `ruff check .` 0.** The known
   cosmetic `python`-vs-`python3` allowlist message issue is unchanged.
+
+### Run result (project-1 rerun 4, after F5 — stopped as instructed)
+
+- Fresh `init` → **8 tasks** (Capture requirements … Final Documentation;
+  the print and TASKS.yaml agreed, 8/8 ingested — confirming the rerun-3
+  "7 tasks" note was the planner's output for that run, nothing dropped).
+  Waves 1–6 → **5 DONE (TASK-001..TASK-005, including rerun 3's failure
+  point) / 1 FAILED (TASK-006) / 2 BLOCKED (TASK-007, TASK-008)**, health
+  `HUMAN_DECISION_REQUIRED`, process exited cleanly. Log:
+  `/tmp/opencode/run4.log`.
+- **Policies held live:** zero install-shaped runner attempts — the model
+  declared `psutil>=5.9` in `requirements.txt` and wrote "must be installed
+  by the human operator" / "the framework does not support automated
+  package installation"; no undeclared-import recurrence (the
+  `typing_extensions` class did not reappear); sessions closed in 1–2
+  turns.
+- **TASK-006 (Application Launcher) failed honestly — model content, not
+  framework:** `src/collector.py` annotates `CpuMetrics` without defining
+  or importing it (undefined name — outside the `ast` import contract by
+  design), so `python3 main.py` exits 1 with `NameError: name 'CpuMetrics'
+  is not defined`. The DoD deploy caught it, the one repair round
+  re-delivered without fixing it, F3's post-repair re-run confirmed exit 1,
+  RISK-001 recorded. Operator next step: `retry TASK-006` or re-plan —
+  not a framework fix.
 
 ### Open items (verified 2026-10-02 night)
 
