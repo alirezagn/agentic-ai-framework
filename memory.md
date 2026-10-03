@@ -1,10 +1,12 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (edit-session feedback fix: **suite fully
-> green — 1245 passed / 0 failed** — both edit-session feedback branches
-> now quote the touched files' current on-disk bodies, so a later turn can
-> fix the file it is told to fix (the second `sys-usage` stall, TASK-003);
-> `ruff check .` baseline pinned and at 0)
+> Last updated: 2026-10-03 evening (project-1 rerun 2 status: **5/6 DONE —
+> TASK-003 recovered live via the edit-session fix; TASK-006 FAILED** on a
+> missing `models` module the import contract's third-party carve-out let
+> through plus stale deploy evidence after auto-repair; operator directive
+> recorded: **never install libraries — declare in requirements.txt + setup
+> instructions only**; fixes F1–F4 in progress; suite at **1245 green**,
+> `ruff check .` at 0)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -138,6 +140,54 @@ kept as the record of what was wrong, not as current state.
   a terminal dependency **satisfies** its dependents (`CANCELLED` is in
   `SATISFIED_DEPENDENCY_STATUSES`), so "terminal task another task waits on" is
   the normal path, not a stall.
+
+### Open items (verified 2026-10-03 evening — project-1 rerun 2)
+
+- **Run result:** fresh `init` (6 tasks, `--dest /media/alireza/microos/projects`)
+  → waves 1–5 DONE, wave 6 FAILED: **5/6, `run --all` stopped at TASK-006.**
+  **Batch-14 fix proven live:** TASK-003 hit the same class of import error as
+  before and recovered in **2 turns** ("delivered via 2-turn edit session"),
+  where the pre-fix run burned all 3 and FAILED.
+- **F2 — root cause of TASK-006 (`DoD unmet: executed verification failed:
+  pytest exited 2`):** `src/collector.py` does `from models import …` and
+  **`models.py` was never created** (verified by running the delivered suite:
+  `ModuleNotFoundError: No module named 'models'` → collection interrupted →
+  exit 2). The import contract let it through: its absolute-import branch
+  treats any first component absent from the project as "third-party or stdlib
+  — not ours to verify" (`_in_project` false), so turn-2 of TASK-003 could
+  convert a *flagged* relative import into an *unflagged* absolute one. The
+  contract has no knowledge of `requirements.txt` declarations and no stdlib
+  list, so `models` and `psutil` are indistinguishable to it.
+- **F3 — second root cause (why the repair could not save it):** dispatch
+  phase 2b re-evaluates DoD after `repair_delivery` **with the original
+  `deploy_records`** (pytest exit 2 from *before* the repair). Ground truth
+  never follows the repair, so a fixed test file can never clear the evidence
+  gate — the RISK-001 note "the task may stay failed until re-planned" was the
+  predictable outcome. Repair did change the files (`tests/test_metrics.py`
+  rewritten at 16:48:34); the evidence still read 16:48:12.
+- **F1 — operator directive (2026-10-03):** the framework **must never
+  install libraries or applications** — `deploy_runner` ran `pip install -r
+  requirements.txt --break-system-packages` twice (TASK-005 16:47:38, TASK-006
+  16:48:10), writing `psutil` into the *system* Python under PEP 668.
+  New policy: declare in `requirements.txt`, document the setup command in
+  README/setup instructions, request tests only against dependencies already
+  present (else honest `NOT RUN` naming the packages) — the runner refuses
+  install invocations outright. Note: `python` was refused under allowlist
+  `*` because bare `python` is not on PATH (only `python3`); the refusal
+  *message* blamed the allowlist (misleading, cosmetic).
+- **F4 — `data.documents` for a NON-expected path is never written:**
+  `_materialize_artifacts` loops only over `expected_outputs`, so a mid-plan
+  `data.documents["requirements.txt"]` (not in TASK-003's expected list)
+  lands nowhere. The dependency contract tells agents to deliver exactly that
+  file — the remedy for F2's "declare the dependency" nudge does not work
+  until the materializer writes missing non-expected deliveries to their real
+  path (safe-path guarded, never clobbering an existing file).
+- **Planned fix set:** F1 runner/policy + prompt rewrite · F2 stdlib +
+  `requirements.txt`-aware absolute-import check · F3 re-run deploy evidence
+  after auto-repair · F4 materialize missing non-expected documents.
+  Tests to update: `tests/test_dependency_automation.py` (pins the old
+  install-ordered contract), `tests/test_import_contract.py`
+  (`test_third_party_imports_are_never_checked` fixture declares nothing).
 
 ### Open items (verified 2026-10-02 night)
 
