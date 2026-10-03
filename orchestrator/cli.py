@@ -735,6 +735,7 @@ def _wave_summary(counts: Dict[str, Any]) -> str:
         config.TASK_DONE,
         config.TASK_DONE_WITH_LIMITATION,
         config.TASK_CANCELLED,
+        config.TASK_WAIVED,
     )
     parts = [
         f"{status} {counts.get(status, 0)}"
@@ -1058,6 +1059,7 @@ def cmd_retry(args: argparse.Namespace) -> int:
             "last_error": None,
             "retry_reason": feedback or None,
             "recovering": False,
+            "validation_failure_streak": 0,
         },
     )
     if status in (config.TASK_READY, config.TASK_FAILED, config.TASK_IN_PROGRESS):
@@ -1117,6 +1119,7 @@ def cmd_reopen(args: argparse.Namespace) -> int:
             "last_error": None,
             "retry_reason": _recovery_feedback(task, reason) or None,
             "recovering": False,
+            "validation_failure_streak": 0,
         },
     )
     state.update_task_status(task_id, config.TASK_READY)

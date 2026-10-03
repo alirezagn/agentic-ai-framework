@@ -1172,6 +1172,32 @@ class StateManager:
         self.save_tasks_document(document)
         return dict(target)
 
+    def set_acceptance_criteria(
+        self, task_id: str, criteria: Sequence[str]
+    ) -> Dict[str, Any]:
+        """Persist (ingested) acceptance criteria for a task.
+
+        Used by the DoD fallback ingestion: when planning omitted
+        ``acceptance_criteria``, the orchestrator writes owner-scoped default
+        criteria here so the task — and every reviewer reading it — carries
+        measurable criteria instead of an empty list.
+        """
+        document = self.load_tasks_document()
+        tasks = document.get("tasks") or []
+        target: Optional[Dict[str, Any]] = None
+        for task in tasks:
+            if task.get("id") == task_id:
+                target = task
+                break
+        if target is None:
+            raise TaskNotFoundError(f"No task with id '{task_id}' in {self.tasks_yaml}")
+        target["acceptance_criteria"] = [
+            str(item).strip() for item in criteria if str(item).strip()
+        ]
+        document["tasks"] = tasks
+        self.save_tasks_document(document)
+        return dict(target)
+
     @staticmethod
     def _next_task_id(tasks: Sequence[Dict[str, Any]]) -> str:
         highest = 0

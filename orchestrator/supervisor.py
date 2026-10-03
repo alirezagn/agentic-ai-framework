@@ -9,6 +9,12 @@ complete. It performs lookups over TASKS.yaml and PROJECT.yaml to catch:
 * context pressure against the compaction benchmarks (70% / 85%),
 * blocked tasks that unnecessarily starve unrelated work.
 
+It also runs the **validation circuit-breaker**: a task that keeps getting
+rejected by the Definition of Done or by schema checks (as opposed to
+crashing on code) is auto-waived after ``validation_waive_after`` consecutive
+rejections, so a purely structural failure never parks the project in
+``HUMAN_DECISION_REQUIRED`` while downstream tasks wait.
+
 When limits are exceeded it emits escalations that move the project into
 ``HUMAN_DECISION_REQUIRED``.
 """
@@ -18,12 +24,71 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import config
 from .state_manager import StateError, StateManager, utc_now_iso
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Validation circuit-breaker: DoD/schema rejections vs code/runtime failures
+# ---------------------------------------------------------------------------
+
+# Text markers that identify a *structural* rejection: the Definition of Done,
+# schema/shape validation, or JSON parse/repair rounds. These are the failures
+# the circuit-breaker counts.
+VALIDATION_FAILURE_MARKERS: Tuple[str, ...] = (
+    "do unmet",
+    "no acceptance criteria",
+    "expected output",
+    "acceptance check failed",
+    "independent review not passed",
+    "requirement not found",
+    "output summary must not be empty",
+    "output data must be a dictionary",
+    "does not match executor",
+    "does not match executed task",
+    "not parseable",
+    "must be a json object",
+    "truncation-repair",
+    "invalid json",
+    "schema",
+    "validation",
+)
+
+# Text markers that identify a *code/runtime* failure. These win over the
+# validation markers and always reset the streak: a crashing agent must keep
+# its retry budget and must never be silently waived.
+RUNTIME_FAILURE_MARKERS: Tuple[str, ...] = (
+    "traceback",
+    "errno",
+    "exit code",
+    "non-zero exit",
+    "signal",
+    "timed out",
+    "connection refused",
+    "connection reset",
+    "temporary failure",
+    "backend down",
+    "backend unavailable",
+)
+
+
+def is_validation_failure(error: Optional[str]) -> bool:
+    """True when ``error`` is a DoD/schema rejection, not a code/runtime crash.
+
+    The circuit-breaker only counts validation-class failures: two
+    consecutive rejections waive the task, while a crashing or unreachable
+    backend keeps escalating the normal (human) way.
+    """
+    text = str(error or "").casefold()
+    if not text.strip():
+        return False
+    if any(marker in text for marker in RUNTIME_FAILURE_MARKERS):
+        return False
+    return any(marker in text for marker in VALIDATION_FAILURE_MARKERS)
 
 
 class SupervisorError(RuntimeError):
@@ -886,6 +951,13 @@ class SupervisorAgent:
         Also persists escalations into ``human_decisions`` (append/dedupe, so
         a resumed session sees them) and refreshes the live ``blockers`` list.
         """
+        # Reconcile the validation circuit-breaker first: a struck-out task
+        # must be WAIVED before health is computed, otherwise its failures
+        # still feed loop/starvation escalations.
+        try:
+            self.sweep_validation_circuit_breakers()
+        except StateError:
+            logger.debug("validation circuit-breaker sweep failed", exc_info=True)
         report = self.check_health()
         try:
             self.state_manager.update_health(
@@ -950,6 +1022,99 @@ class SupervisorAgent:
             reset_error=progressed,
         )
 
+    # ------------------------------------------------------------------
+    # Validation circuit-breaker (DoD/schema strikes -> auto-waive)
+    # ------------------------------------------------------------------
+
+    def apply_validation_circuit_breaker(self, task_id: str, error: str = "") -> bool:
+        """Record one failure and auto-waive ``task_id`` when it strikes out.
+
+        Counts *consecutive* validation-class failures
+        (:func:`is_validation_failure`) in ``execution.validation_failure_streak``.
+        Once the streak reaches ``thresholds.validation_waive_after``
+        (default 2), the task flips to ``WAIVED``: dependents proceed without
+        a human decision and a purely structural rejection can never park the
+        project in ``HUMAN_DECISION_REQUIRED``. Code/runtime failures reset
+        the streak to 0 and keep the normal escalation path.
+
+        Returns True when this call waived the task.
+        """
+        task = self.state_manager.find_task(task_id)
+        if task is None:
+            return False
+        execution = task.get("execution") or {}
+        try:
+            streak = int(execution.get("validation_failure_streak") or 0)
+        except (TypeError, ValueError):
+            streak = 0
+        validation = is_validation_failure(error)
+        streak = streak + 1 if validation else 0
+        try:
+            self.state_manager.update_task_execution(
+                task_id, set_values={"validation_failure_streak": streak}
+            )
+        except StateError:
+            logger.debug(
+                "could not persist validation streak for %s", task_id, exc_info=True
+            )
+            return False
+        if not validation or streak < self.thresholds.validation_waive_after:
+            return False
+        if str(task.get("status", "")) == config.TASK_WAIVED:
+            return False
+        return self._waive_struck_out_task(task_id, streak)
+
+    def sweep_validation_circuit_breakers(self) -> List[str]:
+        """Waive any FAILED task whose validation streak already struck out.
+
+        Idempotent safety net: dispatch applies the breaker inline, but a
+        streak recorded by another path (or a crash between the two writes)
+        must not leave a struck-out task parked in FAILED. Called from
+        :meth:`sync_project_health`, so every health sync also reconciles it.
+        """
+        waived: List[str] = []
+        threshold = self.thresholds.validation_waive_after
+        for task in self.state_manager.load_tasks():
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status", "")) != config.TASK_FAILED:
+                continue
+            execution = task.get("execution") or {}
+            try:
+                streak = int(execution.get("validation_failure_streak") or 0)
+            except (TypeError, ValueError):
+                continue
+            if streak < threshold:
+                continue
+            task_id = str(task.get("id") or "")
+            if task_id and self._waive_struck_out_task(task_id, streak):
+                waived.append(task_id)
+        return waived
+
+    def _waive_struck_out_task(self, task_id: str, streak: int) -> bool:
+        """Flip ``task_id`` to WAIVED, warn in CURRENT_STATE, unblock graph."""
+        try:
+            self.state_manager.update_task_status(task_id, config.TASK_WAIVED)
+            self.state_manager.append_current_state(
+                f"WARNING: {task_id} auto-waived after {streak} consecutive "
+                "Definition-of-Done/schema rejections — dependents may proceed "
+                "without a human decision"
+            )
+            # Promote TODO/BLOCKED dependents the graph now satisfies, so the
+            # next dispatch never stalls behind a stale block on a waived task.
+            self.state_manager.refresh_ready_states()
+        except StateError:
+            logger.warning(
+                "validation circuit-breaker could not waive %s", task_id, exc_info=True
+            )
+            return False
+        logger.warning(
+            "validation circuit-breaker waived %s after %d consecutive rejections",
+            task_id,
+            streak,
+        )
+        return True
+
 
 __all__ = [
     "SupervisorAgent",
@@ -958,4 +1123,5 @@ __all__ = [
     "HealthReport",
     "LoopDetection",
     "Escalation",
+    "is_validation_failure",
 ]

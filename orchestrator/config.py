@@ -254,6 +254,9 @@ class LoopThresholds:
     max_retries: int = 3
     identical_output_max_repeats: int = 3
     evidence_stall_max: int = 3
+    # Validation circuit-breaker: consecutive DoD/schema rejections before the
+    # supervisor auto-waives the task instead of escalating to a human.
+    validation_waive_after: int = 2
 
     def as_dict(self) -> Dict[str, int]:
         return {
@@ -263,6 +266,7 @@ class LoopThresholds:
             "max_retries": self.max_retries,
             "identical_output_max_repeats": self.identical_output_max_repeats,
             "evidence_stall_max": self.evidence_stall_max,
+            "validation_waive_after": self.validation_waive_after,
         }
 
     @classmethod
@@ -285,6 +289,9 @@ class LoopThresholds:
             ),
             evidence_stall_max=int(
                 data.get("evidence_stall_max", cls.evidence_stall_max)
+            ),
+            validation_waive_after=max(
+                1, int(data.get("validation_waive_after", cls.validation_waive_after))
             ),
         )
 
@@ -440,6 +447,10 @@ TASK_FAILED = "FAILED"
 TASK_DONE = "DONE"
 TASK_DONE_WITH_LIMITATION = "DONE WITH ACCEPTED LIMITATION"
 TASK_CANCELLED = "CANCELLED"
+# Auto-waived by the supervisor's validation circuit-breaker: the task struck
+# out on consecutive DoD/schema failures and was released so dependents can
+# proceed without a human decision (never an implementation "DONE").
+TASK_WAIVED = "WAIVED"
 
 TASK_STATUSES: Tuple[str, ...] = (
     TASK_TODO,
@@ -452,13 +463,24 @@ TASK_STATUSES: Tuple[str, ...] = (
     TASK_DONE,
     TASK_DONE_WITH_LIMITATION,
     TASK_CANCELLED,
+    TASK_WAIVED,
 )
 
 # Statuses that never need to be dispatched again.
-TERMINAL_TASK_STATUSES: Tuple[str, ...] = (TASK_DONE, TASK_DONE_WITH_LIMITATION, TASK_CANCELLED)
+TERMINAL_TASK_STATUSES: Tuple[str, ...] = (
+    TASK_DONE,
+    TASK_DONE_WITH_LIMITATION,
+    TASK_CANCELLED,
+    TASK_WAIVED,
+)
 
 # Statuses whose dependencies are satisfied from the graph point of view.
-SATISFIED_DEPENDENCY_STATUSES: Tuple[str, ...] = (TASK_DONE, TASK_DONE_WITH_LIMITATION, TASK_CANCELLED)
+SATISFIED_DEPENDENCY_STATUSES: Tuple[str, ...] = (
+    TASK_DONE,
+    TASK_DONE_WITH_LIMITATION,
+    TASK_CANCELLED,
+    TASK_WAIVED,
+)
 
 # ---------------------------------------------------------------------------
 # Project lifecycle phases (framework/00_MASTER_ORCHESTRATOR.md:203-229)
@@ -1046,6 +1068,7 @@ __all__ = [
     "TASK_DONE",
     "TASK_DONE_WITH_LIMITATION",
     "TASK_CANCELLED",
+    "TASK_WAIVED",
     "TERMINAL_TASK_STATUSES",
     "SATISFIED_DEPENDENCY_STATUSES",
     "PHASES",

@@ -37,7 +37,7 @@ from orchestrator.agents import (
 )
 from orchestrator.agents.base_agent import AgentError, AgentOutput, BaseAgent
 from orchestrator.agents.requirements_agent import RequirementsAgent
-from orchestrator.orchestrator import MasterOrchestrator
+from orchestrator.orchestrator import MasterOrchestrator, _fallback_acceptance_criteria
 
 SPECIALIST_NAMES = [
     "research_agent",
@@ -607,19 +607,31 @@ class TestEditsAuthoring:
 
 
 class TestDefinitionOfDone:
-    def test_done_blocked_without_acceptance_criteria(
+    def test_missing_acceptance_criteria_ingests_fallback(
         self, test_project: Path, checkpoints_root: Path
     ) -> None:
+        """A planning omission must not fail the DoD.
+
+        Empty ``acceptance_criteria`` now falls back to owner-scoped defaults,
+        which dispatch phase 3 persists into TASKS.yaml, instead of rejecting
+        the task with "no acceptance criteria defined".
+        """
         _set_acceptance_criteria(test_project, "TASK-002", [])
         orchestrator = MasterOrchestrator(
             test_project, checkpoints_root=checkpoints_root, auto_checkpoint=False
         )
         result = orchestrator.run_task("TASK-002")
-        assert result.new_status == config.TASK_FAILED
+        assert result.new_status == config.TASK_DONE
         task = orchestrator.get_task("TASK-002")
-        assert task["status"] == config.TASK_FAILED
-        assert "DoD unmet" in (task["execution"]["last_error"] or "")
-        assert "no acceptance criteria" in (task["execution"]["last_error"] or "")
+        assert "no acceptance criteria" not in (task["execution"]["last_error"] or "")
+        criteria = task.get("acceptance_criteria") or []
+        assert criteria, "fallback acceptance criteria must be persisted"
+        assert criteria == _fallback_acceptance_criteria(task)
+        # With the delivery satisfied and defaults ingested, the DoD is clean
+        # even when the criteria list on the task is emptied again.
+        empty = dict(task)
+        empty["acceptance_criteria"] = []
+        assert orchestrator.definition_of_done(empty) == []
 
     def test_definition_of_done_checks(self, test_project: Path, checkpoints_root: Path) -> None:
         orchestrator = MasterOrchestrator(

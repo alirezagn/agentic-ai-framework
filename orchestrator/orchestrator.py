@@ -176,6 +176,36 @@ def _recorded_dod_problems(task: Dict[str, Any]) -> List[str]:
     return problems
 
 
+# DoD fallback ingestion: owner-scoped default acceptance criteria, used when
+# planning (auto_plan, startup specs, requirements seeding) omitted
+# ``acceptance_criteria``. Wording mirrors the seeded criteria vocabulary in
+# state_manager, so a fallback criterion reads like one a human would write.
+_DEFAULT_ACCEPTANCE_CRITERIA = [
+    "Complete task analysis and produce structured markdown outputs",
+]
+
+_FALLBACK_ACCEPTANCE_CRITERIA: Dict[str, List[str]] = {
+    "requirements_agent": [
+        "Requirements and acceptance criteria captured in docs/REQUIREMENTS.md",
+    ],
+    "test_agent": [
+        "Tests map to requirements and pass",
+    ],
+    "documentation_agent": [
+        "Docs match shipped behavior",
+    ],
+}
+
+
+def _fallback_acceptance_criteria(task: Dict[str, Any]) -> List[str]:
+    """Measurable default criteria for a task with a missing/empty list."""
+    owner = str(task.get("owner") or "").strip().lower()
+    specific = _FALLBACK_ACCEPTANCE_CRITERIA.get(owner)
+    if specific:
+        return list(specific)
+    return list(_DEFAULT_ACCEPTANCE_CRITERIA)
+
+
 def _test_like_outputs(task: Dict[str, Any]) -> bool:
     """True when a task's expected outputs look like build/test artifacts.
 
@@ -507,6 +537,28 @@ class MasterOrchestrator:
             checkpoint_id: Optional[str] = None
             new_status: str
 
+            # DoD fallback ingestion: persist owner-scoped default criteria
+            # when planning omitted them (locked phase — phase 2b stays
+            # read-only by design).
+            self._ingest_fallback_criteria(task)
+
+            # Findings harvesting: a turn flagged non-compliant by DoD, or a
+            # schema-rejected (FAILED) turn, may still carry real analysis.
+            # Persist it before the failure bookkeeping so the model's work
+            # survives the rejected dispatch.
+            if dod_problems or output.status == config.AGENT_STATUS_FAILED:
+                try:
+                    harvested = agent.harvest_findings(task, output)
+                except Exception:  # noqa: BLE001 — harvesting never fails a dispatch
+                    logger.debug(
+                        "findings harvest failed for %s", task_id, exc_info=True
+                    )
+                    harvested = []
+                if harvested:
+                    output.warnings = list(output.warnings) + [
+                        f"findings harvested: {', '.join(harvested)}"
+                    ]
+
             if output.status == config.AGENT_STATUS_COMPLETED:
                 if review_block.get("required"):
                     new_status = config.TASK_REVIEW
@@ -607,6 +659,18 @@ class MasterOrchestrator:
                             output.warnings = list(output.warnings) + [
                                 f"checkpoint: {risk_checkpoint}"
                             ]
+
+                # Validation circuit-breaker: count this rejection and, at
+                # two consecutive DoD/schema failures, auto-waive the task so
+                # dependents proceed without a human decision (code/runtime
+                # failures reset the streak and escalate the normal way).
+                if self.supervisor.apply_validation_circuit_breaker(
+                    task_id, error_text
+                ):
+                    output.warnings = list(output.warnings) + [
+                        f"{task_id} auto-waived by the supervisor after repeated "
+                        "DoD/schema rejections; dependents may proceed"
+                    ]
 
             self._record_loop_signals(task_id, task, output)
             self._ingest_output_tasks(output)
@@ -1673,6 +1737,35 @@ class MasterOrchestrator:
             return problems
         return problems
 
+    def _ingest_fallback_criteria(self, task: Dict[str, Any]) -> None:
+        """Persist default acceptance criteria when a task has none.
+
+        DoD fallback ingestion: ``auto_plan``/startup specs/requirements
+        seeding can omit ``acceptance_criteria``. The same defaults the DoD
+        evaluates against are written back to TASKS.yaml here (locked phase),
+        so a reviewer or a resumed session sees measurable criteria instead
+        of an empty list. Best-effort: bookkeeping never fails a dispatch.
+        """
+        criteria = task.get("acceptance_criteria") or []
+        if isinstance(criteria, list) and any(str(item).strip() for item in criteria):
+            return
+        fallback = _fallback_acceptance_criteria(task)
+        task_id = str(task.get("id") or "")
+        if not task_id or not fallback:
+            return
+        try:
+            self.state.set_acceptance_criteria(task_id, fallback)
+        except StateError:
+            logger.debug(
+                "could not persist fallback criteria for %s", task_id, exc_info=True
+            )
+            return
+        logger.info(
+            "ingested %d fallback acceptance criteria for %s",
+            len(fallback),
+            task_id,
+        )
+
     def definition_of_done(
         self,
         task: Dict[str, Any],
@@ -1683,7 +1776,8 @@ class MasterOrchestrator:
         """Structural Definition-of-Done checks (empty list == satisfied).
 
         Mirrors the DoD criteria that can be verified without an LLM:
-        measurable acceptance criteria exist, every expected output was
+        measurable acceptance criteria exist (a missing list falls back to
+        owner-scoped defaults instead of failing), every expected output was
         materialized, an independent review passed when required, and — when
         the task claims or requires an executed verification — ground truth
         exists for it (:meth:`_evidence_problems`).
@@ -1695,7 +1789,16 @@ class MasterOrchestrator:
         else:
             usable = []
         if not usable:
-            problems.append("no acceptance criteria defined")
+            # DoD fallback ingestion: a task whose planning omitted
+            # acceptance_criteria is evaluated against owner-scoped defaults
+            # (persisted to TASKS.yaml by _ingest_fallback_criteria) instead
+            # of being rejected with "no acceptance criteria defined".
+            usable = _fallback_acceptance_criteria(task)
+        logger.debug(
+            "DoD for %s evaluates %d acceptance criterion(a)",
+            task.get("id"),
+            len(usable),
+        )
 
         problems.extend(
             delivery_problems(

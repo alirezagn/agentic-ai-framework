@@ -19,6 +19,7 @@ and never contains free-form-only results: every agent must populate
 from __future__ import annotations
 
 import json
+import logging
 import re
 import traceback
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ from ..state_manager import StateManager, load_text_file, utc_now_iso
 
 import hmac
 import hashlib
+
+logger = logging.getLogger(__name__)
 
 
 # JSON only allows \" \\ \/ \b \f \n \r \t \uXXXX — anything else (e.g. a
@@ -788,6 +791,139 @@ class BaseAgent:
         usable repair is available (callers keep the original failure).
         """
         return None
+
+    def harvest_findings(
+        self, task: Dict[str, Any], output: AgentOutput
+    ) -> List[str]:
+        """Persist analysis/findings from a non-compliant turn (best-effort).
+
+        Called by the orchestrator when the Definition of Done rejected the
+        turn or the output failed schema validation. The model may still have
+        produced genuine research/audit findings inside ``data`` — they are
+        appended (and de-duplicated) to ``docs/findings/<task_id>.md``, and
+        risk-shaped entries in ``data["risks"]`` are mirrored into RISKS.md,
+        so a rejected dispatch never discards the analysis it did produce.
+
+        Returns the written locations (``docs/findings/...`` plus risk ids).
+        The orchestrator wraps this call, so failures degrade to a log line.
+        """
+        from ..state_manager import save_text_file
+
+        if not isinstance(output, AgentOutput):
+            return []
+        task_id = str(task.get("id") or output.task_id or "UNKNOWN").strip() or "UNKNOWN"
+        data = output.data if isinstance(output.data, dict) else {}
+
+        def finding_lines(value: Any) -> List[str]:
+            """Render a string / list-of-(str|dict) finding into markdown lines."""
+            if isinstance(value, str):
+                text = value.strip()
+                return [text] if text else []
+            if isinstance(value, list):
+                lines: List[str] = []
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        lines.append(f"- {item.strip()}")
+                    elif isinstance(item, dict):
+                        title = str(item.get("title") or item.get("name") or "").strip()
+                        detail = str(
+                            item.get("description") or item.get("detail") or ""
+                        ).strip()
+                        body = f"{title}: {detail}" if title and detail else title or detail
+                        if body:
+                            lines.append(f"- {body}")
+                return lines
+            return []
+
+        written: List[str] = []
+        sections: List[str] = []
+        finding_lines_out = finding_lines(data.get("findings"))
+        if finding_lines_out:
+            sections.append("## Findings\n\n" + "\n".join(finding_lines_out))
+        analysis_lines = finding_lines(data.get("analysis"))
+        if analysis_lines:
+            sections.append("## Analysis\n\n" + "\n".join(analysis_lines))
+        if sections:
+            section_text = "\n\n".join(sections)
+            entry = (
+                f"\n\n---\n\n### Turn {output.produced_at} "
+                f"({output.agent_id}, status={output.status})\n\n"
+                "Harvested after a Definition-of-Done/schema rejection.\n\n"
+                + section_text
+                + "\n"
+            )[:80_000]
+            target = self.docs_dir() / "findings" / f"{task_id}.md"
+            existing = ""
+            try:
+                if target.exists():
+                    existing = load_text_file(target)
+            except OSError:
+                existing = ""
+            # Dedupe on the stable section text — the turn header carries a
+            # fresh timestamp, so an identical re-rejection must not append.
+            if section_text.strip() and section_text.strip() not in existing:
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if existing:
+                        save_text_file(target, existing + entry)
+                    else:
+                        save_text_file(target, f"# Findings — {task_id}\n{entry}")
+                    written.append(f"docs/findings/{task_id}.md")
+                except OSError:
+                    logger.debug(
+                        "could not write findings file for %s", task_id, exc_info=True
+                    )
+
+        risk_items = data.get("risks") if isinstance(data.get("risks"), list) else []
+        if risk_items:
+            try:
+                known_titles = {
+                    str(risk.get("title") or "").strip()
+                    for risk in self.state_manager.list_risks()
+                }
+                for item in list(risk_items)[:5]:
+                    if isinstance(item, dict):
+                        title = str(
+                            item.get("title") or item.get("risk") or ""
+                        ).strip()
+                        description = str(
+                            item.get("description") or item.get("detail") or ""
+                        ).strip()
+                        probability = str(item.get("probability") or "MEDIUM").strip().upper()
+                        impact = str(item.get("impact") or "MEDIUM").strip().upper()
+                    elif isinstance(item, str):
+                        title = item.strip()
+                        description = ""
+                        probability, impact = "MEDIUM", "MEDIUM"
+                    else:
+                        continue
+                    if not title:
+                        continue
+                    full_title = f"{task_id}: {title}"
+                    if full_title in known_titles:
+                        continue
+                    record = self.state_manager.append_risk(
+                        title=full_title,
+                        probability=probability or "MEDIUM",
+                        impact=impact or "MEDIUM",
+                        description=description
+                        or f"Harvested from the rejected {task_id} turn.",
+                        mitigation=(
+                            "Verify before relying on this finding — the turn that "
+                            "produced it did not pass the Definition of Done."
+                        ),
+                        related_tasks=[task_id],
+                        owner=str(output.agent_id or self.AGENT_ID),
+                    )
+                    known_titles.add(full_title)
+                    risk_id = str(record.get("id") or "").strip()
+                    if risk_id:
+                        written.append(risk_id)
+            except Exception:  # noqa: BLE001 — risk mirroring is best-effort
+                logger.debug(
+                    "could not mirror harvested risks for %s", task_id, exc_info=True
+                )
+        return written
 
     def run(self, task: Dict[str, Any], materialize: bool = True) -> AgentOutput:
         """Build the payload, execute, and never let exceptions escape.
