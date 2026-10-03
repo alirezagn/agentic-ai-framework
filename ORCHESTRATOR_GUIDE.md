@@ -233,7 +233,13 @@ place (the post-edit body is mirrored into `docs/<name>` for the DoD check).
 A JSON summary without that content only produces a wrapper document — every
 agent's `system_rules()` carries the `AUTHORING_CONTRACT` spelling this out,
 and invalid edits (path escape, missing/ambiguous search) fail the task with a
-precise error instead of silently delivering a stub.
+precise error instead of silently delivering a stub. Key-shape variants are
+normalized before any check runs (`normalize_delivery_data` at
+`AgentOutput.from_dict`): literal dotted keys (`{"data.documents": …}`) and
+list-form records (`documents: [{path, content}]`) fold into the canonical
+channels, so a delivery in either shape writes the real file instead of
+degrading into a wrapper — the `sys-usage` regression where a dotted-key
+delivery passed Done with the expected output missing.
 
 **Edit session (G20):** `software_agent` does not deliver in one giant JSON
 reply. `EDIT_SESSION_TURNS = 3` switches `execute()` into a bounded
@@ -860,7 +866,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1224 passed
+python3 -m pytest -q          # full suite — 1238 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)
