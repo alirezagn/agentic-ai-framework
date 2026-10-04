@@ -377,6 +377,58 @@ DECISIONS_FILE = "DECISIONS.md"
 RISKS_FILE = "RISKS.md"
 CHANGELOG_FILE = "CHANGELOG.md"
 
+#: pytest configuration written at the project root by ``init``. Not a state
+#: file: it is not checkpointed and never parsed by StateManager, so it is
+#: deliberately absent from STATE_FILES below.
+PYTEST_INI_FILE = "pytest.ini"
+
+#: Body of the scaffolded pytest configuration. Three defects it exists to
+#: prevent, all reproduced on a generated project on 2026-10-05:
+#:
+#: 1. **rootdir escape.** A bare ``pytest`` run does not put the cwd on
+#:    ``sys.path`` (``python -m pytest`` does), so pytest walks upwards for an
+#:    ini file and adopts an enclosing repository's ``pyproject.toml`` — rootdir
+#:    lands outside this project and ``from src.x import y`` fails with
+#:    ``ModuleNotFoundError``. Naming an ini file here makes this directory the
+#:    rootdir.
+#: 2. **the import itself.** ``pythonpath = .`` (pytest >= 7) is what puts the
+#:    project root on ``sys.path``; rootdir alone does not, because pytest's
+#:    ``prepend`` import mode inserts the *test file's* directory.
+#: 3. **the ``docs/`` artifact mirror.** Every expected output is mirrored into
+#:    ``docs/<basename>``, so a mirrored test module is byte-identical to the
+#:    real one; collecting both dies with ``import file mismatch``. The old
+#:    ``*/docs/*`` glob never matched a rootdir-relative ``docs/test_x.py``
+#:    because it requires a segment *before* ``docs/`` (OPEN-4).
+#:
+#: An ini file rather than a ``conftest.py``, deliberately: a generated project
+#: lives at ``projects/<name>``, i.e. inside whatever repository ran ``init``,
+#: and a second ``conftest.py`` there shadows the host's own conftest module.
+#: This repo has 28 test modules doing ``from conftest import build_test_project``
+#: and all 27 suites failed with ``ImportError: cannot import name
+#: 'build_test_project' from 'conftest'`` under full-tree collection.
+PYTEST_INI_TEMPLATE = """\
+# pytest configuration for this project — written by `orchestrator init`.
+#
+# Three things a bare `pytest` run would otherwise get wrong:
+#
+#   * rootdir. `python -m pytest` puts the cwd on sys.path; a bare `pytest` does
+#     not. It then searches upwards for a config file and can adopt one
+#     belonging to a different project that merely contains this directory. This
+#     file makes this directory the rootdir.
+#   * sys.path. `pythonpath` (pytest >= 7) is what actually makes `from
+#     src.module import Thing` resolve; rootdir alone does not.
+#   * the docs/ artifact mirror. Agent artifacts are mirrored into docs/ for
+#     human review, so a mirrored test module is a byte-for-byte duplicate of
+#     the real one. Collecting both aborts the run with "import file mismatch".
+#
+# Edit freely — this file is yours once the project exists.
+[pytest]
+pythonpath = .
+testpaths = tests
+norecursedirs = docs
+"""
+
+
 STATE_FILES: Tuple[str, ...] = (
     PROJECT_FILE,
     TASKS_FILE,

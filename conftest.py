@@ -14,6 +14,77 @@ import yaml
 from orchestrator.llm_client import LLMResult
 from orchestrator.state_manager import release_file_locks
 
+#: Untracked project directories under ``projects/`` that must not be collected
+#: as part of this suite. Discovered from disk rather than hardcoded so a
+#: project created by ``init`` is excluded the moment it appears — the failure
+#: it prevents is a collection *error*, which aborts the whole run before any
+#: test executes.
+#:
+#: Tracked sample projects (kid-robot-face, sys_mon) are deliberately *not*
+#: listed: their tests are part of this suite.
+def _untracked_project_dirs() -> List[str]:
+    """Top-level project directories that git does not track at all.
+
+    A directory counts as tracked when git has *any* tracked file directly
+    inside it. ``--ignored`` is required, not optional: ``.gitignore`` carries
+    ``projects/*``, so an untracked project is a set of *ignored* files and
+    plain ``ls-files --others`` returns nothing for it. ``--directory``
+    collapses the ignored subtrees to their top entry, which is the granularity
+    ``collect_ignore`` wants.
+
+    The tracked-file test matters because ``projects/sys_mon`` is both tracked
+    (17 state/artifact files) *and* matched by ``projects/*`` for its build
+    leftovers (``__pycache__``, ``.lock``, a mirrored report). Without the test
+    it would be ignored along with the scratch projects, dropping
+    ``projects/sys_mon/test_sys_mon.py`` — tests this suite asserts on.
+    """
+    import subprocess
+
+    root = Path(__file__).resolve().parent
+    projects = root / "projects"
+    if not projects.is_dir():
+        return []
+
+    def _git(*args: str) -> Optional[subprocess.CompletedProcess[str]]:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):  # pragma: no cover
+            return None
+        return result if result.returncode == 0 else None
+
+    ignored = _git(
+        "ls-files", "--others", "--ignored", "--directory",
+        "--no-empty-directory", "--exclude-standard", "--", "projects",
+    )
+    if ignored is None:
+        return []
+    tracked = _git("ls-files", "--", "projects")
+    if tracked is None:
+        return []
+    tracked_tops = {
+        line.split("projects/", 1)[1].split("/", 1)[0]
+        for line in tracked.stdout.splitlines()
+        if "projects/" in line
+    }
+    ignored_tops = set()
+    for line in ignored.stdout.splitlines():
+        name = line.strip().rstrip("/")
+        if "projects/" not in name:
+            continue
+        top = name.split("projects/", 1)[1].split("/", 1)[0]
+        if top:
+            ignored_tops.add(top)
+    return sorted(ignored_tops - tracked_tops)
+
+
+_GENERATED_PROJECTS = _untracked_project_dirs()
+
 
 class FakeLLMClient:
     """Offline stand-in for LLMClient used by agent tests."""
@@ -395,7 +466,47 @@ def block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
 #
 # Scoped to docs/ rather than a broad norecursedirs so a genuine test directory
 # is never hidden by accident.
+#
+# BOTH forms are needed, and dropping either one breaks a real case:
+#
+# - ``collect_ignore = ["docs"]`` covers a rootdir-relative ``docs/``. The glob
+#   below cannot: ``*/docs/*`` requires a path segment *before* ``docs/``, so it
+#   never matched a root-level ``docs/test_metrics.py`` — the exact shape a
+#   generated project produces, where the project *is* the rootdir.
+# - ``collect_ignore_glob`` covers the nested mirrors in this repository
+#   (``projects/my-app/docs``, ``projects/sys_mon/docs``, ``workspace/*/docs``),
+#   which the bare ``"docs"`` entry does not reach. Removing it turns those four
+#   modules into collection errors, because the mirror and the real module share
+#   a basename and neither directory is a package.
+#
+# memory.md recorded the old glob as "dead code" on the grounds that this
+# repository has no docs/ directory. That was wrong — there are three nested
+# ones — and the glob was load-bearing. Pinned in
+# tests/test_docs_collection_guard.py, which also asserts the glob still
+# reproduces the root-level collision it cannot fix.
+collect_ignore = ["docs"]
 collect_ignore_glob = ["*/docs/*", "*/docs/**/*"]
+
+# Generated projects live at projects/<name> and are git-ignored scratch (see
+# .gitignore: "projects/*" with only kid-robot-face/ un-ignored). `testpaths =
+# ["."]` collects the whole tree, so a project left behind by `orchestrator
+# init` / `run --all` gets collected as if it were part of this suite — and its
+# tests import *its* package (`from src.data_layer import DataLayer`), which
+# only resolves with that project as rootdir. Symptom on 2026-10-05:
+#
+#   ERROR projects/my-app/tests/test_suite.py
+#   E   ModuleNotFoundError: No module named 'src'
+#
+# Interrupted: 1 error during collection, so the suite could not even start and
+# the derived test-count assertion silently skipped. The project is now
+# self-sufficient (`init` writes a pytest.ini, so its own runs pass), but it is
+# still not part of *this* suite.
+#
+# Scoped by name rather than "projects/*": kid-robot-face/ and sys_mon/ are
+# tracked sample projects whose tests are deliberately part of this suite
+# (tests/test_dependency_automation.py asserts against sys_mon). Ignoring the
+# whole directory would drop them.
+collect_ignore += [f"projects/{name}" for name in _GENERATED_PROJECTS]
 
 
 # ---------------------------------------------------------------------------

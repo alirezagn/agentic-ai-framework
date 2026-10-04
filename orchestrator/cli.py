@@ -493,6 +493,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         target / "docs" / "README.md",
         f"# {name} — artifacts\n\nMaterialized agent artifacts land in this folder.\n",
     )
+    # Pin pytest rootdir to the project, put the root on sys.path, and keep the
+    # docs/ artifact mirror out of collection. Without it a bare `pytest` run
+    # inside a project nested in another repository adopts that repository's
+    # pyproject.toml and fails to import the project's own package
+    # (OPEN-3/OPEN-4). An ini file, not conftest.py: a generated project sits
+    # at projects/<name>, inside the repository that ran init, and a second
+    # conftest.py there shadows the host's own conftest module. A pre-existing
+    # pytest.ini belongs to the user: never clobber it.
+    pytest_ini = target / config.PYTEST_INI_FILE
+    if not pytest_ini.exists():
+        atomic_write_text(pytest_ini, config.PYTEST_INI_TEMPLATE)
 
     # G3: generate the task graph — LLM plan when a backend is configured,
     # deterministic starter skeleton otherwise (--no-plan forces the latter).
