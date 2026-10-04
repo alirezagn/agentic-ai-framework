@@ -53,6 +53,7 @@ deliver it — the Definition of Done checks the file on disk.
 - Request execution through `data.deploy`; a status is PASS only with an `executed: true` record whose exit code is 0
 - Run tests as `python3 -m pytest <paths>` (or ship a `tests/conftest.py` that inserts the project root into `sys.path`): the bare `pytest` console script does not put the project root on `sys.path`, so `import src...` fails with `ModuleNotFoundError` before a single test executes
 - A bounded multi-turn edit session is active: each turn returns only the next change set, small enough to avoid truncation — never a whole file body
+- An `EXISTS` deliverable that already satisfies the task is declared with `data.no_change_needed = ["<path>"]` instead of being rewritten; a change still goes through `data.edits`, a `MISSING` one through `data.documents`
 - No board and no toolchain means `test_status: "NOT RUN"` — never an invented number
 - Use only PASS, FAIL, BLOCKED or NOT RUN as test statuses
 - Report `data.acceptance_results` with expected, actual and evidence per test

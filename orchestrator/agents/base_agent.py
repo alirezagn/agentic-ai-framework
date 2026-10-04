@@ -131,6 +131,40 @@ def preexisting_expected(project_path: Path, task: Dict[str, Any]) -> Set[str]:
     return snapshot
 
 
+def _declared_no_change(data: Any, name: str, filename: str) -> bool:
+    """True when the reply honestly declares an existing expected output
+    needs no change (``data.no_change_needed``).
+
+    The channel carries a list of project-relative paths (the bare
+    basename matches too). ``data.documents``/``data.edits`` answers the
+    question "what changed"; this answers "nothing did, and here is the
+    claim so the delivery check can trust the file already on disk"
+    (sys-usage TASK-006: the manifest forced a needless edit of an
+    already-passing test file, and the giant rewrite truncated three
+    attempts in a row). Correctness is still gated by the task's
+    acceptance evidence at dispatch — this only waives the
+    mirror-content check for the declared path.
+    """
+    if not isinstance(data, dict):
+        return False
+    declared = data.get("no_change_needed")
+    if declared is None:
+        declared = data.get("data.no_change_needed")
+    if isinstance(declared, str):
+        declared = [declared]
+    if not isinstance(declared, list):
+        return False
+    for item in declared:
+        if not isinstance(item, str):
+            continue
+        item = item.strip()
+        if not item:
+            continue
+        if item == name or ("/" not in item and item == filename):
+            return True
+    return False
+
+
 def delivery_problems(
     project_path: Path,
     task: Dict[str, Any],
@@ -155,7 +189,12 @@ def delivery_problems(
       claim itself is now a problem naming the right channel.
     - a missing non-``docs/`` expected output is a problem: ``data.documents``
       creates missing expected files at their real path, so by delivery time
-      the real file must exist — a ``docs/`` mirror alone is not a delivery.
+      the real file must exist — a ``docs/`` mirror alone is not a delivery;
+    - ``data.no_change_needed = ["<path>"]`` declares an existing file
+      already satisfies the task: the shares-line check is waived for it
+      (the materializer mirrors the real content into ``docs/`` instead of
+      a prose wrapper), while declaring it for a missing file is itself a
+      problem. Acceptance evidence still gates the claim at dispatch.
 
     Independently of ``expected_outputs``, every file this task delivered is
     also run through :func:`orchestrator.import_contract.import_contract_problems`:
@@ -209,6 +248,15 @@ def delivery_problems(
         if not inside:
             continue
         if not project_file.is_file():
+            # A no-op declaration only covers a file that is on disk;
+            # declaring one for a missing expected output is a fake delivery.
+            if _declared_no_change(data, name, filename):
+                problems.append(
+                    f"{name} is declared in data.no_change_needed but the "
+                    "file does not exist — create it with data.documents "
+                    "(a no-op declaration only covers an existing file)"
+                )
+                continue
             # Dispatch-context checks (snapshot provided) require the real
             # file whenever the output delivered real content for it — a
             # docs/ mirror alone is not a delivery (the TASK-004 pattern).
@@ -243,6 +291,14 @@ def delivery_problems(
                 "data.documents never modifies files that existed when the "
                 "task started"
             )
+            continue
+        if _declared_no_change(data, name, filename):
+            # Honest no-op for an existing file: the reply declares the
+            # current content already satisfies the task (the materializer
+            # mirrors that real content into docs/<name>), so the
+            # prose-wrapper shares-line check — which exists to force a
+            # delivery — must not punish the declaration. Acceptance
+            # evidence still gates the claim at dispatch.
             continue
         if not shares_meaningful_line(project_file, mirror):
             problems.append(
@@ -771,7 +827,10 @@ class BaseAgent:
         "data.edits snippet instead.\n"
         "- The payload's delivery_manifest entry states, per expected output, "
         "whether the file exists and which channel is required: EXISTS -> "
-        "data.edits only; MISSING -> data.documents only. Follow it exactly.\n"
+        "data.edits when a change is needed, or data.no_change_needed = "
+        '["<path>"] when the current content already satisfies the task; '
+        "MISSING -> data.documents only. Follow the channel mapping "
+        "exactly.\n"
         "- data.documents writes a MISSING expected file to its real project "
         "path (and the docs/ mirror); it never modifies a file that existed "
         "when the task started — use data.edits for those.\n"
@@ -928,9 +987,20 @@ class BaseAgent:
             if not target.is_absolute():
                 target = project / name
             if target.is_file():
+                # An already-correct file needs no edit: ordering one here
+                # made the model regenerate whole files it was happy with
+                # (sys-usage TASK-006: giant search strings, truncation,
+                # oscillation). The declaration is structured, so the
+                # delivery check can trust it; a change still goes through
+                # data.edits.
                 lines.append(
-                    f"- {name}: EXISTS — a real project file: update it with "
-                    "data.edits (delivery via data.documents will be rejected)"
+                    f"- {name}: EXISTS — already on disk. If the current "
+                    "content already satisfies the task, declare it with "
+                    'data.no_change_needed = ["<this exact path>"] and '
+                    "deliver nothing else for it (the acceptance evidence "
+                    "still gates the claim); if it must change, use "
+                    "data.edits (small search/replace) — data.documents "
+                    "will be rejected"
                 )
             else:
                 lines.append(
@@ -1515,7 +1585,35 @@ class BaseAgent:
                     content = output.data.get(filename)
                 delivered = isinstance(content, str) and bool(content.strip())
                 if not delivered:
-                    content = self.render_artifact(filename, task, output)
+                    # A DECLARED no-op (data.no_change_needed) mirrors the
+                    # REAL file: the honest reply says the content already
+                    # satisfies the task, so the mirror — a framework-owned
+                    # projection — must reflect that real content instead of
+                    # a rendered wrapper the shares-line check would reject
+                    # (sys-usage TASK-006: retries re-clobbered
+                    # docs/test_monitor.py with a report while the real
+                    # tests/test_monitor.py passed pytest). Undeclared
+                    # no-content replies keep the rendered wrapper, which is
+                    # what the G18 prose gate rejects.
+                    if name.split("/")[0] != "docs" and _declared_no_change(
+                        output.data, name, filename
+                    ):
+                        body = None
+                        real_target = Path(name)
+                        if (
+                            not real_target.is_absolute()
+                            and ".." not in real_target.parts
+                        ):
+                            try:
+                                real_path = (project_root / real_target).resolve()
+                                if real_path.is_relative_to(project_root) and real_path.is_file():
+                                    body = real_path.read_text(encoding="utf-8")
+                            except (OSError, UnicodeDecodeError):
+                                body = None
+                        if body:
+                            content = body
+                    if not isinstance(content, str) or not content.strip():
+                        content = self.render_artifact(filename, task, output)
                 save_text_file(docs_dir / filename, content)
                 written.append(f"docs/{filename}")
                 # G22: documents is the create channel for files that were

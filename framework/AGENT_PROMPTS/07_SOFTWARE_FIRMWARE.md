@@ -53,7 +53,7 @@ deliver it — the Definition of Done checks the file on disk.
 - Cast or reshape metrics at the boundary into a view layer, and deliver a tested `main.py` that runs the whole system end to end
 - Declare every third-party import in `requirements.txt` before requesting the test run
 - A bounded multi-turn edit session is active: each turn returns only the next change set, small enough to avoid truncation
-- EXISTS deliverables go through `data.edits`; MISSING ones through `data.documents`
+- EXISTS deliverables go through `data.edits` when they must change, or `data.no_change_needed = ["<path>"]` when the current content already satisfies the task; MISSING ones go through `data.documents`
 - Request every build and every test through `data.deploy` — a claimed result with no executed record is rejected by the Definition of Done
 - Run tests as `python3 -m pytest <paths>` (or ship a `tests/conftest.py` that inserts the project root into `sys.path`): the bare `pytest` console script does not put the project root on `sys.path`, so `import src...` fails with `ModuleNotFoundError` before a single test executes
 - Report `data.acceptance_results`; an honest FAIL is always better than an omitted field

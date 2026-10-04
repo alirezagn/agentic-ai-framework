@@ -468,3 +468,169 @@ class TestDocumentsClaimOnExistingFileIsRejected:
             test_project, task, output, preexisting=set()
         )
         assert problems == []
+
+
+# ---------------------------------------------------------------------------
+# Declared no-op delivery (F8 — sys-usage rerun 6, TASK-006)
+# ---------------------------------------------------------------------------
+
+
+class TestDeclaredNoOpDelivery:
+    """An existing, already-correct expected output needs no edit (F8).
+
+    The manifest used to order "EXISTS — update it with data.edits" on
+    every attempt, which the model read as its primary job even when the
+    file already satisfied the acceptance criteria; it regenerated whole
+    files (giant ``search`` strings, truncation, oscillation) while the
+    real ``tests/test_monitor.py`` passed pytest all along. The reply can
+    now declare the no-op structurally with
+    ``data.no_change_needed = ["<path>"]``: the mirror then mirrors the
+    real file, the prose-wrapper shares-line check (whose job is to force
+    a delivery) does not punish the declaration, and acceptance evidence
+    still gates the claim at dispatch. Undeclared no-content replies keep
+    the legacy G18 rejection unchanged.
+    """
+
+    def test_declared_noop_mirrors_the_real_file(
+        self, test_project: Path
+    ) -> None:
+        tests = test_project / "tests"
+        tests.mkdir()
+        real = tests / "test_monitor.py"
+        real.write_text(
+            "def test_cpu():\n    assert True\n", encoding="utf-8"
+        )
+        docs = test_project / "docs"
+        docs.mkdir()
+        (docs / "test_monitor.py").write_text(
+            "# test_monitor.py\n\n- Task: `TASK-006` — Test Suite\n",
+            encoding="utf-8",
+        )
+        agent = RequirementsAgent(project_path=test_project)
+        task = {"id": "TASK-006", "expected_outputs": ["tests/test_monitor.py"]}
+        output = agent.completed(
+            "TASK-006",
+            "tests already pass",
+            data={"no_change_needed": ["tests/test_monitor.py"]},
+        )
+        agent._materialize_artifacts(task, output)
+        mirror = docs / "test_monitor.py"
+        assert mirror.read_text(encoding="utf-8") == real.read_text(
+            encoding="utf-8"
+        ), "a declared no-op must sync the mirror with the real file"
+        problems = delivery_problems(
+            test_project, task, output, preexisting={"tests/test_monitor.py"}
+        )
+        assert problems == []
+
+    def test_declared_noop_skips_the_shares_line_check(
+        self, test_project: Path
+    ) -> None:
+        """Without a materialize pass the declaration still stands."""
+        tests = test_project / "tests"
+        tests.mkdir()
+        (tests / "test_monitor.py").write_text(
+            "def test_x():\n    assert True\n", encoding="utf-8"
+        )
+        docs = test_project / "docs"
+        docs.mkdir()
+        (docs / "test_monitor.py").write_text(
+            "# prose wrapper\n", encoding="utf-8"
+        )
+        output = AgentOutput(
+            agent_id="test_agent",
+            task_id="TASK-006",
+            status=config.AGENT_STATUS_COMPLETED,
+            summary="already satisfied",
+            data={"no_change_needed": ["tests/test_monitor.py"]},
+        )
+        task = {"id": "TASK-006", "expected_outputs": ["tests/test_monitor.py"]}
+        problems = delivery_problems(
+            test_project, task, output, preexisting={"tests/test_monitor.py"}
+        )
+        assert problems == []
+
+    def test_declared_noop_on_a_missing_file_is_still_rejected(
+        self, test_project: Path
+    ) -> None:
+        """Declaring "no change" for a file that does not exist is fake."""
+        docs = test_project / "docs"
+        docs.mkdir()
+        (docs / "monitor.py").write_text("# wrapper\n", encoding="utf-8")
+        output = AgentOutput(
+            agent_id="test_agent",
+            task_id="TASK-004",
+            status=config.AGENT_STATUS_COMPLETED,
+            summary="nothing to do",
+            data={"no_change_needed": ["src/monitor.py"]},
+        )
+        task = {"id": "TASK-004", "expected_outputs": ["src/monitor.py"]}
+        problems = delivery_problems(
+            test_project, task, output, preexisting=set()
+        )
+        assert any(
+            "no_change_needed" in item and "does not exist" in item
+            for item in problems
+        )
+
+    def test_undeclared_no_content_keeps_the_legacy_rejection(
+        self, test_project: Path
+    ) -> None:
+        """G18 prose gate: no declaration, no content — still rejected."""
+        tests = test_project / "tests"
+        tests.mkdir()
+        (tests / "test_monitor.py").write_text(
+            "def test_x():\n    assert True\n", encoding="utf-8"
+        )
+        docs = test_project / "docs"
+        docs.mkdir()
+        (docs / "test_monitor.py").write_text(
+            "# prose wrapper\n", encoding="utf-8"
+        )
+        output = AgentOutput(
+            agent_id="test_agent",
+            task_id="TASK-006",
+            status=config.AGENT_STATUS_COMPLETED,
+            summary="completed with measurable output",
+            data={"result": "ok"},
+        )
+        task = {"id": "TASK-006", "expected_outputs": ["tests/test_monitor.py"]}
+        problems = delivery_problems(
+            test_project, task, output, preexisting={"tests/test_monitor.py"}
+        )
+        assert any("shares no line" in item for item in problems)
+
+
+class TestManifestAllowsANoOpDeclaration:
+    """EXISTS must offer the structured no-op, not order a needless edit.
+
+    The manifest said "EXISTS — update it with data.edits" on every
+    attempt, which the model read as its primary job even when the file
+    already satisfied the acceptance criteria; it then regenerated the
+    whole file (giant ``search`` strings, truncation, oscillation).
+    """
+
+    def test_existing_file_manifest_states_the_declaration(
+        self, test_project: Path
+    ) -> None:
+        (test_project / "tests").mkdir()
+        (test_project / "tests" / "test_monitor.py").write_text(
+            "def test_x():\n    assert True\n", encoding="utf-8"
+        )
+        agent = RequirementsAgent(project_path=test_project)
+        manifest = agent._delivery_manifest(
+            {"id": "TASK-006", "expected_outputs": ["tests/test_monitor.py"]}
+        )
+        assert "EXISTS" in manifest
+        assert "no_change_needed" in manifest
+        assert "data.edits" in manifest
+
+    def test_missing_file_manifest_still_orders_creation(
+        self, test_project: Path
+    ) -> None:
+        agent = RequirementsAgent(project_path=test_project)
+        manifest = agent._delivery_manifest(
+            {"id": "TASK-003", "expected_outputs": ["requirements.txt"]}
+        )
+        assert "MISSING" in manifest
+        assert "data.documents" in manifest

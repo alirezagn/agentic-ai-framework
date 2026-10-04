@@ -1385,7 +1385,8 @@ class TestDeliveryManifest:
         context = agent.relevant_context(task)
         manifest = context["delivery_manifest"]
         assert "main/input_service.c: EXISTS" in manifest
-        assert "update it with data.edits" in manifest
+        assert "no_change_needed" in manifest
+        assert "data.edits" in manifest
         assert "src/new_module.c: MISSING" in manifest
         assert "create it with data.documents" in manifest
         assert "docs/REQUIREMENTS.md: docs deliverable" in manifest
