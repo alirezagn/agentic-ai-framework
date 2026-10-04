@@ -459,6 +459,30 @@ When it fires, one of two things must be true:
   the field would otherwise turn a legitimate outcome into a failed task. It is
   honoured only when the same output does not *also* claim execution, so a
   contradictory "NOT RUN … 42/42 passed" still needs ground truth.
+- **The record exists but could not have proven anything — "environment/stage
+  not ready".** A third outcome sits between passed and failed: the command
+  really executed and really returned non-zero, but for a reason that is not
+  the delivery. `environment_not_ready_reason()` classifies it off the
+  record's **captured output** plus the project's `requirements.txt` — never
+  off the model's claim — and accepts exactly two signatures:
+  1. `ModuleNotFoundError` for a module the project **declares** (the
+     framework never installs anything; the dependency lives in the project
+     files, and the project owner reads README/`requirements.txt` and runs
+     `pip install -r requirements.txt` before using the application);
+  2. a verification target that does not exist on disk and is **not an output
+     of this task** (sys-usage TASK-003 ran `python3 -m pytest tests/` before
+     any test task had produced `tests/` → `exit 4`,
+     "file or directory not found").
+
+  When every failing record is of that class, no expectation mismatch stands
+  and the output claims nothing, the task is recorded as `NOT RUN` with a
+  warning naming the precondition instead of being failed — the run stays in
+  `docs/evidence/` exactly as it happened. An **undeclared** module, a target
+  that is this task's own expected output, a target that exists on disk, a
+  genuine assertion failure, and any output that *claims* a passing run all
+  keep the previous behaviour (a claim over such a run is rejected with
+  "environment not ready: … report `data.test_status = "NOT RUN"`", which
+  routes the one repair round to the environment remedy).
 
 With neither, the task is `FAILED` and the note states the missing evidence —
 never the claim. The asymmetry is deliberate: refusing an unevidenced claim is
@@ -920,7 +944,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1295 passed
+python3 -m pytest -q          # full suite — 1306 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)

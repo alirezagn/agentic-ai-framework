@@ -552,6 +552,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | `ModuleNotFoundError: No module named 'src'` | the bare `pytest` console script does not put the project root on `sys.path` — run tests as `python3 -m pytest <paths>` (the `-m` form does), or ship a `tests/conftest.py` that inserts the project root; the data contract tells the agent this |
 | `uses TypedDict, which the module never imports or defines` | the file reads a name it never binds (a `NameError` waiting at run time) — caught statically via `symtable` at delivery. The repair round sees the exact names; `retry TASK-00X` if it repeated |
 | `executed verification failed: ctest exited 8` | the command really ran and really failed — this is ground truth, and the problem now quotes the run's captured output (bounded) so the repair round sees the traceback too. Fix the underlying failure, then `retry TASK-00X` |
+| task `FAILED` with `ModuleNotFoundError` for a **declared** package, or `file or directory not found` for a path this task does not deliver | environment/stage, not the delivery: the DoD reads the record's captured output and the project's `requirements.txt`, and records the run as `data.test_status = "NOT RUN"` with a warning instead of failing the task. You own the environment — install what `requirements.txt` declares (`pip install -r requirements.txt`) after reading the project files, or let a later task produce the missing path. If the note says `environment not ready: …` while the reply also *claims* a pass, `retry TASK-00X`: the one repair round is told to answer with `NOT RUN` |
 | run finished `HEALTHY` but the ESP32 shows no change | the execution channel is **off by default** — nothing is built or flashed. Enable it (§8b) and let the task request `data.deploy`, or close the loop yourself: `source /media/alireza/PROJECTS/esp-idf-v6.1-beta1/export.sh && idf.py build && idf.py -p /dev/ttyACM0 flash` |
 | `docs/*.log` or docs "Verification Results" claim tests ran | with the channel **off** an agent cannot execute, so any such claim is unverified — the DoD now rejects it and the task is `FAILED` rather than silently `DONE`. Enable the channel (§8b) so the claim can be backed by a transcript, or have the agent report `NOT RUN` |
 | `DoD unmet: output claims an executed verification … report test_status=NOT RUN` | the task produced a test-like report without saying what ran. `data.test_status = "NOT RUN"` (or a summary that plainly says `NOT RUN`) satisfies it — the one repair round now shows the model exactly that JSON instead of the old "deliver file content" text; `retry TASK-00X` if the reply predates the fix |
@@ -565,6 +566,6 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1295 passed
+python3 -m pytest -q      # 1306 passed
 ruff check .              # lint — 0 errors (install: python3 -m pip install -e .[dev])
 ```
