@@ -1,6 +1,21 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-04 (**v3.0.0 released and tagged** — version sources
+> Last updated: 2026-10-04, **verification pass after the v3.0.0 tag** —
+> no code commit since `7f93722` (HEAD = tag `v3.0.0`, main in sync with
+> origin/main). Re-run in this session: `python3 -m pytest -q` → **1295
+> passed, 178.44 s, exit 0**; `python3 -m pytest --collect-only -q` → 1295
+> collected; `ruff check .` → **0 errors** via an isolated venv
+> (`/tmp/opencode/lintenv`, ruff 0.16.10 — **`ruff` is not on this shell's
+> PATH and is not in the system Python**, see Guardrails). Every open entry
+> (**OPEN-3..OPEN-6**) was re-checked against the tree and all four are
+> still open; OPEN-3 and OPEN-4 were re-reproduced live in a copy at
+> `/tmp/opencode/sysusage-open3` (bare run → `import file mismatch`,
+> collection interrupted; the repo's `collect_ignore_glob` pattern still
+> fails; `collect_ignore = ["docs"]` → 6 passed). Line references corrected:
+> `metrics_collector.py` hardcodes `frequency_mhz` at **:37** (was cited
+> `:39`) and `cpu_percent(interval=None)` is at **:30**.
+>
+> Previous update: 2026-10-04 (**v3.0.0 released and tagged** — version sources
 > + their assertions synced 2.0.0 → 3.0.0, the stale `v1.0` declarations in
 > `CONTRIBUTING`/`QUICK_REFERENCE`/`DEPLOYMENT_SUMMARY`/`GITHUB_PUSH_INSTRUCTIONS`
 > corrected, `git tag v3.0.0` pushed; suite **1295 green**, `ruff` 0;
@@ -27,7 +42,8 @@
   `v1.0.0` (`da210ea`, 2026-09-29), `v2.0.0` (`aa9a80e`, 2026-10-02),
   **`v3.0.0` (HEAD, 2026-10-04)** — older tags are never moved.
 - **Suite: 1295 collected, 1295 passed / 0 failed** — `python3 -m pytest -q`,
-  ~204 s, 2026-10-04, verified in the operator's shell
+  re-run twice on 2026-10-04: **178.44 s, exit 0** (this session, plain env)
+  and ~204 s in the operator's shell
   (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`). The
   number the four docs assert is the *collected* count (1295) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
@@ -37,16 +53,25 @@
   `ORCHESTRATOR_DEPLOY_*` for every test so an exported channel in the shell
   cannot turn a "default refuses" assertion into a real spawn.
   **Lint:** `ruff check .` → 0 errors (baseline `E4/E7/E9/F` pinned in
-  `pyproject.toml`; install `python3 -m pip install -e .[dev]`). Never claim
-  green from memory — re-run both.
-- **Repo state:** branch `main`, **in sync with `origin/main`** after this
-  batch's push (hashes in the commits list below). The only remaining
-  tree dirt is the **pre-existing
+  `pyproject.toml`). **`ruff` is not installed** in the system Python here
+  and not on PATH — the documented `python3 -m pip install -e .[dev]` was not
+  run; this session used an isolated venv instead
+  (`python3 -m venv /tmp/opencode/lintenv && …/bin/pip install 'ruff>=0.16'`,
+  ruff 0.16.10, `pyproject.toml:24` requires `ruff>=0.16`). Never claim
+  green from memory — re-run both; if `ruff` is missing, say so rather than
+  repeating the last known result.
+- **Repo state:** branch `main`, **in sync with `origin/main`** — both at
+  `7f93722`, which is also the `v3.0.0` tag (verified 2026-10-04:
+  `git status -sb` shows no ahead/behind, `git rev-list -n1 v3.0.0` →
+  `7f93722`). The only remaining tree dirt is the **pre-existing
   intentional** dirt: `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`,
   the still-tracked `projects/sys_mon/__pycache__/test_sys_mon…pyc`, and a
-  stray **0-byte file named `=`** in the repo root. Do not describe the tree as
+  stray **0-byte file named `=`** in the repo root (re-confirmed 0 bytes,
+  mtime 2026-10-02). Do not describe the tree as
   clean until that is resolved, and do not sweep those files into an unrelated
-  commit.
+  commit. In-repo `projects/` holds only `kid-robot-face/` and `sys_mon/` —
+  `sys-usage` and the other run outputs live **outside** the repo at
+  `/media/alireza/microos/projects/`.
 - **Commits since the audit pass** (all 2026-10-02): `1ee05ae` HIGH-01..04,
   `2c55657` dependency automation, `2cd1fed` completed `sys_mon` sample,
   `69a55d1` CLI init nesting fix, `2408d42` materializer no-op edit,
@@ -85,11 +110,16 @@
    delivery (1293), `c72e030` docs (1293).
    Then (rerun 6 / F9 batch, 2026-10-03): `f7ea44f` documentation_agent
    edit session (1295), `8d6f119` docs (1295), and this memory commit.
+   Then (v3.0.0 release batch, 2026-10-04, all 11:50): `15fbe4c` version
+   bump → 3.0.0, `992407d` docs version declarations synced, `7f93722`
+   memory (v3.0.0 record + OPEN-3..OPEN-6) — tag **`v3.0.0` points at
+   `7f93722`** (HEAD), not at the bump commit. Nothing has been committed
+   since; `git describe --tags` → `v3.0.0`.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
 
-### Remediation status (verified 2026-10-02)
+### Remediation status (verified 2026-10-02; full suite re-green 2026-10-04)
 
 | Gap | Severity | State |
 |---|---|---|
@@ -403,18 +433,28 @@ kept as the record of what was wrong, not as current state.
 - Red tests first (+2): declaration, template rule. **1295 green**,
   `ruff` 0.
 
-### Open items (verified 2026-10-04)
+### Open items (verified 2026-10-04, re-verified same session after the tag)
+
+> All four below were re-checked against the tree and re-reproduced where
+> noted; none has been touched by code since `7f93722`. Treat any later
+> claim that one is closed as requiring a fresh run of the reproduction.
 
 - **OPEN-3 — generated projects break on a bare `python -m pytest`.**
   The materializer mirrors every expected output into `docs/<basename>`, so
-  `projects/sys-usage` carries a `docs/test_metrics.py` that is byte-identical
-  to `tests/test_metrics.py` (`cmp` confirms). No pytest config ships with the
-  project, so a bare run collects both from rootdir `.` →
-  **`import file mismatch`, collection interrupted, 0 tests ran**.
+  `/media/alireza/microos/projects/sys-usage` (outside the repo — nothing
+  under the repo's `projects/` exhibits this) carries a
+  `docs/test_metrics.py` that is byte-identical to `tests/test_metrics.py`
+  (`cmp` confirms; both 3872 bytes, mtime 2026-10-04 10:45). No pytest
+  config ships with the project, so a bare run collects both from rootdir `.`
+  → **`import file mismatch`, collection interrupted, 0 tests ran**.
   `python -m pytest tests/` (what `07`/`08` prescribe) passes 6/6.
+  **Re-reproduced 2026-10-04** in a copy at `/tmp/opencode/sysusage-open3`:
+  bare run → `ERROR collecting tests/test_metrics.py / import file
+  mismatch / Interrupted: 1 error during collection`.
   **Fix verified but not implemented:** a root `conftest.py` holding
   `collect_ignore = ["docs"]` makes the bare run pass *and* puts rootdir on
-  `sys.path`, which would also retire the separate `import src...` guidance in
+  `sys.path` (6/6 in the same copy), which would also retire the separate
+  `import src...` guidance in
   `07`/`08`. Alternative `testpaths = tests` works but silently falls back to
   full-tree collection (and re-collects the mirror) when `tests/` is missing.
   Intended shape: scaffold it deterministically at `init` **and** state it in
@@ -424,27 +464,34 @@ kept as the record of what was wrong, not as current state.
   with a comment describing exactly OPEN-3, but this repo **has no `docs/`
   directory at all** and no test exercises the guard. Worse, the pattern does
   not match a rootdir-relative `docs/test_metrics.py` — it requires a segment
-  *before* `docs/`. Reproduced in a copy of sys-usage: that exact pattern
-  **still fails**; `collect_ignore = ["docs"]`,
-  `collect_ignore_glob = ["docs/*"]`, and
-  `["docs/*", "*/docs/*", "*/docs/**/*"]` all pass.
+  *before* `docs/`. **Re-reproduced 2026-10-04** in the same copy: that exact
+  pattern **still fails** (collection interrupted); `collect_ignore = ["docs"]`
+  passes 6/6, and (from the earlier session) `collect_ignore_glob = ["docs/*"]`
+  and `["docs/*", "*/docs/*", "*/docs/**/*"]` also pass.
 - **OPEN-5 — edit-session feedback omits `repair_remedies()`.**
-  `_execute_edit_session` (`llm_agent.py:421-434`) attaches the raw problem
-  list but never the remedy, so `_REMEDY_DECLARE` / `_REMEDY_RUN_FAILED` reach
+  `_execute_edit_session` (`orchestrator/agents/llm_agent.py`, feedback
+  branches at `:389` and `:421`) attaches the raw problem
+  list and (since the file-body fix) the touched files, but never the remedy,
+  so `_REMEDY_DECLARE` / `_REMEDY_RUN_FAILED` reach
   the model only through `repair_delivery` (`llm_agent.py:541`) — i.e. only
   after the attempt has already burned. Compounding it, `relevant_context`
-  (`base_agent.py:909`) inlines only `input_files` + `expected_outputs`, so
-  TASK-006 was asked to declare `requirements.txt` while that file was never
+  (`base_agent.py:909`) inlines `input_files`, notes, retry feedback,
+  decisions, REQ traceability, `expected_outputs` and the delivery manifest —
+  **not** `requirements.txt` unless it is itself an input/expected output —
+  so TASK-006 was asked to declare `requirements.txt` while that file was never
   put in its context and could not show that `pytest` was undeclared.
 - **OPEN-6 — sys-usage ships a broken pipe contract (recorded, deliberately
   NOT fixed).** `python src/metrics_collector.py | python src/formatter.py`
-  prints `15.5% / 8 / 3200 MHz / 4096 of 16384 MB / one 500 GB disk`, while
+  prints `15.5% / 8 / 3200 MHz / 4096 of 16384 MB / one 500 GB disk` (re-run
+  2026-10-04, same output), while
   `python main.py` prints live values. Two causes, both confirmed by reading
-  the files: `metrics_collector.py` has **no `__main__` at all** (left side of
-  the pipe emits nothing), and `formatter.py`'s `__main__` **ignores stdin**
-  and prints a hardcoded `sample_metrics` dict. The real path has two honest
-  gaps too — `cpu_percent(interval=None)` returns `0.0` on its first call and
-  `frequency_mhz` is hardcoded `"0.0"` (`metrics_collector.py:39`). The
+  the files: `metrics_collector.py` has **no `__main__` at all** (`grep -c
+  __main__` → 0; left side of the pipe emits nothing), and `formatter.py`'s
+  `__main__` (at `:67`) **ignores stdin**
+  and prints a hardcoded `sample_metrics` dict (`:69-77`). The real path has two honest
+  gaps too — `cpu_percent(interval=None)` returns `0.0` on its first call
+  (`metrics_collector.py:30`) and `frequency_mhz` is hardcoded `0.0`
+  (`metrics_collector.py:37` — was cited `:39` in the previous entry). The
   operator explicitly asked for diagnosis only. The lesson stands: **an
   inter-module contract described only in prose is always accepted; it has to
   be an acceptance criterion that runs the pipeline and states expected
@@ -469,8 +516,9 @@ kept as the record of what was wrong, not as current state.
   genuinely corrupt, not that the code is wrong.
 - **OPEN-2 — counts current.** The four consistency-checked docs
   (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
-  are asserted against `pytest --collect-only` and are at **1295** (1103 →
-  1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 → 1245 → 1263 → 1266 → 1284 → 1287 → 1293 → 1295 as
+  are asserted against `pytest --collect-only` and are at **1295**
+  (re-collected 2026-10-04 → 1295; 1103 → 1160 → 1185 → 1191 → 1209 → 1213 →
+  1224 → 1238 → 1245 → 1263 → 1266 → 1284 → 1287 → 1293 → 1295 as
   batches added tests), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
@@ -539,8 +587,13 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~184 s, 1295 tests),
+- Run full pytest after every change: `python3 -m pytest -q` (~178–204 s, 1295 tests),
   and `ruff check .` (0 errors, baseline pinned in `pyproject.toml`).
+  **`ruff` is not installed here** (system Python has pytest 9.1.1 only) —
+  either run `python3 -m pip install -e .[dev]` or the venv used on
+  2026-10-04: `python3 -m venv /tmp/opencode/lintenv && /tmp/opencode/lintenv/bin/pip install 'ruff>=0.16'`
+  → `/tmp/opencode/lintenv/bin/ruff check .` (ruff 0.16.10 → 0). Do not write
+  "`ruff` 0" unless that command just ran.
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
   evidence — deleting a checkpoint directory by hand will redden it (OPEN-1,
