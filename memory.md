@@ -1,13 +1,15 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (project-1 **rerun 6 — F6 verified live, F7
-> surfaced** — run reached 5 DONE / TASK-006 flailing; F6 confirmed live
-> (`python3 -m pytest` used, failing-run traceback quoted into the repair
-> note); TASK-006 then hit the single-shot truncation loop — whole test-file
-> bodies overran the cap 3×, oscillation refusal — fixed at framework level
-> by F7 (test_agent gets the bounded edit session, fix `8ea565c`, docs
-> `b3fe2f0`, memory this commit); suite at **1287 green**, `ruff check .`
-> at 0; next: `retry TASK-006` + `run --all` to finish deployment, then stop)
+> Last updated: 2026-10-03 (project-1 **rerun 6 — F7 ran, F8 fixed the
+> root cause** — F7 sessions executed for TASK-006 but the model still
+> re-emitted whole test-file bodies (manifest ordered "EXISTS — update
+> it with data.edits" every attempt) and the materializer itself
+> re-clobbered docs/test_monitor.py with a rendered report the shares-line
+> check then rejected; fixed at framework level by F8 — structured
+> `data.no_change_needed` no-op declaration, manifest + authoring contract
+> + 07/08 templates, fix `f360b6b`, docs `c72e030`, memory this commit);
+> suite at **1293 green**, `ruff check .` at 0; next: `retry TASK-006` +
+> `run --all` to finish deployment, then stop)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -23,10 +25,10 @@
   `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
   `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
   `HOW_TO_USE.md` is the operator walkthrough.
-- **Suite: 1287 collected, 1287 passed / 0 failed** — `python3 -m pytest -q`,
+- **Suite: 1293 collected, 1293 passed / 0 failed** — `python3 -m pytest -q`,
   ~164 s, 2026-10-03, verified in the operator's shell
   (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`). The
-  number the four docs assert is the *collected* count (1287) and is current.
+  number the four docs assert is the *collected* count (1293) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -77,8 +79,9 @@
    quoted failing-run output + test-invocation contract (1284), `18be8b8`
    docs (1284), and this memory commit. Then (rerun 6 / F7 batch,
    2026-10-03): `8ea565c` test_agent bounded edit session — the last
-   single-shot code-delivery agent (1287), `b3fe2f0` docs (1287), and
-   this memory commit.
+   single-shot code-delivery agent (1287), `b3fe2f0` docs (1287).
+   Then (rerun 6 / F8 batch, 2026-10-03): `f360b6b` declared no-op
+   delivery (1293), `c72e030` docs (1293), and this memory commit.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -341,6 +344,39 @@ kept as the record of what was wrong, not as current state.
 - Red tests first (+3): declaration, `no file bodies` invariant, template
   rule. **1287 green**, `ruff` 0.
 
+### Run result (rerun 6 continued — F7 sessions ran, root cause sharpened)
+
+- After F7, `retry TASK-006` + `run --all`: the test_agent **edit
+  session executed** (`turn 1/3`, `turn 2/3` on two dispatches) but the
+  model still targeted `tests/test_monitor.py` with whole-file
+  `search` strings — truncated inside `data.edits...search`, partial
+  `data.edit_buffers`, then the oscillation refusal again (wave 3).
+  Both files on disk were untouched (mtime 21:27).
+- Diagnosis: (a) the manifest ordered **"EXISTS — update it with
+  data.edits"** on every attempt, which the model read as its primary
+  job even though the 6 tests already covered both acceptance criteria;
+  (b) `_materialize_artifacts` re-clobbered `docs/test_monitor.py` with
+  a **rendered report wrapper** whenever an output carried no
+  `data.documents` content — the very state `delivery_problems`
+  rejects ("shares no line"): the materializer manufactured the failure
+  it then reported, every attempt.
+
+### Closed this pass (rerun 6 evidence — F8, fix `f360b6b`, docs `c72e030`)
+
+- **F8** — structured no-op delivery: `data.no_change_needed =
+  ["<path>"]` declares an existing expected output already satisfies
+  the task. `delivery_problems` waives the shares-line check for it
+  (and rejects it for a MISSING file — a no-op only covers a file on
+  disk), `_materialize_artifacts` mirrors the real content into
+  `docs/<name>` instead of the prose wrapper, the manifest's EXISTS
+  line offers the declaration, and the authoring contract + 07/08
+  templates state the mapping. Acceptance evidence still gates the
+  claim at dispatch (the G18 safety net for undeclared prose replies is
+  untouched — its tests pass unchanged).
+- Red tests first (+6): mirror sync, skip-without-materialize,
+  missing-file rejection, undeclared-prose legacy rejection, manifest
+  wording ×2. **1293 green**, `ruff` 0.
+
 ### Open items (verified 2026-10-02 night)
 
 ### Closed this pass (were open)
@@ -362,8 +398,8 @@ kept as the record of what was wrong, not as current state.
   genuinely corrupt, not that the code is wrong.
 - **OPEN-2 — counts current.** The four consistency-checked docs
   (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
-  are asserted against `pytest --collect-only` and are at **1287** (1103 →
-  1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 → 1245 → 1263 → 1266 → 1284 → 1287 as
+  are asserted against `pytest --collect-only` and are at **1293** (1103 →
+  1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 → 1245 → 1263 → 1266 → 1284 → 1287 → 1293 as
   batches added tests), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
@@ -432,7 +468,7 @@ kept as the record of what was wrong, not as current state.
 - Its `PROJECT.yaml` / `TASKS.yaml` / `PROJECT_MEMORY.md` live-test state is
   **committed as-is** — do not "restore" it to older HEAD content; tests depend
   on it.
-- Run full pytest after every change: `python3 -m pytest -q` (~164 s, 1287 tests),
+- Run full pytest after every change: `python3 -m pytest -q` (~185 s, 1293 tests),
   and `ruff check .` (0 errors, baseline pinned in `pyproject.toml`).
 - **Never claim a green suite from memory.** Re-run it. The on-disk snapshot
   test reads gitignored `checkpoints/`, so "it passed earlier today" is not
@@ -810,7 +846,7 @@ suites added during remediation:
 | `tests/test_checkpoint_overwrite.py` | 10 tests — `cp-risk-*` collision replaces instead of raising; strict default kept; staged `.staging-<id>-<pid>` swap keeps the old snapshot when the new one fails (empty source / copy error); delete clears the row first; crash leftovers cleaned; dispatch keeps its own error and best-effort snapshotting |
 | `tests/test_repair_remedies.py` | 20 tests — problem-aware repair note (evidence/import/declaration/failed-run/content/generic + what the model receives), prose `NOT RUN` accepted, claim still refused, dispatch rejection → repair → DONE, deploy evidence re-run after repair, repair cannot narrow the delivery scope (`TestRepairCannotNarrowDeliveryScope`) |
 | `tests/test_supervisor_auto_recovery.py` | 11 tests — DoD fallback ingestion (defaults pass DoD + persisted to TASKS.yaml), validation circuit-breaker (2-strike `WAIVED` for DoD and schema rejections, runtime failures never waive, sync sweep, WAIVED vocab + threshold), findings harvest (write to docs/ + RISKS.md, dedupe across retries, no-findings skip) |
-| `tests/test_delivery_normalization.py` | 21 tests — dotted/flat `data.*` key folding at `AgentOutput.from_dict`, list-form `documents`/`edits` → dict, dotted delivery materializes the real file (the `sys-usage` replay), channel-visible missing file rejected, report-artifact legacy mirror-only acceptance preserved, dotted `acceptance_results` still gate DoD, non-expected documents land on disk (no clobber, no escape), existing-file documents claim rejected (`TestDocumentsClaimOnExistingFileIsRejected`) |
+| `tests/test_delivery_normalization.py` | 27 tests — dotted/flat `data.*` key folding at `AgentOutput.from_dict`, list-form `documents`/`edits` → dict, dotted delivery materializes the real file (the `sys-usage` replay), channel-visible missing file rejected, report-artifact legacy mirror-only acceptance preserved, dotted `acceptance_results` still gate DoD, non-expected documents land on disk (no clobber, no escape), existing-file documents claim rejected (`TestDocumentsClaimOnExistingFileIsRejected`), declared no-op delivery (`TestDeclaredNoOpDelivery` + `TestManifestAllowsANoOpDeclaration`: mirror syncs the real content, shares-line waived, missing-file declaration rejected, undeclared prose keeps the legacy G18 gate) |
 | `tests/test_edit_session_feedback.py` | 12 tests — DoD-branch feedback quotes touched file bodies (turn-2 prompt carries body + problem), honest final-turn failure, `_touched_files_current_content` channels (edits/edits_applied/documents) + absolute/`..`/missing skips + 8-file cap, apply-failure quote regression, cumulative delivery scope (`TestSessionDeliveryScopeIsCumulative`: a later clean turn cannot close over an earlier undeclared import), test_agent session channel (`TestTestAgentDeliversThroughEditSessions`) |
 
 Shared fixtures in `conftest.py`: `build_test_project`, `test_project`,
