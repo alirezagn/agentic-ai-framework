@@ -1,13 +1,13 @@
 # memory.md — session memory for agentic-ai-framework
 
-> Last updated: 2026-10-03 (project-1 **rerun 6 — F8 completed
-> TASK-006, F9 preps TASK-007** — F8's declared no-op finished TASK-006
-> in ONE session turn (pytest deploy exit 0, 6/7 DONE); TASK-007 then
-> hard-failed on a single-shot search-mismatch (README already satisfied
-> both criteria) → F9 gives documentation_agent the bounded edit session,
-> fix `f7ea44f`, docs `8d6f119`, memory this commit; suite at **1295
-> green**, `ruff check .` at 0; next: `retry TASK-007` + `run --all`,
-> then stop after deployment)
+> Last updated: 2026-10-04 (**v3.0.0 released and tagged** — version sources
+> + their assertions synced 2.0.0 → 3.0.0, the stale `v1.0` declarations in
+> `CONTRIBUTING`/`QUICK_REFERENCE`/`DEPLOYMENT_SUMMARY`/`GITHUB_PUSH_INSTRUCTIONS`
+> corrected, `git tag v3.0.0` pushed; suite **1295 green**, `ruff` 0;
+> four new findings recorded below as **OPEN-3..OPEN-6** — generated projects
+> break on bare pytest because of the `docs/` mirror, the framework's own
+> guard against that is dead code, edit-session feedback still omits
+> `repair_remedies()`, and sys-usage ships a broken pipe contract)
 >
 > **Authority:** this file records *verified* state, not intended state. Every
 > "open" entry below was re-checked against the code before writing. If an entry
@@ -19,12 +19,15 @@
 
 ## Where the project stands
 
-- **Runtime is v2.0.0** (`pyproject.toml`; `orchestrator/cli.py:84`; verified
-  `./bin/orchestrator --version` and `python3 -m orchestrator.cli --version` →
-  `orchestrator 2.0.0`). `ORCHESTRATOR_GUIDE.md` is the technical reference;
-  `HOW_TO_USE.md` is the operator walkthrough.
+- **Runtime is v3.0.0** (`pyproject.toml:7`; `orchestrator/cli.py:86`;
+  `orchestrator/__init__.py:53`; verified `./bin/orchestrator --version` and
+  `python3 -m orchestrator.cli --version` → `orchestrator 3.0.0`).
+  `ORCHESTRATOR_GUIDE.md` is the technical reference;
+  `HOW_TO_USE.md` is the operator walkthrough. Release tags in order:
+  `v1.0.0` (`da210ea`, 2026-09-29), `v2.0.0` (`aa9a80e`, 2026-10-02),
+  **`v3.0.0` (HEAD, 2026-10-04)** — older tags are never moved.
 - **Suite: 1295 collected, 1295 passed / 0 failed** — `python3 -m pytest -q`,
-  ~164 s, 2026-10-03, verified in the operator's shell
+  ~204 s, 2026-10-04, verified in the operator's shell
   (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`). The
   number the four docs assert is the *collected* count (1295) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
@@ -400,7 +403,52 @@ kept as the record of what was wrong, not as current state.
 - Red tests first (+2): declaration, template rule. **1295 green**,
   `ruff` 0.
 
-### Open items (verified 2026-10-02 night)
+### Open items (verified 2026-10-04)
+
+- **OPEN-3 — generated projects break on a bare `python -m pytest`.**
+  The materializer mirrors every expected output into `docs/<basename>`, so
+  `projects/sys-usage` carries a `docs/test_metrics.py` that is byte-identical
+  to `tests/test_metrics.py` (`cmp` confirms). No pytest config ships with the
+  project, so a bare run collects both from rootdir `.` →
+  **`import file mismatch`, collection interrupted, 0 tests ran**.
+  `python -m pytest tests/` (what `07`/`08` prescribe) passes 6/6.
+  **Fix verified but not implemented:** a root `conftest.py` holding
+  `collect_ignore = ["docs"]` makes the bare run pass *and* puts rootdir on
+  `sys.path`, which would also retire the separate `import src...` guidance in
+  `07`/`08`. Alternative `testpaths = tests` works but silently falls back to
+  full-tree collection (and re-collects the mirror) when `tests/` is missing.
+  Intended shape: scaffold it deterministically at `init` **and** state it in
+  `07`/`08`. Red tests first, 3-commit split, push — not started.
+- **OPEN-4 — the framework's own collection guard is dead code.**
+  `conftest.py:398` sets `collect_ignore_glob = ["*/docs/*", "*/docs/**/*"]`
+  with a comment describing exactly OPEN-3, but this repo **has no `docs/`
+  directory at all** and no test exercises the guard. Worse, the pattern does
+  not match a rootdir-relative `docs/test_metrics.py` — it requires a segment
+  *before* `docs/`. Reproduced in a copy of sys-usage: that exact pattern
+  **still fails**; `collect_ignore = ["docs"]`,
+  `collect_ignore_glob = ["docs/*"]`, and
+  `["docs/*", "*/docs/*", "*/docs/**/*"]` all pass.
+- **OPEN-5 — edit-session feedback omits `repair_remedies()`.**
+  `_execute_edit_session` (`llm_agent.py:421-434`) attaches the raw problem
+  list but never the remedy, so `_REMEDY_DECLARE` / `_REMEDY_RUN_FAILED` reach
+  the model only through `repair_delivery` (`llm_agent.py:541`) — i.e. only
+  after the attempt has already burned. Compounding it, `relevant_context`
+  (`base_agent.py:909`) inlines only `input_files` + `expected_outputs`, so
+  TASK-006 was asked to declare `requirements.txt` while that file was never
+  put in its context and could not show that `pytest` was undeclared.
+- **OPEN-6 — sys-usage ships a broken pipe contract (recorded, deliberately
+  NOT fixed).** `python src/metrics_collector.py | python src/formatter.py`
+  prints `15.5% / 8 / 3200 MHz / 4096 of 16384 MB / one 500 GB disk`, while
+  `python main.py` prints live values. Two causes, both confirmed by reading
+  the files: `metrics_collector.py` has **no `__main__` at all** (left side of
+  the pipe emits nothing), and `formatter.py`'s `__main__` **ignores stdin**
+  and prints a hardcoded `sample_metrics` dict. The real path has two honest
+  gaps too — `cpu_percent(interval=None)` returns `0.0` on its first call and
+  `frequency_mhz` is hardcoded `"0.0"` (`metrics_collector.py:39`). The
+  operator explicitly asked for diagnosis only. The lesson stands: **an
+  inter-module contract described only in prose is always accepted; it has to
+  be an acceptance criterion that runs the pipeline and states expected
+  output, fed back through `retry --reason`.**
 
 ### Closed this pass (were open)
 
