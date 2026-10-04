@@ -241,8 +241,9 @@ channels, so a delivery in either shape writes the real file instead of
 degrading into a wrapper — the `sys-usage` regression where a dotted-key
 delivery passed Done with the expected output missing.
 
-**Edit session (G20):** `software_agent` does not deliver in one giant JSON
-reply. `EDIT_SESSION_TURNS = 3` switches `execute()` into a bounded
+**Edit session (G20):** `software_agent` and `test_agent` do not deliver in
+one giant JSON reply.
+`EDIT_SESSION_TURNS = 3` switches `execute()` into a bounded
 **multi-turn edit session**: each turn asks only for the next change set
 (small JSON — no truncation), the deterministic applier patches the real
 files, and `delivery_problems()` verifies the **workspace** (mirror exists,
@@ -251,6 +252,10 @@ file). Apply errors and remaining DoD problems are fed back as the next
 turn's feedback; after the last failing turn the output returns `failed`
 with those problems. Successful change sets are recorded in
 `data.edits_applied` and consumed so `run()` never re-applies them.
+(`test_agent` was the last code-delivery agent on the single-shot path:
+rerun-6's TASK-006 re-emitted whole test-file bodies, truncated three
+attempts in a row, and the project oscillated into a loop-limit refusal —
+the session forbids file bodies per turn, which is the fix.)
 Verification is shared: `definition_of_done` delegates its delivery checks to
 the same `delivery_problems()` helper (`orchestrator/agents/base_agent.py`),
 so the session and the DoD can never disagree. The scope is **cumulative**:
@@ -906,7 +911,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1284 passed
+python3 -m pytest -q          # full suite — 1287 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)

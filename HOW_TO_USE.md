@@ -565,6 +565,6 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1284 passed
+python3 -m pytest -q      # 1287 passed
 ruff check .              # lint — 0 errors (install: python3 -m pip install -e .[dev])
 ```
