@@ -1,6 +1,68 @@
 # memory.md — session memory for agentic-ai-framework
 
-> **Batch "env/stage-not-ready" — DONE (2026-10-04, 19:40–20:35).**
+> **Batch "project collection" — DONE (2026-10-05, 02:07–03:40).**
+> Closes **OPEN-3** and **OPEN-4**, and corrects two claims this file carried.
+> Landed as **`fe1c2e9` fix** (`PYTEST_INI_FILE`/`PYTEST_INI_TEMPLATE` in
+> `orchestrator/config.py`, written by `cmd_init` at
+> `orchestrator/cli.py:496`; the repo `conftest.py` docs-guard and its
+> untracked-project exclusion; `tests/test_project_collection.py` ×13,
+> `tests/test_docs_collection_guard.py` ×4) and **`417da1a` docs** (guide
+> layout table + reasoning, the HOW_TO_USE failure row, the `07`/`08` prompt
+> contracts, counts 1306 → **1323**). Verified: `python3 -m pytest -q` → **1323
+> passed, 206.66 s, exit 0**; `ruff check .` → **0** (ruff 0.16.10 via
+> `/tmp/opencode/lintenv`).
+> **What was actually wrong** (measured on `projects/my-app`, not inferred): a
+> bare `pytest tests/` reported `rootdir` as the *enclosing repo* and adopted
+> its `pyproject.toml` (`testpaths = ["."]`), then died with
+> `ModuleNotFoundError: No module named 'src'`. **Not a `sys.path` problem and
+> `PYTHONPATH` is not the fix** — `python3 -m pytest` passes 5/5 from the same
+> directory because `-m` puts the cwd on `sys.path`. Three faults: rootdir
+> escape; the root never entering `sys.path` (fixing rootdir alone does *not*
+> fix this — pytest's `prepend` mode inserts the *test file's* directory, which
+> is why `pythonpath = .` is required); and the `docs/` mirror collected twice
+> (`import file mismatch`).
+> **Two corrections to this file's own prior claims:**
+> 1. OPEN-4 said the repo's `collect_ignore_glob = ["*/docs/*", …]` was "dead
+>    code — this repo has no `docs/` directory". **False**: there are three
+>    (`projects/my-app`, `projects/sys_mon`, `workspace/my-app`) and the glob
+>    was load-bearing. Replacing it outright produced 4 collection errors. Both
+>    forms are now required — the glob for nested mirrors, `collect_ignore =
+>    ["docs"]` for a rootdir-relative one the glob cannot match.
+> 2. `testpaths = ["."]` also collected **untracked generated projects** left by
+>    `init`/`run --all`, whose tests import *their own* package. A collection
+>    error aborts the entire run, so the suite could not start and
+>    `TestCountsConsistentAcrossDocs` **silently skipped** instead of failing.
+>    Those trees are now discovered from git (`--others --ignored --directory`)
+>    and ignored, with tracked samples (kid-robot-face, sys_mon) still
+>    collected.
+> **Design constraint worth keeping:** the scaffold is a `pytest.ini`, *never* a
+> `conftest.py`. A generated project sits at `projects/<name>`, inside the repo
+> that ran `init`, and a second `conftest.py` shadows the host's conftest
+> **module** — measured here: 28 modules do `from conftest import
+> build_test_project` and 27 suites failed. Pinned by
+> `TestScaffoldDoesNotShadowTheHostRepository`, which needs *full-tree*
+> collection to reproduce (targeting one file passes even with the shadow).
+>
+> **TASK-004 (`projects/my-app`) — RESOLVED, and the diagnosis was wrong.**
+> It sat at `HUMAN_DECISION_REQUIRED` with `attempt_count: 15`,
+> `repeated_output_count: 3`, `last_loop.exceeded: true`. Two separate causes
+> were conflated under one error string: the real one was `num_ctx 16384`
+> against a 16.1k-token prompt (fixed earlier via `.env`), and what kept it
+> stuck was the **loop counters from attempts made before that fix** — the
+> runner escalates on counters, not on current conditions, so it never
+> re-dispatched to discover the prompt now fit. A replay of the exact prompt
+> against the live server returned `input_tokens=16122, output_tokens=901`
+> against `num_predict=8192` — **the output budget was never the constraint**,
+> so raising `max_output_tokens` would have been a no-op (and that parameter
+> does not exist in this codebase; the knob is `max_tokens`/`num_predict`).
+> `retry TASK-004 --reason …` reset the counters and it passed in **one** turn;
+> `run --all` then finished **7/7 DONE**, and `python3 -m pytest tests/` in the
+> project gives 5 passed. Verified independently: `src/interface_layer.py`
+> defines `request_access`/`get_history_summary`, which match
+> `src/data_layer.py` — the method-name mismatch predicted from the truncated
+> reply did not materialise.
+>
+> Previous batch — "env/stage-not-ready", DONE (2026-10-04, 19:40–20:35).**
 > Closing the untested cell that killed the fresh sys-usage run (TASK-003
 > declared `python3 -m pytest tests/` before `tests/` existed → `exit 4`,
 > DoD FAILED, auto-repair produced no fix → starvation). Landed as:
@@ -67,12 +129,14 @@
   `HOW_TO_USE.md` is the operator walkthrough. Release tags in order:
   `v1.0.0` (`da210ea`, 2026-09-29), `v2.0.0` (`aa9a80e`, 2026-10-02),
   **`v3.0.0` (HEAD, 2026-10-04)** — older tags are never moved.
-- **Suite: 1306 collected, 1306 passed / 0 failed** — `python3 -m pytest -q`,
-  latest run 2026-10-04 **196.40 s, exit 0** after the env/stage-not-ready
-  batch (+11 tests); earlier same-day runs of the pre-batch tree: 178.44 s
-  (plain env) and ~204 s in the operator's shell
-  (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`). The
-  number the four docs assert is the *collected* count (1306) and is current.
+- **Suite: 1323 collected, 1323 passed / 0 failed** — `python3 -m pytest -q`,
+  latest run 2026-10-05 **206.66 s, exit 0** after the project-collection batch
+  (+17 tests); the preceding run 2026-10-04 was 1306 at **196.40 s** after the
+  env/stage-not-ready batch (+11 tests). The number the four docs assert is the
+  *collected* count (1323) and is current. Note the count only means anything
+  while collection *succeeds*: an untracked generated project under `projects/`
+  used to abort collection, which made this same assertion skip silently rather
+  than fail — fixed in `fe1c2e9` (see OPEN-4).
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -97,9 +161,14 @@
   stray **0-byte file named `=`** in the repo root (re-confirmed 0 bytes,
   mtime 2026-10-02). Do not describe the tree as
   clean until that is resolved, and do not sweep those files into an unrelated
-  commit. In-repo `projects/` holds only `kid-robot-face/` and `sys_mon/` —
-  `sys-usage` and the other run outputs live **outside** the repo at
-  `/media/alireza/microos/projects/`.
+  commit. In-repo `projects/` holds only `kid-robot-face/` and `sys_mon/` as
+  **tracked** content; `sys-usage` and the other run outputs live **outside**
+  the repo at `/media/alireza/microos/projects/`. Corrected 2026-10-05: the
+  earlier phrasing here ("holds only …") was about git tracking, not about what
+  is on disk — `.gitignore` carries `projects/*`, so any project created by
+  `init` (including `projects/my-app` from this batch) sits in the working tree
+  untracked. Those trees are now excluded from pytest collection by the repo
+  `conftest.py`, since their tests import their own package.
 - **Commits since the audit pass** (all 2026-10-02): `1ee05ae` HIGH-01..04,
   `2c55657` dependency automation, `2cd1fed` completed `sys_mon` sample,
   `69a55d1` CLI init nesting fix, `2408d42` materializer no-op edit,
@@ -146,7 +215,11 @@
    OPEN-3..OPEN-6 re-reproduced). Then (env/stage-not-ready batch,
    2026-10-04 evening): `9190462` memory (batch start), `312b138` fix
    (environment/stage NOT RUN, +11 tests → 1306), `7482e3b` docs (prompt
-   contracts, templates 07/08, counts 1295 → 1306), and this memory commit.
+   contracts, templates 07/08, counts 1295 → 1306). Then (project-collection
+   batch, 2026-10-05): `fe1c2e9` fix (project-root `pytest.ini` at `init`, repo
+   docs-guard corrected, untracked generated projects excluded from
+   collection, +17 tests → 1323), `417da1a` docs (layout table + HOW_TO_USE
+   row + the `07`/`08` contracts, counts 1306 → 1323), and this memory commit.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -465,41 +538,50 @@ kept as the record of what was wrong, not as current state.
 - Red tests first (+2): declaration, template rule. **1295 green**,
   `ruff` 0.
 
-### Open items (verified 2026-10-04, re-verified same session after the tag)
+### Open items (verified 2026-10-04; OPEN-3/OPEN-4 closed 2026-10-05)
 
-> All four below were re-checked against the tree and re-reproduced where
-> noted; none has been touched by code since `7f93722`. Treat any later
-> claim that one is closed as requiring a fresh run of the reproduction.
+> OPEN-3 and OPEN-4 below are now **closed** and their original text was partly
+> wrong — the corrections are stated inline. OPEN-5 and OPEN-6 were last
+> re-checked 2026-10-04 and have not been touched since; treat any claim about
+> them as requiring a fresh run of the reproduction.
 
-- **OPEN-3 — generated projects break on a bare `python -m pytest`.**
-  The materializer mirrors every expected output into `docs/<basename>`, so
-  `/media/alireza/microos/projects/sys-usage` (outside the repo — nothing
-  under the repo's `projects/` exhibits this) carries a
-  `docs/test_metrics.py` that is byte-identical to `tests/test_metrics.py`
-  (`cmp` confirms; both 3872 bytes, mtime 2026-10-04 10:45). No pytest
-  config ships with the project, so a bare run collects both from rootdir `.`
-  → **`import file mismatch`, collection interrupted, 0 tests ran**.
-  `python -m pytest tests/` (what `07`/`08` prescribe) passes 6/6.
-  **Re-reproduced 2026-10-04** in a copy at `/tmp/opencode/sysusage-open3`:
-  bare run → `ERROR collecting tests/test_metrics.py / import file
-  mismatch / Interrupted: 1 error during collection`.
-  **Fix verified but not implemented:** a root `conftest.py` holding
-  `collect_ignore = ["docs"]` makes the bare run pass *and* puts rootdir on
-  `sys.path` (6/6 in the same copy), which would also retire the separate
-  `import src...` guidance in
-  `07`/`08`. Alternative `testpaths = tests` works but silently falls back to
-  full-tree collection (and re-collects the mirror) when `tests/` is missing.
-  Intended shape: scaffold it deterministically at `init` **and** state it in
-  `07`/`08`. Red tests first, 3-commit split, push — not started.
-- **OPEN-4 — the framework's own collection guard is dead code.**
-  `conftest.py:398` sets `collect_ignore_glob = ["*/docs/*", "*/docs/**/*"]`
-  with a comment describing exactly OPEN-3, but this repo **has no `docs/`
-  directory at all** and no test exercises the guard. Worse, the pattern does
-  not match a rootdir-relative `docs/test_metrics.py` — it requires a segment
-  *before* `docs/`. **Re-reproduced 2026-10-04** in the same copy: that exact
-  pattern **still fails** (collection interrupted); `collect_ignore = ["docs"]`
-  passes 6/6, and (from the earlier session) `collect_ignore_glob = ["docs/*"]`
-  and `["docs/*", "*/docs/*", "*/docs/**/*"]` also pass.
+- **OPEN-3 — CLOSED (`fe1c2e9`, 2026-10-05).** Generated projects now get a
+  `pytest.ini` from `init`. Three faults, all measured rather than inferred
+  (reproduced on `projects/my-app`, which *is* inside the repo — the earlier
+  note said nothing under the repo's `projects/` exhibited it, which was true
+  only because no generated project with tests existed yet):
+  (a) a bare `pytest` searches upwards for a config file and adopts the
+  enclosing `pyproject.toml` (`testpaths = ["."]`), so rootdir left the project;
+  (b) the project root never entered `sys.path`, and **fixing (a) alone does
+  not fix (b)** — pytest's `prepend` import mode inserts the *test file's*
+  directory, which is why `pythonpath = .` is the load-bearing key; (c) the
+  `docs/` mirror was collected as a duplicate of the real test module.
+  `init` writes `pythonpath = .` / `testpaths = tests` / `norecursedirs = docs`
+  and never overwrites an existing file. Note the earlier "fix verified but not
+  implemented" recommendation — a root **`conftest.py`** — is the wrong
+  instrument and was **not** used: a generated project lives at
+  `projects/<name>`, inside the repo that ran `init`, and a second
+  `conftest.py` shadows that repo's conftest *module* (27 suites failed here
+  with `ImportError: cannot import name 'build_test_project'`). The
+  `07`/`08` contracts, which advised shipping a `tests/conftest.py`, now say
+  the opposite. `PYTHONPATH=.` also only masks it. Tests: 13 + 4.
+- **OPEN-4 — CLOSED (`fe1c2e9`), and the original claim was wrong.**
+  This entry said the repo's `collect_ignore_glob = ["*/docs/*", "*/docs/**/*"]`
+  was dead code because "this repo **has no `docs/` directory at all**". **It
+  has three** — `projects/my-app`, `projects/sys_mon`, `workspace/my-app` — and
+  the glob was load-bearing for them; replacing it outright turned 4 modules
+  into collection errors. What was true is only the second half: the pattern
+  needs a segment *before* `docs/`, so it cannot match a rootdir-relative
+  `docs/test_x.py`, which is the shape a generated project produces. Both forms
+  are now required and kept: the glob for nested mirrors, `collect_ignore =
+  ["docs"]` for the rootdir-relative case. Additionally, `testpaths = ["."]`
+  was collecting **untracked generated projects** (whose tests import *their*
+  package); since a collection error aborts the whole run, the suite could not
+  start and `TestCountsConsistentAcrossDocs` **silently skipped** rather than
+  failing. Those trees are now discovered from git and ignored, with tracked
+  samples still collected. `tests/test_docs_collection_guard.py` asserts the
+  old glob still reproduces the collision, so the replacement cannot pass for
+  an unrelated reason.
 - **OPEN-5 — edit-session feedback omits `repair_remedies()`.**
   `_execute_edit_session` (`orchestrator/agents/llm_agent.py`, feedback
   branches at `:389` and `:421`) attaches the raw problem
@@ -548,11 +630,10 @@ kept as the record of what was wrong, not as current state.
   genuinely corrupt, not that the code is wrong.
 - **OPEN-2 — counts current.** The four consistency-checked docs
   (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
-  are asserted against `pytest --collect-only` and are at **1306**
-  (1103 → 1160 → 1185 → 1191 → 1209 → 1213 →
-  1224 → 1238 → 1245 → 1263 → 1266 → 1284 → 1287 → 1293 → 1295 →
-  **1306** as batches added tests; last re-collected 2026-10-04 after the
-  env/stage-not-ready batch), so
+  are asserted against `pytest --collect-only` and are at **1323**
+  (1103 → 1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 → 1245 → 1263 →
+  1266 → 1284 → 1287 → 1293 → 1295 → 1306 → **1323** as batches added tests;
+  last re-collected 2026-10-05 after the project-collection batch), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched).
@@ -994,6 +1075,19 @@ kept as the record of what was wrong, not as current state.
       data.test_status="NOT RUN"`, which routes `repair_remedies` to the new
       `_REMEDY_ENV` (marker `environment not ready`) instead of the file
       remedy. Tests: `tests/test_environment_not_ready.py` (11).
+  16. **A generated project is not runnable without a collection config**
+      (2026-10-05, `fe1c2e9`) — `init` writes `pytest.ini` (`pythonpath = .`,
+      `testpaths = tests`, `norecursedirs = docs`); a bare `pytest` in a
+      project nested in another repo otherwise adopts the enclosing
+      `pyproject.toml` and dies with `ModuleNotFoundError: No module named
+      'src'` before a single test runs. Deliberately **not** a `conftest.py`:
+      a project under `projects/` shadows the conftest *module* of the repo
+      that created it (27 suites failed here), and fixing rootdir alone is not
+      enough — pytest's `prepend` mode inserts the *test file's* directory, so
+      `pythonpath` is what actually makes `import src...` resolve. An existing
+      `pytest.ini` is never overwritten. Tests:
+      `tests/test_project_collection.py` (13),
+      `tests/test_docs_collection_guard.py` (4).
 
 
 ---
