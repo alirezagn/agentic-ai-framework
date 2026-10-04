@@ -1,5 +1,17 @@
 # memory.md — session memory for agentic-ai-framework
 
+> **IN PROGRESS (2026-10-04, 19:4x): batch "env/stage-not-ready" —** closing
+> the untested cell that killed the fresh sys-usage run (TASK-003 declared
+> `python3 -m pytest tests/` before `tests/` existed → `exit 4`, DoD FAILED,
+> auto-repair produced no fix → starvation). Scope: 5 tasks — red tests for
+> the two signatures (declared dep not installed / verification target absent
+> from this task's outputs) → `_environment_not_ready()` classifier in
+> `orchestrator/orchestrator.py` → `repair_remedies` marker → template +
+> count-sync docs → full suite/lint, 3-commit split, live `retry TASK-003`.
+> Anti-regression pins kept armed: genuine test failures, undeclared imports
+> and fabricated passes must still FAIL. This section is replaced by the
+> finish record when the batch lands.
+>
 > Last updated: 2026-10-04, **verification pass after the v3.0.0 tag** —
 > no code commit since `7f93722` (HEAD = tag `v3.0.0`, main in sync with
 > origin/main). Re-run in this session: `python3 -m pytest -q` → **1295
