@@ -1,19 +1,33 @@
 # memory.md — session memory for agentic-ai-framework
 
-> **IN PROGRESS (2026-10-04, 19:4x): batch "env/stage-not-ready" —** closing
-> the untested cell that killed the fresh sys-usage run (TASK-003 declared
-> `python3 -m pytest tests/` before `tests/` existed → `exit 4`, DoD FAILED,
-> auto-repair produced no fix → starvation). Scope: 5 tasks — red tests for
-> the two signatures (declared dep not installed / verification target absent
-> from this task's outputs) → `_environment_not_ready()` classifier in
-> `orchestrator/orchestrator.py` → `repair_remedies` marker → template +
-> count-sync docs → full suite/lint, 3-commit split, live `retry TASK-003`.
-> Anti-regression pins kept armed: genuine test failures, undeclared imports
-> and fabricated passes must still FAIL. This section is replaced by the
-> finish record when the batch lands.
+> **Batch "env/stage-not-ready" — DONE (2026-10-04, 19:40–20:35).**
+> Closing the untested cell that killed the fresh sys-usage run (TASK-003
+> declared `python3 -m pytest tests/` before `tests/` existed → `exit 4`,
+> DoD FAILED, auto-repair produced no fix → starvation). Landed as:
+> **`312b138` fix** (`environment_not_ready_reason()` in
+> `orchestrator/orchestrator.py` + wiring in `_evidence_problems`,
+> `_REMEDY_ENV`/`_ENV_MARKERS` in `agents/llm_agent.py`, the two prompt
+> contracts in `prompt_builder.py`, `tests/test_environment_not_ready.py`
+> ×11) and **`7482e3b` docs** (templates `07`/`08`, the two prose docs,
+> counts 1295 → **1306**). Verified: `python3 -m pytest -q` → **1306
+> passed, 196.40 s**, `ruff check .` → **0**, both pushed.
+> **Live proof:** the exact command that failed the project before
+> (`python3 -m pytest tests/` → `exit 4`) now yields
+> `[OK] TASK-003: READY -> DONE` with
+> `warning: environment not ready: the verification targets 'tests', which
+> does not exist and is not an output of this task … recorded as NOT RUN,
+> not as a failed delivery`, no RISK-001.
+> **Not this batch (still open at hand-off):** TASK-004 of that same run
+> FAILED 3× on the pre-existing model-output-truncation class (`recovered
+> from a truncated payload`, `edits['src/cli_formatter.py'][1] search
+> matched 0 time(s)`, file left with `line 17: '[' was never closed` — the
+> parse/import contract correctly refused it each time); project sits at
+> `HUMAN_DECISION_REQUIRED` with 3 DONE / 1 FAILED / 2 BLOCKED. Operator
+> next step: `retry TASK-004` with a compact-edit reason, or a model that
+> can hold this task's reply — **not** a framework fix.
 >
 > Last updated: 2026-10-04, **verification pass after the v3.0.0 tag** —
-> no code commit since `7f93722` (HEAD = tag `v3.0.0`, main in sync with
+> no code commit existed then since `7f93722` (HEAD = tag `v3.0.0`, main in sync with
 > origin/main). Re-run in this session: `python3 -m pytest -q` → **1295
 > passed, 178.44 s, exit 0**; `python3 -m pytest --collect-only -q` → 1295
 > collected; `ruff check .` → **0 errors** via an isolated venv
@@ -53,11 +67,12 @@
   `HOW_TO_USE.md` is the operator walkthrough. Release tags in order:
   `v1.0.0` (`da210ea`, 2026-09-29), `v2.0.0` (`aa9a80e`, 2026-10-02),
   **`v3.0.0` (HEAD, 2026-10-04)** — older tags are never moved.
-- **Suite: 1295 collected, 1295 passed / 0 failed** — `python3 -m pytest -q`,
-  re-run twice on 2026-10-04: **178.44 s, exit 0** (this session, plain env)
-  and ~204 s in the operator's shell
+- **Suite: 1306 collected, 1306 passed / 0 failed** — `python3 -m pytest -q`,
+  latest run 2026-10-04 **196.40 s, exit 0** after the env/stage-not-ready
+  batch (+11 tests); earlier same-day runs of the pre-batch tree: 178.44 s
+  (plain env) and ~204 s in the operator's shell
   (`ORCHESTRATOR_DEPLOY_ENABLED=1 ORCHESTRATOR_DEPLOY_ALLOWLIST=*`). The
-  number the four docs assert is the *collected* count (1295) and is current.
+  number the four docs assert is the *collected* count (1306) and is current.
   Offline-safe: an autouse fixture blocks outbound TCP while allowing loopback,
   so a stray `ANTHROPIC_API_KEY` cannot bill real API calls. `FakeDeployRunner`
   substitutes for the real runner, so no test spawns a process unless it is
@@ -72,10 +87,11 @@
   ruff 0.16.10, `pyproject.toml:24` requires `ruff>=0.16`). Never claim
   green from memory — re-run both; if `ruff` is missing, say so rather than
   repeating the last known result.
-- **Repo state:** branch `main`, **in sync with `origin/main`** — both at
-  `7f93722`, which is also the `v3.0.0` tag (verified 2026-10-04:
-  `git status -sb` shows no ahead/behind, `git rev-list -n1 v3.0.0` →
-  `7f93722`). The only remaining tree dirt is the **pre-existing
+- **Repo state:** branch `main`, **in sync with `origin/main`** after every
+  batch (this one: `312b138` fix → `7482e3b` docs → this memory commit; the
+  earlier sync point was `7f93722`, which is also where tag **`v3.0.0`**
+  points — verified 2026-10-04: `git rev-list -n1 v3.0.0` → `7f93722`, tags
+  are never moved). The only remaining tree dirt is the **pre-existing
   intentional** dirt: `projects/sys_mon/{PROJECT,TASKS,CHANGELOG,CURRENT_STATE}.yaml/.md`,
   the still-tracked `projects/sys_mon/__pycache__/test_sys_mon…pyc`, and a
   stray **0-byte file named `=`** in the repo root (re-confirmed 0 bytes,
@@ -125,8 +141,12 @@
    Then (v3.0.0 release batch, 2026-10-04, all 11:50): `15fbe4c` version
    bump → 3.0.0, `992407d` docs version declarations synced, `7f93722`
    memory (v3.0.0 record + OPEN-3..OPEN-6) — tag **`v3.0.0` points at
-   `7f93722`** (HEAD), not at the bump commit. Nothing has been committed
-   since; `git describe --tags` → `v3.0.0`.
+   `7f93722`**, not at the bump commit; `git describe --tags` → `v3.0.0`.
+   Then (verification pass, 2026-10-04): `956c6f0` memory (suite re-green,
+   OPEN-3..OPEN-6 re-reproduced). Then (env/stage-not-ready batch,
+   2026-10-04 evening): `9190462` memory (batch start), `312b138` fix
+   (environment/stage NOT RUN, +11 tests → 1306), `7482e3b` docs (prompt
+   contracts, templates 07/08, counts 1295 → 1306), and this memory commit.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -528,10 +548,11 @@ kept as the record of what was wrong, not as current state.
   genuinely corrupt, not that the code is wrong.
 - **OPEN-2 — counts current.** The four consistency-checked docs
   (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
-  are asserted against `pytest --collect-only` and are at **1295**
-  (re-collected 2026-10-04 → 1295; 1103 → 1160 → 1185 → 1191 → 1209 → 1213 →
-  1224 → 1238 → 1245 → 1263 → 1266 → 1284 → 1287 → 1293 → 1295 as
-  batches added tests), so
+  are asserted against `pytest --collect-only` and are at **1306**
+  (1103 → 1160 → 1185 → 1191 → 1209 → 1213 →
+  1224 → 1238 → 1245 → 1263 → 1266 → 1284 → 1287 → 1293 → 1295 →
+  **1306** as batches added tests; last re-collected 2026-10-04 after the
+  env/stage-not-ready batch), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched).
@@ -950,6 +971,29 @@ kept as the record of what was wrong, not as current state.
       pipeline (TASK-002 proceeded with a warning); reported to the
       operator as a planning/input design gap. Tests:
       `tests/test_edit_session_feedback.py` (14).
+  15. **Environment/stage-not-ready is a third evidence outcome** (2026-10-04,
+      `312b138`) — `environment_not_ready_reason(record, task, project)`
+      (`orchestrator/orchestrator.py`, module level) reads the record's
+      captured stderr/stdout **plus the project's `requirements.txt`** — never
+      the model's claim — and returns a reason for exactly two signatures:
+      (a) `ModuleNotFoundError`/`ImportError: No module named 'X'` where `X`
+      (top level, via `_DISTRIBUTION_ALIASES` too) **is declared**, i.e. the
+      human owner still has to run `pip install -r requirements.txt`; (b) a
+      verification target that does **not exist on disk** and is **not an
+      output of this task** (`pytest tests/` at a task that delivers only
+      `src/…` — sys-usage TASK-003, `exit 4`). Wired into
+      `_evidence_problems`: when *every* failing record is classified, no
+      expectation mismatch stands and the output **claims nothing**, the
+      problem list stays empty, `data.test_status` is set to `NOT RUN` and a
+      warning naming the precondition is appended (the record itself is never
+      rewritten — `docs/evidence/` keeps the real run). Guards that must stay
+      red if removed: **undeclared** module → still FAILED; target is this
+      task's expected output → still FAILED; target exists on disk → still
+      FAILED; genuine assertion failure → still FAILED; output that *claims*
+      a pass → rejected with `environment not ready: … report
+      data.test_status="NOT RUN"`, which routes `repair_remedies` to the new
+      `_REMEDY_ENV` (marker `environment not ready`) instead of the file
+      remedy. Tests: `tests/test_environment_not_ready.py` (11).
 
 
 ---
