@@ -26,8 +26,8 @@ gh repo create agentic-ai-framework \
   --description "Orchestration system for managing complex AI projects with autonomous specialist agents"
 
 # Create release tag
-git tag -a v1.0.0 -m "Framework v1.0: Specification Complete — Production Ready"
-git push origin v1.0.0
+git tag -a v3.0.0 -m "Release v3.0.0: edit-session agents, declared no-op delivery, starvation escalation"
+git push origin v3.0.0
 
 # Done! Repository is live at:
 # https://github.com/YOUR_USERNAME/agentic-ai-framework
@@ -55,8 +55,8 @@ git branch -M main
 git push -u origin main
 
 # Create release
-git tag -a v1.0.0 -m "Framework v1.0: Specification Complete — Production Ready"
-git push origin v1.0.0
+git tag -a v3.0.0 -m "Release v3.0.0: edit-session agents, declared no-op delivery, starvation escalation"
+git push origin v3.0.0
 ```
 
 ### Option C: Using SSH (If SSH key already configured)
@@ -74,8 +74,8 @@ git branch -M main
 git push -u origin main
 
 # Tag release
-git tag -a v1.0.0 -m "Framework v1.0: Specification Complete — Production Ready"
-git push origin v1.0.0
+git tag -a v3.0.0 -m "Release v3.0.0: edit-session agents, declared no-op delivery, starvation escalation"
+git push origin v3.0.0
 ```
 
 ---
@@ -93,7 +93,7 @@ git remote -v
 
 # Check tags
 git tag -l
-# Output should include: v1.0.0
+# Output should include: v1.0.0, v2.0.0, v3.0.0
 
 # Verify on GitHub
 # Visit: https://github.com/YOUR_USERNAME/agentic-ai-framework
@@ -178,13 +178,13 @@ git status  # Should show "nothing to commit"
 After push, you should see:
 
 1. **GitHub repo page shows:**
-   - 4 commits
-   - 30+ files
+   - 97 commits (at v3.0.0)
+   - 160+ files
    - README.md rendered
    - framework/, projects/, etc. folders
 
 2. **Release tag shows:**
-   - Tag v1.0.0 created
+   - Tag v3.0.0 created
    - Release notes visible
 
 3. **You can git clone it:**

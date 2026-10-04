@@ -158,8 +158,8 @@ git remote add origin https://github.com/YOUR_USER/agentic-ai-framework.git
 git push -u origin main
 
 # Tag release
-git tag -a v1.0.0 -m "Framework v1.0 Production Ready"
-git push origin v1.0.0
+git tag -a v3.0.0 -m "Release v3.0.0"
+git push origin v3.0.0
 
 # GitHub will now host your framework + projects
 ```
@@ -191,7 +191,7 @@ git push origin v1.0.0
 
 ---
 
-**Framework Version:** 1.0 (Production Ready)  
+**Framework Version:** 3.0.0 (Production Ready)  
 **Example Project:** Kid-Robot-Face (0.1.0-alpha)  
 **License:** MIT (free to use, modify, share)  
 **Created:** 2026-09-29

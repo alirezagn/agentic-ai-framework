@@ -326,8 +326,8 @@ See [meta/GETTING_STARTED.md](meta/GETTING_STARTED.md) for detailed walkthroughs
 
 ---
 
-**Last Updated:** 2026-10-02  
-**Framework Version:** 2.0.0  
+**Last Updated:** 2026-10-04  
+**Framework Version:** 3.0.0  
 **Status:** STABLE — state engine + LLM-backed agent policy layer  
 **Test suite:** 1295 passing (`python3 -m pytest -q`), hermetic and offline
 

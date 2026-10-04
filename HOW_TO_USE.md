@@ -15,7 +15,7 @@ pip install -e .
 
 # Option B — use the repo entry point (no install)
 chmod +x bin/orchestrator
-./bin/orchestrator --version        # orchestrator 2.0.0
+./bin/orchestrator --version        # orchestrator 3.0.0
 
 # Option C — module form
 python3 -m orchestrator.cli --version

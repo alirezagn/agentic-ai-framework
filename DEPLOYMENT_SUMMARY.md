@@ -169,8 +169,8 @@ git branch -M main
 git push -u origin main
 
 # Tag a release
-git tag -a v1.0.0 -m "Framework v1.0: Production Ready"
-git push origin v1.0.0
+git tag -a v3.0.0 -m "Release v3.0.0: edit-session agents, declared no-op delivery, starvation escalation"
+git push origin v3.0.0
 ```
 
 ---
@@ -251,7 +251,7 @@ For questions or improvements, open an issue or pull request.
 
 ---
 
-**Status:** ✅ Framework v1.0 is **READY FOR USE**  
+**Status:** ✅ Framework v3.0.0 is **READY FOR USE**  
 **Example Project:** Kid-robot-face (0.1.0-alpha → in progress)  
 **License:** MIT (free to use, modify, share)  
 **Last Updated:** 2026-09-29

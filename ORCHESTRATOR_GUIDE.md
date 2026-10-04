@@ -1,6 +1,6 @@
 # ORCHESTRATOR RUNTIME — IMPLEMENTATION GUIDE
 
-**Version:** 2.0.0
+**Version:** 3.0.0
 **Status:** STABLE (state engine + LLM-backed agent policy layer)
 **Created:** 2026-09-29 · **Rewritten:** 2026-09-30
 

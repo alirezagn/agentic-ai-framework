@@ -54,7 +54,7 @@ Please open an issue with:
 
 ## Project Status
 
-- **Framework:** Production Ready (v1.0)
+- **Framework:** Production Ready (v3.0.0)
 - **Example (Kid-Robot-Face):** In Progress (alpha → beta → release)
 
 ## Code of Conduct
