@@ -194,7 +194,7 @@ class TestBinEntrypoint:
             timeout=60,
         )
         assert completed.returncode == 0, completed.stderr
-        assert "orchestrator 2.0.0" in completed.stdout
+        assert "orchestrator 3.0.0" in completed.stdout
 
     def test_bin_orchestrator_init_roundtrip(self, tmp_path: Path) -> None:
         completed = subprocess.run(
@@ -230,7 +230,7 @@ class TestPyproject:
 
         project = data["project"]
         assert project["name"] == "agentic-ai-orchestrator"
-        assert project["version"] == "2.0.0"
+        assert project["version"] == "3.0.0"
         assert project["scripts"]["orchestrator"] == "orchestrator.cli:main"
         assert any(dep.startswith("PyYAML") for dep in project["dependencies"])
 

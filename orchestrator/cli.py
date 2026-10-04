@@ -83,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version="orchestrator 2.0.0",
+        version="orchestrator 3.0.0",
     )
     parser.add_argument(
         "-v",

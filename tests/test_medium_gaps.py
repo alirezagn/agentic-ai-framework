@@ -711,10 +711,11 @@ class TestReadmeSynchronised:
     def readme(self) -> str:
         return (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-    def test_declares_v2(self, readme: str) -> None:
-        assert "**Framework Version:** 2.0.0" in readme
+    def test_declares_current_version(self, readme: str) -> None:
+        assert "**Framework Version:** 3.0.0" in readme
         assert "Production Ready" not in readme.split("**Framework Version:**")[0][-200:] or True
         assert "**Framework Version:** 1.0" not in readme
+        assert "**Framework Version:** 2.0" not in readme
 
     def test_reports_a_test_count(self, readme: str) -> None:
         claimed = re.findall(r"\*\*Test suite:\*\* (\d+) passing", readme)

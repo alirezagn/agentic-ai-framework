@@ -59,8 +59,8 @@ class TestGuideV2:
     def guide(self) -> str:
         return (REPO_ROOT / "ORCHESTRATOR_GUIDE.md").read_text(encoding="utf-8")
 
-    def test_guide_declares_v2(self, guide: str) -> None:
-        assert "**Version:** 2.0.0" in guide
+    def test_guide_declares_current_version(self, guide: str) -> None:
+        assert "**Version:** 3.0.0" in guide
 
     def test_guide_has_no_v11_api(self, guide: str) -> None:
         # v1.1 symbols/examples must be gone (mentioning them as "removed" is ok
