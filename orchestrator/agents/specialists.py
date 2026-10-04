@@ -151,6 +151,13 @@ class TestAgent(LLMAgent):
     # Prevent pytest from trying to collect this class as a test.
     __test__ = False
 
+    # test_agent delivers test code — the same fragility as software_agent
+    # (rerun-6 TASK-006: single-shot replies re-emitted whole test-file
+    # bodies, truncated three attempts in a row, oscillation refusal).
+    # The bounded session forbids file bodies per turn, so replies stay
+    # small and every change set is verified on disk between turns.
+    EDIT_SESSION_TURNS = 3
+
     SYSTEM_RULES = (
         "Test rules:\n"
         "- Map every test to requirement IDs; cover unit, integration and acceptance levels.\n"

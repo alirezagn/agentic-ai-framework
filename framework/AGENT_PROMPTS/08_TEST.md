@@ -52,6 +52,7 @@ deliver it — the Definition of Done checks the file on disk.
 - If the code under test needs a third-party import that is not installed, treat that as a missing `requirements.txt` entry to declare (and its setup command to document in the README) before running the suite
 - Request execution through `data.deploy`; a status is PASS only with an `executed: true` record whose exit code is 0
 - Run tests as `python3 -m pytest <paths>` (or ship a `tests/conftest.py` that inserts the project root into `sys.path`): the bare `pytest` console script does not put the project root on `sys.path`, so `import src...` fails with `ModuleNotFoundError` before a single test executes
+- A bounded multi-turn edit session is active: each turn returns only the next change set, small enough to avoid truncation — never a whole file body
 - No board and no toolchain means `test_status: "NOT RUN"` — never an invented number
 - Use only PASS, FAIL, BLOCKED or NOT RUN as test statuses
 - Report `data.acceptance_results` with expected, actual and evidence per test

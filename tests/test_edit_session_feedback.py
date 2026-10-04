@@ -421,3 +421,44 @@ class TestApplyFailureFeedbackStillQuotesContent:
         assert (project / "src" / "x.py").read_text(encoding="utf-8").strip().endswith(
             "VALUE = 2"
         )
+
+
+# ===========================================================================
+# Every code-delivery agent gets the bounded session
+# ===========================================================================
+
+
+class TestTestAgentDeliversThroughEditSessions:
+    """The single-shot truncation loop (sys-usage rerun 6, TASK-006).
+
+    ``test_agent`` was the one code-delivery agent still answering in a
+    single giant JSON: it re-emitted whole ``tests/test_monitor.py`` bodies,
+    overran the output cap on three consecutive attempts (each recovery
+    staged partial ``data.edit_buffers`` that could not be applied), and
+    the project oscillated into a loop-limit refusal. The software agent
+    never had this problem — its bounded edit session explicitly forbids
+    file bodies per turn — and the test agent writes the same kind of code,
+    so it now uses the same channel.
+    """
+
+    def test_test_agent_declares_bounded_edit_sessions(self) -> None:
+        from orchestrator.agents.specialists import TestAgent
+
+        assert TestAgent.EDIT_SESSION_TURNS == 3, (
+            "test_agent delivers code; a single-shot reply big enough to "
+            "hold a file body is exactly what truncated in rerun 6"
+        )
+
+    def test_session_instruction_forbids_file_bodies(self) -> None:
+        text = LLMAgent.EDIT_SESSION_INSTRUCTION
+        assert "no file bodies" in text
+        assert "data.edits" in text
+
+    def test_test_template_states_the_session(self) -> None:
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "framework"
+            / "AGENT_PROMPTS"
+            / "08_TEST.md"
+        ).read_text(encoding="utf-8")
+        assert "edit session" in template
