@@ -71,6 +71,12 @@ _FILE_MARKERS = (
     "summary/prose",
     "expected output",
 )
+#: The environment/stage rejection: the run really happened but could not
+#: prove anything (declared package not installed, verification target not
+#: produced yet). Re-delivering files is the wrong answer to it — the owner
+#: prepares the environment from the project files, the model only has to
+#: stop claiming a pass.
+_ENV_MARKERS = ("environment not ready",)
 
 _REMEDY_EVIDENCE = (
     "This is an EVIDENCE problem, not a file problem: no test can run in this "
@@ -79,6 +85,18 @@ _REMEDY_EVIDENCE = (
     '{"status": "completed", "summary": "<one line>", "data": {"test_status": '
     '"NOT RUN"}}. Keep the files exactly as they are — do not re-deliver them — '
     "and never claim a run you did not perform.\n"
+)
+_REMEDY_ENV = (
+    "This is an ENVIRONMENT/STAGE problem, not a file problem: the command "
+    "really ran but could not prove anything (a package declared in "
+    "requirements.txt is not installed here, or the check targets something "
+    "this task does not produce yet). Do NOT re-deliver or re-edit files and "
+    "do NOT claim the verification passed. Reply with the field the problem "
+    "asks for — "
+    '{"status": "completed", "summary": "<one line>", "data": {"test_status": '
+    '"NOT RUN"}} — naming in `warnings` what the project owner must prepare "'
+    "(README / requirements.txt, e.g. `pip install -r requirements.txt`) "
+    "before that check can be run.\n"
 )
 _REMEDY_INTERFACE = (
     "This is an IMPORT problem: either a name a file imports does not exist, "
@@ -120,9 +138,14 @@ def repair_remedies(problems: Sequence[str]) -> str:
     """The remedy block for this rejection: one block per problem class."""
     text = [str(problem) for problem in problems]
     remedies: List[str] = []
+    env = any(any(marker in item for marker in _ENV_MARKERS) for item in text)
     if any(any(marker in item for marker in _DECLARATION_MARKERS) for item in text):
         remedies.append(_REMEDY_DECLARE)
-    if any(any(marker in item for marker in _EVIDENCE_MARKERS) for item in text):
+    if env:
+        # It already says "report data.test_status=NOT RUN"; the generic
+        # evidence block would only repeat it.
+        remedies.append(_REMEDY_ENV)
+    elif any(any(marker in item for marker in _EVIDENCE_MARKERS) for item in text):
         remedies.append(_REMEDY_EVIDENCE)
     if any(any(marker in item for marker in _INTERFACE_MARKERS) for item in text):
         remedies.append(_REMEDY_INTERFACE)

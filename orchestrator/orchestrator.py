@@ -38,6 +38,7 @@ from .auto_plan import PLANNING_RULES, expand_implementation_stages
 from .checkpoint_manager import CheckpointManager
 from .context_monitor import tokens_for_output, utilization_for_output
 from .deploy_runner import STATUS_SKIPPED, DeployRecord, DeployRunner
+from .import_contract import _DISTRIBUTION_ALIASES, _declared_dependencies
 from .state_manager import (
     UNTRUSTED_TASK_FIELDS,
     StateError,
@@ -276,6 +277,91 @@ def _failure_excerpt(record: DeployRecord) -> str:
     if len(flat) > _FAILURE_TAIL_CHARS:
         flat = flat[-_FAILURE_TAIL_CHARS:]
     return f" — output: {flat}"
+
+
+#: Captured-output signatures that mean "the environment or the stage could
+#: not run this check", as opposed to "the delivered code failed it".
+_MISSING_MODULE_RE = re.compile(
+    r"(?:ModuleNotFoundError|ImportError): No module named ['\"]([^'\"]+)['\"]"
+)
+_PYTEST_MISSING_TARGET_RE = re.compile(r"file or directory not found:\s*(\S+)")
+_PY_MISSING_SCRIPT_RE = re.compile(r"can't open file ['\"]([^'\"]+)['\"]")
+
+
+def environment_not_ready_reason(
+    record: DeployRecord, task: Dict[str, Any], project: Path
+) -> Optional[str]:
+    """Why this executed record proves nothing about the delivery, or ``None``.
+
+    Two signatures, both read off the record's **real captured output** plus
+    the project's own ``requirements.txt`` — never off the model's claim, so
+    the fabrication refusal (GAP-CRIT-01) is untouched:
+
+    1. ``ModuleNotFoundError`` for a module the project *declares*: the
+       framework never installs anything (operator directive of 2026-10-03),
+       so the human project owner runs ``pip install -r requirements.txt``
+       after reading the project files. An *undeclared* module returns
+       ``None`` — that is the hallucinated-import class and must keep failing
+       the task.
+    2. a verification target that does not exist on disk and is not an output
+       of *this* task: sys-usage TASK-003 ran ``python3 -m pytest tests/``
+       before any test task had produced ``tests/``. When the target *is* an
+       expected output its absence is a delivery failure, and when it exists
+       on disk the message hides a different cause — neither is waived.
+
+    ``None`` therefore always means "report it exactly as before".
+    """
+    if not record.executed:
+        return None
+    text = f"{record.stderr_tail or ''}\n{record.stdout_tail or ''}"
+    if not text.strip():
+        return None
+
+    module_match = _MISSING_MODULE_RE.search(text)
+    if module_match:
+        module = module_match.group(1).split(".")[0]
+        lowered = module.lower()
+        declared = _declared_dependencies(Path(project))
+        if lowered in declared or _DISTRIBUTION_ALIASES.get(lowered) in declared:
+            return (
+                f"the verification needs '{module}', which is declared in "
+                "requirements.txt but is not installed in this environment "
+                "(the project owner installs it: pip install -r requirements.txt)"
+            )
+        return None
+
+    target_match = _PYTEST_MISSING_TARGET_RE.search(text) or _PY_MISSING_SCRIPT_RE.search(
+        text
+    )
+    if not target_match:
+        return None
+    raw = target_match.group(1).strip().rstrip("/")
+    if not raw:
+        return None
+    target_path = Path(raw)
+    if not target_path.is_absolute():
+        target_path = Path(record.cwd or project) / target_path
+    try:
+        if target_path.exists():
+            return None
+    except OSError:
+        return None
+    norm = raw.lstrip("./")
+    expected = {
+        str(item).strip().lstrip("./")
+        for item in (task.get("expected_outputs") or [])
+        if isinstance(item, str) and item.strip()
+    }
+    related = any(
+        exp == norm or exp.startswith(norm + "/") or norm.startswith(exp + "/")
+        for exp in expected
+    )
+    if related:
+        return None
+    return (
+        f"the verification targets '{norm}', which does not exist and is not "
+        "an output of this task (the project is not at that stage yet)"
+    )
 
 
 class MasterOrchestrator:
@@ -1764,19 +1850,64 @@ class MasterOrchestrator:
             return problems
 
         failing = [record for record in ground_truth if record.exit_code != 0]
-        if failing:
-            detail = ", ".join(
-                f"{record.command} exited {record.exit_code}"
-                f"{_failure_excerpt(record)}"
-                for record in failing
+        # Environment/stage classification (see environment_not_ready_reason):
+        # computed once per failing record, off the captured output only.
+        blocked_reasons: Dict[int, str] = {}
+        for record in failing:
+            reason = environment_not_ready_reason(
+                record, task, Path(self.project_path)
             )
-            problems.append(f"executed verification failed: {detail}")
-
+            if reason:
+                blocked_reasons[id(record)] = reason
+        real_failures = [record for record in failing if id(record) not in blocked_reasons]
         mismatched = [
             record
             for record in ground_truth
-            if record.expect_matched is False
+            if record.expect_matched is False and id(record) not in blocked_reasons
         ]
+
+        if (
+            failing
+            and not real_failures
+            and not mismatched
+            and not claims
+        ):
+            # Every failure died on the environment or on the stage, and the
+            # output claims nothing: this is the honest negative, recorded as
+            # NOT RUN so the owner sees the precondition instead of a false
+            # FAILED. The records stay on disk exactly as they ran.
+            reason = blocked_reasons[id(failing[0])]
+            if output is not None:
+                data = dict(output.data) if isinstance(output.data, dict) else {}
+                data["test_status"] = config.TEST_STATUS_NOT_RUN
+                output.data = data
+                output.warnings = list(output.warnings) + [
+                    f"environment not ready: {reason} — recorded as "
+                    f'{config.TEST_STATUS_NOT_RUN}, not as a failed delivery'
+                ]
+            return problems
+
+        if failing:
+            if not real_failures:
+                # Same environment/stage cause, but the output also claims a
+                # passing run: a claim is never excused by the environment,
+                # so the rejection stands until the claim is withdrawn.
+                reason = blocked_reasons[id(failing[0])]
+                problems.append(
+                    "environment not ready: "
+                    f"{reason}; this run proves nothing about the delivered "
+                    "files — report "
+                    f'data.test_status="{config.TEST_STATUS_NOT_RUN}" and do '
+                    "not claim the verification passed"
+                )
+            else:
+                detail = ", ".join(
+                    f"{record.command} exited {record.exit_code}"
+                    f"{_failure_excerpt(record)}"
+                    for record in real_failures
+                )
+                problems.append(f"executed verification failed: {detail}")
+
         if mismatched:
             detail = ", ".join(
                 f"{record.command} expected {record.declared_expect}"
