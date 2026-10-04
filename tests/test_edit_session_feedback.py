@@ -462,3 +462,34 @@ class TestTestAgentDeliversThroughEditSessions:
             / "08_TEST.md"
         ).read_text(encoding="utf-8")
         assert "edit session" in template
+
+
+class TestDocumentationAgentDeliversThroughEditSessions:
+    """A search-mismatch hard fail with no feedback turn (rerun 6, TASK-007).
+
+    After TASK-006 completed via its declared no-op, TASK-007 dispatched
+    ``documentation_agent`` — a single-shot agent — and its
+    ``data.edits["README.md"]`` search matched 0 times: the reply guessed
+    the README body instead of quoting it, and with no further turn the
+    task FAILED on attempt 1 even though the file on disk already
+    satisfied both acceptance criteria. The bounded session feeds the
+    apply error back with the authoritative file content, exactly as it
+    does for the software and test agents.
+    """
+
+    def test_documentation_agent_declares_bounded_edit_sessions(self) -> None:
+        from orchestrator.agents.specialists import DocumentationAgent
+
+        assert DocumentationAgent.EDIT_SESSION_TURNS == 3, (
+            "documentation_agent patches real files (README.md); a "
+            "search-mismatch reply must get a feedback turn, not a hard fail"
+        )
+
+    def test_documentation_template_states_the_session(self) -> None:
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "framework"
+            / "AGENT_PROMPTS"
+            / "10_DOCUMENTATION.md"
+        ).read_text(encoding="utf-8")
+        assert "edit session" in template

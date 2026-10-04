@@ -49,6 +49,8 @@ deliver it — the Definition of Done checks the file on disk.
 
 ## Rules (system rules)
 - Deliver documents through `data.documents`, keyed by the exact expected output path
+- A bounded multi-turn edit session is active: each turn returns only the next change set, small enough to avoid truncation — never a whole file body; a patch whose `search` does not match comes back with the authoritative file content
+- An `EXISTS` deliverable that already satisfies the task is declared with `data.no_change_needed = ["<path>"]` instead of being rewritten; a change still goes through `data.edits`, a `MISSING` one through `data.documents`
 - Never invent executed results; you may cite a transcript that exists under `docs/evidence/`
 - Report `data.acceptance_results` for every criterion you checked
 - Follow the layouts in `framework/TEMPLATES/` rather than inventing one

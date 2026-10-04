@@ -286,6 +286,14 @@ def _normalize_review_outcome(value: Any) -> Optional[str]:
 class DocumentationAgent(LLMAgent):
     AGENT_ID = "documentation_agent"
 
+    # documentation_agent patches real files (README.md, docs/*.md).
+    # Rerun-6 TASK-007: its single-shot data.edits search matched 0 times
+    # — a guessed body instead of the quoted one — and with no further
+    # turn the task FAILED on attempt 1 although the file on disk already
+    # satisfied both acceptance criteria. The session feeds the apply
+    # error back with the authoritative content instead.
+    EDIT_SESSION_TURNS = 3
+
     SYSTEM_RULES = (
         "Documentation rules:\n"
         "- Documentation follows the real implementation, never obsolete assumptions.\n"
