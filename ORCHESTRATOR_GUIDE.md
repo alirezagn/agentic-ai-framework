@@ -286,11 +286,16 @@ data-heavy replies; recovery is a safety net, not a token budget.
 
 **Delivery manifest (G22):** the agent never guesses the delivery channel.
 At payload build, `relevant_context()` adds a `delivery_manifest` entry
-classifying every `expected_outputs` path — `EXISTS` (update with
-`data.edits` only), `MISSING` (create with `data.documents`), or a `docs/`
-deliverable — and the same **task-start snapshot**
-(`preexisting_expected()`) is threaded through the edit session,
-artifact materialization and every dispatch-time DoD check. Consequences:
+classifying every `expected_outputs` path — `EXISTS` (a change goes through
+`data.edits`; a file whose current content already satisfies the task is
+declared with `data.no_change_needed = ["<path>"]` instead of being edited
+for the sake of the channel — the declaration waives the prose-wrapper
+shares-line check for that path, syncs the `docs/` mirror with the real
+file, and is still gated by acceptance evidence at dispatch), `MISSING`
+(create with `data.documents`), or a `docs/` deliverable — and the same
+**task-start snapshot** (`preexisting_expected()`) is threaded through the
+edit session, artifact materialization and every dispatch-time DoD check.
+Consequences:
 `data.documents` actually **creates a missing expected file at its real
 project path** (previously it only wrote the `docs/` mirror, so no channel
 could create a new source file at all), it never touches files that
@@ -911,7 +916,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1287 passed
+python3 -m pytest -q          # full suite — 1293 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)
