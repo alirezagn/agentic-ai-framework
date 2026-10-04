@@ -538,6 +538,7 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 | task `FAILED` (agent/validation error) | read the printed error, fix the inputs or model output, then `retry TASK-005 --reason "..."` — the same hint appears in `run` output |
 | `agent output looks truncated` / reply cut mid-stream | local recovery runs first: a reassembled reply continues with a `recovered from a truncated payload` warning, a cut inside a file body returns `blocked` with a partial `data.edit_buffers` (nothing written to disk), and only an unsalvageable reply falls through to the one repair re-ask. Raise `ORCHESTRATOR_LLM_MAX_TOKENS` (§8) for data-heavy replies, then `retry TASK-00X` |
 | memory/context grows forever | compaction folds MEMORY.md and resets utilization at the 70% threshold |
+| `pytest` fails with `ModuleNotFoundError: No module named 'src'`, or `import file mismatch` | the project has no `pytest.ini`, so a bare `pytest` adopted an enclosing repository's config and the `docs/` artifact mirror was collected twice. `init` writes one (`pythonpath = .`, `testpaths = tests`, `norecursedirs = docs`); add it by hand for a project created before this, or run `python3 -m pytest tests/` which works either way. Do **not** fix it with a `conftest.py` — a project under `projects/` shadows the conftest module of the repo that created it |
 | exit 4 | pending `PROPOSED_CHANGE` → `approve_decision(...)` |
 | `DoD unmet: ...` | materialize `expected_outputs` into `docs/`, fix review findings — the first rejection triggers **one automatic repair call**; if it still fails, `retry TASK-003 --reason "use data.edits on <file>"` (the reason reaches the next prompt). Two consecutive DoD/schema rejections auto-waive the task (see below); an empty `acceptance_criteria` list no longer fails — default criteria are ingested and persisted |
 | task shows `WAIVED` | the validation circuit-breaker fired after two consecutive DoD/schema rejections (crashes never waive) so dependents could proceed without a human — the WARNING is in `CURRENT_STATE.md`. `reopen TASK-00X --reason "..."` puts it back to READY (counters cleared) if you want the work finished |
@@ -566,6 +567,6 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1306 passed
+python3 -m pytest -q      # 1323 passed
 ruff check .              # lint — 0 errors (install: python3 -m pip install -e .[dev])
 ```

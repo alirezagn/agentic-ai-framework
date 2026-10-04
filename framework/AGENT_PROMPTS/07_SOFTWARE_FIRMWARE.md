@@ -55,7 +55,7 @@ deliver it — the Definition of Done checks the file on disk.
 - A bounded multi-turn edit session is active: each turn returns only the next change set, small enough to avoid truncation
 - EXISTS deliverables go through `data.edits` when they must change, or `data.no_change_needed = ["<path>"]` when the current content already satisfies the task; MISSING ones go through `data.documents`
 - Request every build and every test through `data.deploy` — a claimed result with no executed record is rejected by the Definition of Done
-- Run tests as `python3 -m pytest <paths>` (or ship a `tests/conftest.py` that inserts the project root into `sys.path`): the bare `pytest` console script does not put the project root on `sys.path`, so `import src...` fails with `ModuleNotFoundError` before a single test executes
+- Run tests as `python3 -m pytest <paths>`; `orchestrator init` writes a project-root `pytest.ini` (`pythonpath = .`, `norecursedirs = docs`) so the bare `pytest` console script works too — it does not put the project root on `sys.path`, so without that file `import src...` fails with `ModuleNotFoundError` before a single test executes. Do NOT add a `conftest.py` for this: a project under `projects/` would shadow the conftest module of the repository that created it
 - Report `data.acceptance_results`; an honest FAIL is always better than an omitted field
 
 ## Dependencies (declared and documented, never installed)

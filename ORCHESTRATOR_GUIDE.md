@@ -225,6 +225,23 @@ print(orch.checkpoints.print_checkpoint_list())
 | `CHANGELOG.md` | State-file history | every state write |
 | `docs/` | Materialized agent artifacts (`REVIEW-<task>.md`, …) | agents (`_materialize_artifacts`) |
 | `docs/evidence/<task>/` | Execution transcripts (`NN-<command>.json`) for anything run via `data.deploy` | `DeployRunner.write_evidence` |
+| `pytest.ini` | Test-collection config: `pythonpath = .`, `testpaths = tests`, `norecursedirs = docs` | `orchestrator init` |
+
+**Why `pytest.ini` is scaffolded.** A bare `pytest` run does not put the
+project root on `sys.path` (`python3 -m pytest` does), so pytest searches
+upwards for a config file and can adopt one belonging to a *different* project
+that merely contains this directory. The result is a rootdir outside the
+project, an enclosing `testpaths` applied to a tree it does not own, and
+`from src.module import Thing` failing with `ModuleNotFoundError` before a
+single test executes. The file also excludes `docs/`, whose artifact mirror
+would otherwise be collected as a duplicate of the real test module
+(`import file mismatch`). An existing `pytest.ini` is never overwritten.
+
+It is deliberately **not** a `conftest.py`: a generated project lives at
+`projects/<name>`, inside the repository that ran `init`, and a second
+`conftest.py` there shadows that repository's conftest *module* — measured on
+this repo, 27 suites failing with `ImportError: cannot import name
+'build_test_project' from 'conftest'`.
 
 **Authoring (G16):** agents deliver real file changes through their payload —
 `data.documents["<path>"]` carries the full content of a new/short file, and
@@ -944,7 +961,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1306 passed
+python3 -m pytest -q          # full suite — 1323 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)
