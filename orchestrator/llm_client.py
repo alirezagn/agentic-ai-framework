@@ -1,11 +1,17 @@
 """LLMClient — HTTP backends that turn specialist-agent prompts into model calls.
 
-Three providers are supported, resolved from :mod:`orchestrator.config`
+Four providers are supported, resolved from :mod:`orchestrator.config`
 ``SYSTEM_KEYS`` so no credential is ever hard-coded:
 
 * ``anthropic``  — Messages API (``ANTHROPIC_API_KEY``),
 * ``ollama``     — local server (``OLLAMA_BASE_URL``), native or OpenAI-compatible,
-* ``openrouter`` — OpenAI-compatible fallback (``OPENROUTER_API_KEY``).
+* ``openrouter`` — OpenAI-compatible fallback (``OPENROUTER_API_KEY``),
+* ``gemini``     — Google ``generateContent`` (``GEMINI_API_KEY``, or the
+  ``GOOGLE_API_KEY`` alias).
+
+Discovery order is fixed and the optional providers are appended, so adding one
+never redirects a project that is already configured. Every key is
+``required=False``: an unconfigured provider must leave behaviour untouched.
 
 The HTTP transport is a plain callable so tests can inject a fake without any
 network access::
@@ -30,18 +36,26 @@ from . import config
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_OLLAMA = "ollama"
 PROVIDER_OPENROUTER = "openrouter"
-PROVIDERS: Tuple[str, ...] = (PROVIDER_ANTHROPIC, PROVIDER_OLLAMA, PROVIDER_OPENROUTER)
+PROVIDER_GEMINI = "gemini"
+PROVIDERS: Tuple[str, ...] = (
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENROUTER,
+    PROVIDER_GEMINI,
+)
 
 DEFAULT_MODELS: Dict[str, str] = {
     PROVIDER_ANTHROPIC: "claude-sonnet-4-5",
     PROVIDER_OLLAMA: "qwen2.5-coder:14b",
     PROVIDER_OPENROUTER: "anthropic/claude-sonnet-4.5",
+    PROVIDER_GEMINI: "gemini-2.5-pro",
 }
 
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 # transport(method, url, headers, body, timeout) -> (status_code, response_bytes)
 Transport = Callable[[str, str, Dict[str, str], bytes, float], Tuple[int, bytes]]
@@ -176,9 +190,14 @@ class LLMClient:
             return PROVIDER_OPENROUTER
         if config.SYSTEM_KEYS.resolve("ollama_base_url"):
             return PROVIDER_OLLAMA
+        if config.SYSTEM_KEYS.resolve("gemini_api_key") or config.SYSTEM_KEYS.resolve(
+            "gemini_api_key_alias"
+        ):
+            return PROVIDER_GEMINI
         raise LLMUnavailableError(
-            "No LLM provider configured. Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY "
-            "or OLLAMA_BASE_URL (or ORCHESTRATOR_LLM_PROVIDER) and retry."
+            "No LLM provider configured. Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, "
+            "GEMINI_API_KEY (or GOOGLE_API_KEY) or OLLAMA_BASE_URL "
+            "(or ORCHESTRATOR_LLM_PROVIDER) and retry."
         )
 
     @staticmethod
@@ -199,7 +218,21 @@ class LLMClient:
             return config.SYSTEM_KEYS.resolve("anthropic_api_key")
         if self.provider == PROVIDER_OPENROUTER:
             return config.SYSTEM_KEYS.resolve("openrouter_api_key")
+        if self.provider == PROVIDER_GEMINI:
+            # GOOGLE_API_KEY is the alias Google's own tooling expects, so an
+            # operator who already exports it needs no second variable.
+            return config.SYSTEM_KEYS.resolve(
+                "gemini_api_key"
+            ) or config.SYSTEM_KEYS.resolve("gemini_api_key_alias")
         return None
+
+    def _gemini_url(self) -> str:
+        base = (
+            self._base_url
+            or os.environ.get("ORCHESTRATOR_LLM_BASE_URL")
+            or GEMINI_BASE_URL
+        )
+        return base.rstrip("/")
 
     def _ollama_url(self) -> str:
         if self._base_url:
@@ -226,6 +259,8 @@ class LLMClient:
         }
         if self.provider == PROVIDER_ANTHROPIC:
             return self._complete_anthropic(system, messages, **kwargs)
+        if self.provider == PROVIDER_GEMINI:
+            return self._complete_gemini(system, messages, **kwargs)
         return self._complete_openai_compatible(system, messages, **kwargs)
 
     def complete_json(
@@ -379,6 +414,73 @@ class LLMClient:
             raw=data,
         )
 
+    def _complete_gemini(
+        self, system: str, messages: List[Dict[str, str]], **kwargs: Any
+    ) -> LLMResult:
+        """Google Gemini ``generateContent``.
+
+        Not an OpenAI-shaped endpoint: the request uses ``contents`` /
+        ``systemInstruction`` / ``generationConfig`` and the reply arrives in
+        ``candidates[].content.parts[].text``. Reusing the OpenAI path here
+        would silently produce an empty answer on every call.
+
+        The key travels in the ``x-goog-api-key`` header rather than a
+        ``?key=`` query parameter, which would end up in proxy and server logs.
+        """
+        api_key = self._key()
+        if not api_key:
+            raise LLMUnavailableError(
+                "gemini provider requires GEMINI_API_KEY (or GOOGLE_API_KEY)"
+            )
+        model = kwargs.get("model") or self.model
+        url = f"{self._gemini_url()}/models/{model}:generateContent"
+        body = json.dumps(
+            {
+                "contents": [
+                    {
+                        "role": "model" if entry.get("role") == "assistant" else "user",
+                        "parts": [{"text": str(entry.get("content") or "")}],
+                    }
+                    for entry in messages
+                ],
+                "systemInstruction": {"parts": [{"text": system or ""}]},
+                "generationConfig": {
+                    "temperature": kwargs.get("temperature", self.temperature),
+                    "maxOutputTokens": kwargs.get("max_tokens", self.max_tokens),
+                    # Hybrid reasoning models otherwise spend the whole output
+                    # budget on internal reasoning and can return no visible
+                    # text. Same intent as the Ollama path's `think: false`.
+                    "thinkingConfig": {"thinkingBudget": 0},
+                },
+            }
+        ).encode("utf-8")
+        status, payload = self.transport(
+            "POST",
+            url,
+            {"content-type": "application/json", "x-goog-api-key": api_key},
+            body,
+            self.timeout,
+        )
+        if status < 200 or status >= 300:
+            raise LLMClientError(
+                f"Gemini API returned HTTP {status}: "
+                f"{_gemini_error_text(payload)}",
+                status=status,
+            )
+        data = _decode_json(payload, "Gemini API")
+        return LLMResult(
+            text=_gemini_reply_text(data),
+            model=str(data.get("modelVersion") or model),
+            provider=PROVIDER_GEMINI,
+            usage={
+                "input_tokens": int((data.get("usageMetadata") or {}).get("promptTokenCount", 0) or 0),
+                "output_tokens": int(
+                    (data.get("usageMetadata") or {}).get("candidatesTokenCount", 0) or 0
+                ),
+            },
+            raw=data,
+        )
+
     def _openai_call(
         self,
         url: str,
@@ -420,6 +522,58 @@ class LLMClient:
         )
 
 
+def _gemini_error_text(payload: bytes) -> str:
+    """The server's own error message, not a wall of escaped JSON."""
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return payload[:300].decode("utf-8", errors="replace")
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+    return json.dumps(data)[:300]
+
+
+def _gemini_reply_text(data: Dict[str, Any]) -> str:
+    """Concatenate the visible text of the first viable candidate.
+
+    A reply is routinely split across several parts, so reading only
+    ``parts[0]`` truncates it mid-JSON. Parts flagged ``thought`` are skipped:
+    they are internal reasoning, not answer text.
+    """
+    candidates = data.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        raise LLMClientError("Gemini API returned no candidates")
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        parts = ((candidate.get("content") or {}).get("parts")) or []
+        text = "".join(
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict) and not part.get("thought")
+        )
+        if text:
+            return text
+    # Every candidate carried reasoning only: the output budget went to
+    # thinking. Returning "" would look like a clean empty delivery, so this
+    # has to be loud — it is the same class as a truncated reply.
+    reasons = sorted(
+        {
+            str(item.get("finishReason"))
+            for item in candidates
+            if isinstance(item, dict) and item.get("finishReason")
+        }
+    )
+    detail = f" (finishReason: {', '.join(reasons)})" if reasons else ""
+    raise LLMClientError(
+        "Gemini API returned no text content — the reply held reasoning only, "
+        f"which usually means the output budget was spent on thinking{detail}"
+    )
+
+
 def get_client(**kwargs: Any) -> LLMClient:
     """Convenience factory that discovers the provider from the environment."""
     return LLMClient(**kwargs)
@@ -436,5 +590,6 @@ __all__ = [
     "PROVIDER_ANTHROPIC",
     "PROVIDER_OLLAMA",
     "PROVIDER_OPENROUTER",
+    "PROVIDER_GEMINI",
     "DEFAULT_MODELS",
 ]

@@ -6,7 +6,8 @@ declares its id and operating rules, loads its framework specification
 JSON answer back into an :class:`AgentOutput`.
 
 Offline tests inject ``llm_client=FakeLLMClient(...)``; production discovers
-ANTHROPIC_API_KEY / OPENROUTER_API_KEY / OLLAMA_BASE_URL from the environment.
+ANTHROPIC_API_KEY / OPENROUTER_API_KEY / GEMINI_API_KEY / OLLAMA_BASE_URL
+from the environment.
 """
 
 from __future__ import annotations

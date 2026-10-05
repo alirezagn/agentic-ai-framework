@@ -112,6 +112,26 @@ def build_system_keys() -> SystemKeys:
     )
     registry.register(
         SystemKey(
+            key="gemini_api_key",
+            env_var="GEMINI_API_KEY",
+            description=(
+                "API key for the optional Google Gemini provider. GOOGLE_API_KEY is "
+                "accepted as an alias. Never required: leaving it unset must not "
+                "affect a project on any other backend."
+            ),
+            required=False,
+        )
+    )
+    registry.register(
+        SystemKey(
+            key="gemini_api_key_alias",
+            env_var="GOOGLE_API_KEY",
+            description="Alias for GEMINI_API_KEY, the name Google's own tooling uses.",
+            required=False,
+        )
+    )
+    registry.register(
+        SystemKey(
             key="checkpoint_signing_key",
             env_var="CHECKPOINT_SIGNING_KEY",
             description=(
@@ -707,6 +727,8 @@ TELEMETRY_REDACT_KEYS = (
     "apikey",
     "authorization",
     "checkpoint_signing_key",
+    "gemini_api_key",
+    "gemini_api_key_alias",
     "llm_api_key",
     "openrouter_api_key",
     "password",

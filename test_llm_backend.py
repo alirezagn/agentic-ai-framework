@@ -81,6 +81,8 @@ def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "ANTHROPIC_API_KEY",
         "OPENROUTER_API_KEY",
         "OLLAMA_BASE_URL",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
         "ORCHESTRATOR_LLM_PROVIDER",
         "ORCHESTRATOR_LLM_MODEL",
     ):
@@ -113,6 +115,36 @@ class TestLLMClientDiscovery:
     def test_unknown_provider_rejected(self) -> None:
         with pytest.raises(LLMUnavailableError):
             LLMClient(provider="bogus")
+
+    def test_discovery_order_is_unchanged_by_the_optional_gemini_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gemini is appended, so no existing resolution moves.
+
+        A provider added ahead of the others would silently redirect projects
+        for anyone who happens to export the new variable. Pinned because that
+        failure is invisible: those projects would just start talking to a
+        different vendor.
+        """
+        monkeypatch.setenv("GEMINI_API_KEY", "g-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+        assert LLMClient.discover_provider() == "anthropic"
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://host:11434")
+
+        assert LLMClient.discover_provider() == "ollama"
+
+    def test_every_registered_key_is_optional(self) -> None:
+        """No provider key may become required.
+
+        ``build_system_keys`` feeds what the runtime treats as mandatory, so a
+        ``required=True`` on a new provider would fail startup for every
+        operator who does not use it.
+        """
+        for name in ("anthropic_api_key", "openrouter_api_key", "gemini_api_key"):
+            assert config.SYSTEM_KEYS.get(name).required is False, name
 
     def test_max_tokens_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ORCHESTRATOR_LLM_MAX_TOKENS", "8192")
