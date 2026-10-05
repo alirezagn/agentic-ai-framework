@@ -62,6 +62,23 @@
 > `src/data_layer.py` — the method-name mismatch predicted from the truncated
 > reply did not materialise.
 >
+> **Gemini provider — DONE (2026-10-05, 11:20–12:05).** `e62f886` fix +
+> `97c6434` docs. A fourth backend, appended to discovery order and
+> **required=False**. `GOOGLE_API_KEY` accepted as an alias via its own registry
+> entry (a `SystemKey` holds one env var). Two things the wiring forced, both
+> pinned because the alternative fails *silently*: multi-part replies must be
+> concatenated (reading `parts[0]` truncates mid-JSON — precisely what
+> truncation recovery exists to clean up), and a reply carrying only
+> `thought` parts must raise rather than return `""`, since an empty string
+> looks like a clean no-op delivery. `thinkingConfig.thinkingBudget: 0`
+> mirrors the Ollama `think: false`; the key rides in `x-goog-api-key`, never
+> `?key=` (proxy logs); `maxOutputTokens` is always sent. Both key names added
+> to `TELEMETRY_REDACT_KEYS` — the key was registered but **not** being
+> redacted from telemetry, which writes JSONL to disk. Optionality is pinned by
+> `test_unavailable_without_any_keys` plus a new
+> `test_discovery_order_is_unchanged_by_the_optional_gemini_key`.
+> Suite 1323 → **1351**, all green (207.59 s); ruff 0.
+>
 > Previous batch — "env/stage-not-ready", DONE (2026-10-04, 19:40–20:35).**
 > Closing the untested cell that killed the fresh sys-usage run (TASK-003
 > declared `python3 -m pytest tests/` before `tests/` existed → `exit 4`,
@@ -129,9 +146,10 @@
   `HOW_TO_USE.md` is the operator walkthrough. Release tags in order:
   `v1.0.0` (`da210ea`, 2026-09-29), `v2.0.0` (`aa9a80e`, 2026-10-02),
   **`v3.0.0` (HEAD, 2026-10-04)** — older tags are never moved.
-- **Suite: 1323 collected, 1323 passed / 0 failed** — `python3 -m pytest -q`,
-  latest run 2026-10-05 **206.66 s, exit 0** after the project-collection batch
-  (+17 tests); the preceding run 2026-10-04 was 1306 at **196.40 s** after the
+- **Suite: 1351 collected, 1351 passed / 0 failed** — `python3 -m pytest -q`,
+  latest run 2026-10-05 **207.59 s, exit 0** after the Gemini provider batch
+  (+28 tests); earlier the same day: 1323 at **206.66 s** (project collection,
+  +17) and 1306 at **196.40 s** on 2026-10-04 after the
   env/stage-not-ready batch (+11 tests). The number the four docs assert is the
   *collected* count (1323) and is current. Note the count only means anything
   while collection *succeeds*: an untracked generated project under `projects/`
@@ -219,7 +237,9 @@
    batch, 2026-10-05): `fe1c2e9` fix (project-root `pytest.ini` at `init`, repo
    docs-guard corrected, untracked generated projects excluded from
    collection, +17 tests → 1323), `417da1a` docs (layout table + HOW_TO_USE
-   row + the `07`/`08` contracts, counts 1306 → 1323), and this memory commit.
+   row + the `07`/`08` contracts, counts 1306 → 1323). Then (Gemini provider,
+   2026-10-05): `e62f886` fix (+28 tests → 1351), `97c6434` docs, and this
+   memory commit.
 - **An audit was performed** (`ARCHITECTURE_COMPLIANCE_AUDIT.md`, 62 findings:
   9 Critical / 18 High / 21 Medium / 14 Low). It is the finding of record; the
   status table below is the remediation state against it.
@@ -630,10 +650,10 @@ kept as the record of what was wrong, not as current state.
   genuinely corrupt, not that the code is wrong.
 - **OPEN-2 — counts current.** The four consistency-checked docs
   (`ORCHESTRATOR_GUIDE.md`, `HOW_TO_USE.md`, `README.md`, `review_gaps.md`)
-  are asserted against `pytest --collect-only` and are at **1323**
+  are asserted against `pytest --collect-only` and are at **1351**
   (1103 → 1160 → 1185 → 1191 → 1209 → 1213 → 1224 → 1238 → 1245 → 1263 →
-  1266 → 1284 → 1287 → 1293 → 1295 → 1306 → **1323** as batches added tests;
-  last re-collected 2026-10-05 after the project-collection batch), so
+  1266 → 1284 → 1287 → 1293 → 1295 → 1306 → 1323 → **1351** as batches added
+  tests; last re-collected 2026-10-05 after the Gemini provider batch), so
   `TestCountsConsistentAcrossDocs` is green. Still stale:
   `ARCHITECTURE_COMPLIANCE_AUDIT.md:8` says "has since grown to 963 tests"
   (findings-of-record doc, deliberately untouched).
@@ -1088,6 +1108,14 @@ kept as the record of what was wrong, not as current state.
       `pytest.ini` is never overwritten. Tests:
       `tests/test_project_collection.py` (13),
       `tests/test_docs_collection_guard.py` (4).
+  17. **Gemini is an optional fourth provider** (2026-10-05, `e62f886`) —
+      appended to discovery order, `required=False`, `GOOGLE_API_KEY` accepted
+      as an alias. `generateContent` needs its own path (not the OpenAI shape),
+      replies are concatenated across `parts[]`, `thinkingBudget: 0` mirrors
+      the Ollama `think: false`, and both key names are in
+      `TELEMETRY_REDACT_KEYS` — they were registered but not redacted, and
+      telemetry writes JSONL to disk. Tests: `tests/test_gemini_backend.py`
+      (26).
 
 
 ---
