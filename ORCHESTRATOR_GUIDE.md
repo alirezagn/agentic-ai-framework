@@ -690,8 +690,8 @@ abuse the capability:
   containment-checked.
 - **Scrubbed child environment** — only `PATH`, `HOME`, locale and a few
   similar variables are passed, and proxies are dropped. `ANTHROPIC_API_KEY`,
-  `OPENROUTER_API_KEY` and `CHECKPOINT_SIGNING_KEY` are **not** readable by any
-  spawned build script.
+  `OPENROUTER_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY` and
+  `CHECKPOINT_SIGNING_KEY` are **not** readable by any spawned build script.
 - **Bounded output and time** — a per-stream byte cap keeping the *tail* (where
   build failures are legible), with truncation reported rather than silent, and
   a hard timeout.
@@ -783,13 +783,14 @@ also auto-loads `./.env`, e.g. the repo's Ollama preset in `.env.example`):
 
 | Variable | Purpose |
 |---|---|
-| `ORCHESTRATOR_LLM_PROVIDER` | `anthropic` \| `ollama` \| `openrouter` (auto-detected from keys) |
+| `ORCHESTRATOR_LLM_PROVIDER` | `anthropic` \| `ollama` \| `openrouter` \| `gemini` (auto-detected from keys) |
 | `ORCHESTRATOR_LLM_MODEL` | Model id (project default: `gemma4:12b`) |
 | `ORCHESTRATOR_LLM_MAX_TOKENS` | Output-token budget per completion (default `4096`; raise for data-heavy replies — a cut reply is first run through local truncation recovery, and only what that cannot salvage fails validation with an explicit "looks truncated" error) |
 | `ORCHESTRATOR_LLM_NUM_CTX` | Ollama context window for `num_ctx` (default `16384`; the server default of 4096 silently caps prompt+output and truncates JSON — native `/api/chat` only) |
 | `ORCHESTRATOR_LLM_TIMEOUT` | Per-request timeout in seconds (default `120`; raise for slow/busy servers) |
 | `ANTHROPIC_API_KEY` | Enables `anthropic` |
 | `OPENROUTER_API_KEY` | Enables `openrouter` |
+| `GEMINI_API_KEY` | Enables `gemini`. Optional — `GOOGLE_API_KEY` is accepted as an alias. Never required; leaving it unset changes nothing for a project on another backend |
 | `OLLAMA_BASE_URL` | Project default: `http://192.168.0.200:11434` (append `/v1` for OpenAI-compat) |
 | `ORCHESTRATOR_CONTEXT_WINDOW_TOKENS` | Context window for utilization math |
 | `ORCHESTRATOR_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default `INFO`; `-v` / `-q` override) |
@@ -961,7 +962,7 @@ print(report.verdict.value, report.detail, report.key_id)
 ## TESTING
 
 ```bash
-python3 -m pytest -q          # full suite — 1323 passed
+python3 -m pytest -q          # full suite — 1351 passed
 python3 -m pytest test_derived_state.py -q
 python3 -m pytest tests/ -q   # security/regression suites
 ruff check .                  # lint — 0 errors (baseline pinned in pyproject.toml)

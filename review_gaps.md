@@ -415,7 +415,7 @@ the runtime (checkpoints are the persistence mechanism).
 
 | Finding | Status |
 |---|---|
-| 1 LLM backend | ✅ `llm_client.py` (anthropic/ollama/openrouter, injectable transport) |
+| 1 LLM backend | ✅ `llm_client.py` (anthropic/ollama/openrouter/gemini, injectable transport) |
 | 2 Parallel dispatch | ✅ `--max-concurrent`, `_state_lock`, ThreadPoolExecutor |
 | 3 Specialist agents | ✅ 10 ids registered (requirements…documentation) |
 | 4 DoD / review flow | ✅ wired (`_run_pending_reviews`, DoD gate) — remaining nuance in B3 |
@@ -441,7 +441,7 @@ the runtime (checkpoints are the persistence mechanism).
 ## G. Verification after remediation
 
 ```bash
-python3 -m pytest -q                    # 1323 passed
+python3 -m pytest -q                    # 1351 passed
 grep -n "PHASES\|phase_index" orchestrator/config.py      # A1
 grep -n "append_task\|relax_dependency" orchestrator/state_manager.py   # A2/A6
 grep -n "detect_decision_conflicts\|detect_stale_blocks" orchestrator/supervisor.py  # A3

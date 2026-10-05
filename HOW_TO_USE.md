@@ -364,9 +364,9 @@ Equivalent shell exports (override the file):
 
 ```bash
 export OLLAMA_BASE_URL=http://192.168.0.200:11434   # + /v1 for OpenAI-compat mode
-export ORCHESTRATOR_LLM_PROVIDER=ollama        # or anthropic / openrouter
+export ORCHESTRATOR_LLM_PROVIDER=ollama        # or anthropic / openrouter / gemini
 export ORCHESTRATOR_LLM_MODEL=gemma4:12b
-# export ANTHROPIC_API_KEY=...   /   OPENROUTER_API_KEY=...
+# export ANTHROPIC_API_KEY=...   /   OPENROUTER_API_KEY=...   /   GEMINI_API_KEY=...
 export ORCHESTRATOR_CONTEXT_WINDOW_TOKENS=128000
 ```
 
@@ -567,6 +567,6 @@ $EDITOR projects/my-project/TASKS.yaml              # define work
 More: `meta/TROUBLESHOOTING.md`. Verify your install with:
 
 ```bash
-python3 -m pytest -q      # 1323 passed
+python3 -m pytest -q      # 1351 passed
 ruff check .              # lint — 0 errors (install: python3 -m pip install -e .[dev])
 ```
